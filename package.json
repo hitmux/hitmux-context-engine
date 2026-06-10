@@ -1,0 +1,43 @@
+{
+    "name": "hitmux-context-engine",
+    "version": "0.1.14",
+    "description": "A powerful code indexing tool with multi-platform support",
+    "private": true,
+    "scripts": {
+        "build": "pnpm -r --filter='./packages/*' build",
+        "build:core": "pnpm --filter @hitmux/hitmux-context-engine-core build",
+        "build:mcp": "pnpm --filter @hitmux/hitmux-context-engine-mcp build",
+        "build:examples": "pnpm -r --filter='./examples/*' build",
+        "dev": "pnpm -r --filter='./packages/*' dev",
+        "dev:core": "pnpm --filter @hitmux/hitmux-context-engine-core dev",
+        "dev:mcp": "pnpm --filter @hitmux/hitmux-context-engine-mcp dev",
+        "clean": "pnpm -r --filter='./packages/*' clean",
+        "lint": "pnpm -r --filter='./packages/*' lint",
+        "lint:fix": "pnpm -r --filter='./packages/*' run lint:fix",
+        "typecheck": "pnpm -r --filter='./packages/*' run typecheck",
+        "release:core": "pnpm --filter @hitmux/hitmux-context-engine-core... run build && pnpm --filter @hitmux/hitmux-context-engine-core publish --access public --no-git-checks",
+        "release:mcp": "pnpm --filter @hitmux/hitmux-context-engine-mcp... run build && pnpm --filter @hitmux/hitmux-context-engine-mcp publish --access public --no-git-checks",
+        "example:basic": "pnpm --filter hitmux-context-engine-basic-example start",
+        "benchmark": "node scripts/build-benchmark.js"
+    },
+    "devDependencies": {
+        "@eslint/js": "^9.28.0",
+        "@types/node": "^20.0.0",
+        "@typescript-eslint/eslint-plugin": "^8.31.1",
+        "@typescript-eslint/parser": "^8.31.1",
+        "eslint": "^9.25.1",
+        "rimraf": "^6.0.1",
+        "tree-sitter-cli": "^0.25.6",
+        "typescript": "^5.8.3"
+    },
+    "engines": {
+        "node": ">=20.0.0",
+        "pnpm": ">=10.0.0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/hitmux/hitmux-context-engine.git"
+    },
+    "license": "MIT",
+    "author": "Cheney Zhang <277584121@qq.com>"
+}

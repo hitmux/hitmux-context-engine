@@ -1,0 +1,85 @@
+{
+    // Hitmux Context Engine reads configuration from:
+    // 1. ~/.hitmux-context-engine/config.jsonc
+    // 2. ./.hitmux-context-engine/config.jsonc
+    // Project config overrides global config for fields that are present.
+    //
+    // Keep secret fields commented until you need them. An uncommented empty
+    // string overrides the global value.
+
+    // MCP server metadata
+    // "mcpServerName": "Hitmux Context Engine MCP Server",
+    // "mcpServerVersion": "1.0.0",
+
+    // Embedding provider: "OpenRouter", "OpenAI", "VoyageAI", "Gemini", or "Ollama"
+    // "embeddingProvider": "OpenRouter",
+    // "embeddingModel": "qwen/qwen3-embedding-4b",
+
+    // Provider credentials and endpoints
+    // "openrouterApiKey": "sk-or-your-openrouter-api-key",
+    // "openaiApiKey": "sk-your-openai-api-key",
+    // "openaiBaseUrl": "https://api.openai.com/v1",
+    // "voyageaiApiKey": "pa-your-voyageai-api-key",
+    // "geminiApiKey": "your-gemini-api-key",
+    // "geminiBaseUrl": "https://generativelanguage.googleapis.com",
+    // "ollamaModel": "nomic-embed-text",
+    // "ollamaHost": "http://127.0.0.1:11434",
+
+    // Vector database
+    //
+    // Hitmux Context Engine currently uses Milvus-compatible vector storage.
+    // SQLite, Chroma, Qdrant, LanceDB, and other database backends are not
+    // selectable from config.jsonc.
+    //
+    // Local Milvus:
+    // "milvusAddress": "localhost:19530",
+    //
+    // Self-hosted remote Milvus:
+    // Use the reachable host and port for your Milvus gRPC endpoint.
+    // Add milvusToken only when your Milvus deployment requires authentication.
+    // "milvusAddress": "your-milvus-host:19530",
+    // "milvusToken": "your-milvus-token",
+    //
+    // Zilliz Cloud:
+    // Use the cloud public endpoint as milvusAddress and your Personal Key as
+    // milvusToken. If milvusAddress is omitted, token-based address resolution
+    // is intended for Zilliz Cloud.
+    // "milvusAddress": "your-zilliz-cloud-public-endpoint",
+    // "milvusToken": "your-zilliz-cloud-personal-key",
+    //
+    // Advanced Milvus/Zilliz options:
+    // milvusUseRestful is reserved; the current MCP startup path uses the gRPC
+    // Milvus client.
+    // "milvusUseRestful": false,
+    // "milvusCollectionLimitCheckTimeoutMs": 15000,
+    // "zillizBaseUrl": "https://api.cloud.zilliz.com",
+
+    // Collection identity and naming
+    // "collectionNameOverride": "my_project",
+    // "codebaseIdentityMode": "path",
+    // "codebaseIdentity": "shared-custom-identity",
+    // "globalCollectionName": "default",
+    // "gitRemoteName": "origin",
+    // "hybridMode": true,
+
+    // Search and indexing
+    // "searchTimeoutMs": 30000,
+    // "embeddingBatchSize": 100,
+    // "embeddingConcurrency": 1,
+    // "customExtensions": [".vue", ".svelte", ".astro"],
+    // "customIgnorePatterns": ["temp/**", "*.backup", "private/**"],
+    // "merkleSnapshotMaxBytes": 52428800,
+
+    // MCP sync behavior
+    // "autoIndexing": true,
+    // "interactiveIndexing": true,
+    // "backgroundSync": true,
+    // "syncIntervalMs": 300000,
+    // "syncLockStaleMs": 600000,
+    // "triggerWatcher": true,
+
+    // Basic example options
+    // "splitterType": "ast",
+    // "searchTopK": 5,
+    // "searchThreshold": 0
+}
