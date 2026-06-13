@@ -17,7 +17,9 @@ import {
     HybridSearchRequest,
     HybridSearchOptions,
     HybridSearchResult,
-    COLLECTION_LIMIT_MESSAGE
+    COLLECTION_LIMIT_MESSAGE,
+    DEFAULT_SEARCH_OUTPUT_FIELDS,
+    STRUCTURED_METADATA_FIELDS,
 } from './types';
 import { ClusterManager } from './zilliz-utils';
 import { formatErrorDetails, milvusOperationError } from '../utils/error-format';
@@ -29,6 +31,117 @@ export interface MilvusRestfulConfig {
     username?: string;
     password?: string;
     database?: string;
+}
+
+const STRUCTURED_STRING_FIELD_SCHEMAS = [
+    { fieldName: 'primarySymbol', max_length: 512 },
+    { fieldName: 'symbolKind', max_length: 64 },
+    { fieldName: 'chunkKind', max_length: 64 },
+    { fieldName: 'fileRole', max_length: 64 },
+    { fieldName: 'basename', max_length: 255 },
+    { fieldName: 'pathSegment0', max_length: 255 },
+    { fieldName: 'pathSegment1', max_length: 255 },
+    { fieldName: 'pathSegment2', max_length: 255 },
+    { fieldName: 'pathSegment3', max_length: 255 },
+    { fieldName: 'pathSegment4', max_length: 255 },
+] as const;
+
+function createStructuredFieldSchemas(): Array<Record<string, unknown>> {
+    return [
+        ...STRUCTURED_STRING_FIELD_SCHEMAS.map(field => ({
+            fieldName: field.fieldName,
+            dataType: "VarChar",
+            elementTypeParams: {
+                max_length: field.max_length
+            }
+        })),
+        {
+            fieldName: "isDefinition",
+            dataType: "Bool"
+        }
+    ];
+}
+
+function getStructuredFieldValue(document: VectorDocument, field: string): string | boolean {
+    if (field === 'isDefinition') {
+        return document.isDefinition === true;
+    }
+
+    const value = document[field as keyof VectorDocument];
+    return typeof value === 'string' ? value : '';
+}
+
+function createInsertRow(document: VectorDocument): Record<string, unknown> {
+    const row: Record<string, unknown> = {
+        id: document.id,
+        vector: document.vector,
+        content: document.content,
+        relativePath: document.relativePath,
+        startLine: document.startLine,
+        endLine: document.endLine,
+        fileExtension: document.fileExtension,
+        metadata: JSON.stringify(document.metadata),
+    };
+
+    for (const field of STRUCTURED_METADATA_FIELDS) {
+        row[field] = getStructuredFieldValue(document, field);
+    }
+
+    return row;
+}
+
+function mergeStructuredMetadata(result: Record<string, any>, metadata: Record<string, any>): Record<string, any> {
+    const merged = { ...metadata };
+    for (const field of STRUCTURED_METADATA_FIELDS) {
+        const value = result[field];
+        if (typeof value === 'string' || typeof value === 'boolean') {
+            merged[field] = value;
+        }
+    }
+    return merged;
+}
+
+function getStructuredDocumentFields(result: Record<string, any>): Partial<VectorDocument> {
+    const fields: Partial<VectorDocument> = {};
+    for (const field of STRUCTURED_METADATA_FIELDS) {
+        const value = result[field];
+        if (typeof value === 'string' || typeof value === 'boolean') {
+            (fields as Record<string, string | boolean>)[field] = value;
+        }
+    }
+    return fields;
+}
+
+function createSchemaMismatchError(collectionName: string, detail: string): Error {
+    return new Error(`Collection '${collectionName}' uses an unsupported search schema. ${detail} Reindex the codebase with force=true to create schema v2 metadata fields.`);
+}
+
+function isMissingStructuredFieldError(error: unknown): boolean {
+    const message = formatErrorDetails(error);
+    return STRUCTURED_METADATA_FIELDS.some(field => message.includes(field))
+        && /field|schema|output|not.*exist|not.*found|cannot.*find|undefined/i.test(message);
+}
+
+function requireCurrentStructuredSchema(collectionName: string, description: string): void {
+    const metadataLine = description
+        .split(/\r?\n/)
+        .find((line) => line.startsWith('hitmuxContext:'));
+    if (!metadataLine) {
+        throw createSchemaMismatchError(collectionName, 'Missing hitmuxContext collection metadata.');
+    }
+
+    let metadata: any;
+    try {
+        metadata = JSON.parse(metadataLine.slice('hitmuxContext:'.length));
+    } catch {
+        throw createSchemaMismatchError(collectionName, 'Invalid hitmuxContext collection metadata.');
+    }
+
+    const schemaVersion = metadata?.schemaVersion ?? 1;
+    const metadataVersion = metadata?.metadataVersion ?? 1;
+    if (schemaVersion !== 2 || metadataVersion !== 2) {
+        throw createSchemaMismatchError(collectionName, `Indexed schemaVersion=${schemaVersion}, metadataVersion=${metadataVersion}; current schemaVersion=2, metadataVersion=2.`);
+    }
 }
 
 /**
@@ -63,12 +176,16 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
     protected config: MilvusRestfulConfig;
     private baseUrl: string | null = null;
     protected initializationPromise: Promise<void>;
+    private initializationError: unknown;
+    private verifiedStructuredSchemaCollections = new Set<string>();
 
     constructor(config: MilvusRestfulConfig) {
         this.config = config;
 
         // Start initialization asynchronously without waiting
-        this.initializationPromise = this.initialize();
+        this.initializationPromise = this.initialize().catch((error: unknown) => {
+            this.initializationError = error;
+        });
     }
 
     private async initialize(): Promise<void> {
@@ -112,6 +229,9 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
      */
     protected async ensureInitialized(): Promise<void> {
         await this.initializationPromise;
+        if (this.initializationError !== undefined) {
+            throw this.initializationError;
+        }
         if (!this.baseUrl) {
             throw new Error('Base URL not initialized');
         }
@@ -262,7 +382,8 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
                             elementTypeParams: {
                                 max_length: 65535
                             }
-                        }
+                        },
+                        ...createStructuredFieldSchemas()
                     ]
                 }
             };
@@ -464,16 +585,7 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         try {
             const restfulConfig = this.config as MilvusRestfulConfig;
             // Transform VectorDocument array to Milvus entity format
-            const data = documents.map(doc => ({
-                id: doc.id,
-                vector: doc.vector,
-                content: doc.content,
-                relativePath: doc.relativePath,
-                startLine: doc.startLine,
-                endLine: doc.endLine,
-                fileExtension: doc.fileExtension,
-                metadata: JSON.stringify(doc.metadata) // Convert metadata object to JSON string
-            }));
+            const data = documents.map(createInsertRow);
 
             const insertRequest = {
                 collectionName,
@@ -498,6 +610,7 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
 
         try {
             const restfulConfig = this.config as MilvusRestfulConfig;
+            await this.ensureCurrentStructuredSchema(collectionName);
             // Build search request according to Milvus REST API specification
             const searchRequest: any = {
                 collectionName,
@@ -505,14 +618,7 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
                 data: [queryVector], // Array of query vectors
                 annsField: "vector", // Vector field name
                 limit: topK,
-                outputFields: [
-                    "content",
-                    "relativePath",
-                    "startLine",
-                    "endLine",
-                    "fileExtension",
-                    "metadata"
-                ],
+                outputFields: [...DEFAULT_SEARCH_OUTPUT_FIELDS],
                 searchParams: {
                     metricType: "COSINE", // Match the index metric type
                     params: {}
@@ -524,14 +630,21 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
                 searchRequest.filter = options.filterExpr;
             }
 
-            const response = await this.makeRequest('/entities/search', 'POST', searchRequest);
+            let response: any;
+            try {
+                response = await this.makeRequest('/entities/search', 'POST', searchRequest);
+            } catch (error) {
+                throw isMissingStructuredFieldError(error)
+                    ? createSchemaMismatchError(collectionName, 'Milvus rejected one or more structured output fields.')
+                    : error;
+            }
 
             // Transform response to VectorSearchResult format
             const results: VectorSearchResult[] = (response.data || []).map((item: any) => {
                 // Parse metadata from JSON string
                 let metadata = {};
                 try {
-                    metadata = JSON.parse(item.metadata || '{}');
+                    metadata = mergeStructuredMetadata(item, JSON.parse(item.metadata || '{}'));
                 } catch (error) {
                     console.warn(`[MilvusRestfulDB] Failed to parse metadata for item ${item.id}:`, error);
                     metadata = {};
@@ -546,7 +659,8 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
                         startLine: item.startLine || 0,
                         endLine: item.endLine || 0,
                         fileExtension: item.fileExtension || '',
-                        metadata: metadata
+                        metadata: metadata,
+                        ...getStructuredDocumentFields(item),
                     },
                     score: item.distance || 0
                 };
@@ -699,7 +813,8 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
                             elementTypeParams: {
                                 max_length: 65535
                             }
-                        }
+                        },
+                        ...createStructuredFieldSchemas()
                     ]
                 }
             };
@@ -781,16 +896,7 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         try {
             const restfulConfig = this.config as MilvusRestfulConfig;
 
-            const data = documents.map(doc => ({
-                id: doc.id,
-                content: doc.content,
-                vector: doc.vector,
-                relativePath: doc.relativePath,
-                startLine: doc.startLine,
-                endLine: doc.endLine,
-                fileExtension: doc.fileExtension,
-                metadata: JSON.stringify(doc.metadata),
-            }));
+            const data = documents.map(createInsertRow);
 
             const insertRequest = {
                 collectionName,
@@ -871,17 +977,25 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
                 searchParams: search_param_2.searchParams
             }, null, 2));
 
+            await this.ensureCurrentStructuredSchema(collectionName);
             const hybridSearchRequest: any = {
                 collectionName,
                 dbName: restfulConfig.database,
                 search: [search_param_1, search_param_2],
                 rerank: rerank_strategy,
                 limit: options?.limit || searchRequests[0]?.limit || 10,
-                outputFields: ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
+                outputFields: [...DEFAULT_SEARCH_OUTPUT_FIELDS],
             };
 
             console.log(`[MilvusRestfulDB] 🔍 Executing REST API hybrid search...`);
-            const response = await this.makeRequest('/entities/hybrid_search', 'POST', hybridSearchRequest);
+            let response: any;
+            try {
+                response = await this.makeRequest('/entities/hybrid_search', 'POST', hybridSearchRequest);
+            } catch (error) {
+                throw isMissingStructuredFieldError(error)
+                    ? createSchemaMismatchError(collectionName, 'Milvus rejected one or more structured output fields.')
+                    : error;
+            }
 
             if (response.code !== 0) {
                 throw new Error(`Hybrid search failed: ${response.message || 'Unknown error'}`);
@@ -894,7 +1008,7 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
             return results.map((result: any) => {
                 let metadata = {};
                 try {
-                    metadata = JSON.parse(result.metadata || '{}');
+                    metadata = mergeStructuredMetadata(result, JSON.parse(result.metadata || '{}'));
                 } catch (error) {
                     console.warn(`[MilvusRestfulDB] Failed to parse metadata for item ${result.id}:`, error);
                 }
@@ -910,6 +1024,7 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
                         endLine: result.endLine,
                         fileExtension: result.fileExtension,
                         metadata,
+                        ...getStructuredDocumentFields(result),
                     },
                     score: result.score || result.distance || 0,
                 };
@@ -935,6 +1050,26 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         } catch (error) {
             console.error(`[MilvusRestfulDB] ❌ Failed to get description for collection '${collectionName}':`, error);
             throw error;
+        }
+    }
+
+    private async ensureCurrentStructuredSchema(collectionName: string): Promise<void> {
+        if (!this.verifiedStructuredSchemaCollections) {
+            this.verifiedStructuredSchemaCollections = new Set<string>();
+        }
+
+        if (this.verifiedStructuredSchemaCollections.has(collectionName)) {
+            return;
+        }
+
+        try {
+            const description = await this.getCollectionDescription(collectionName);
+            requireCurrentStructuredSchema(collectionName, description);
+            this.verifiedStructuredSchemaCollections.add(collectionName);
+        } catch (error) {
+            throw error instanceof Error
+                ? error
+                : createSchemaMismatchError(collectionName, String(error));
         }
     }
 

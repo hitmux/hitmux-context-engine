@@ -9,8 +9,8 @@ export class LangChainCodeSplitter implements Splitter {
     private chunkOverlap: number = 200;
 
     constructor(chunkSize?: number, chunkOverlap?: number) {
-        if (chunkSize) this.chunkSize = chunkSize;
-        if (chunkOverlap) this.chunkOverlap = chunkOverlap;
+        if (chunkSize !== undefined) this.chunkSize = chunkSize;
+        if (chunkOverlap !== undefined) this.chunkOverlap = chunkOverlap;
     }
 
     async split(code: string, language: string, filePath?: string): Promise<CodeChunk[]> {
@@ -66,6 +66,8 @@ export class LangChainCodeSplitter implements Splitter {
         const languageMap: Record<string, SupportedLanguage> = {
             'javascript': 'js',
             'typescript': 'js',
+            'tsx': 'js',
+            'jsx': 'js',
             'python': 'python',
             'java': 'java',
             'cpp': 'cpp',
@@ -98,8 +100,10 @@ export class LangChainCodeSplitter implements Splitter {
 
         const documents = await splitter.createDocuments([code]);
 
+        let nextSearchOffset = 0;
         return documents.map((doc) => {
-            const lines = this.estimateLines(doc.pageContent, code);
+            const lines = this.estimateLines(doc.pageContent, code, nextSearchOffset);
+            nextSearchOffset = lines.nextSearchOffset;
             return {
                 content: doc.pageContent,
                 metadata: {
@@ -112,20 +116,32 @@ export class LangChainCodeSplitter implements Splitter {
         });
     }
 
-    private estimateLines(chunk: string, originalCode: string): { start: number; end: number } {
-        // Simple line number estimation
+    private estimateLines(chunk: string, originalCode: string, searchOffset: number): { start: number; end: number; nextSearchOffset: number } {
         const chunkLines = chunk.split('\n');
-
-        // Find chunk position in original code
-        const chunkStart = originalCode.indexOf(chunk);
+        const chunkStart = originalCode.indexOf(chunk, searchOffset);
         if (chunkStart === -1) {
-            return { start: 1, end: chunkLines.length };
+            const fallbackStart = originalCode.indexOf(chunk);
+            if (fallbackStart === -1) {
+                return { start: 1, end: chunkLines.length, nextSearchOffset: searchOffset };
+            }
+
+            const fallbackBefore = originalCode.substring(0, fallbackStart);
+            const fallbackLine = fallbackBefore.split('\n').length;
+            return {
+                start: fallbackLine,
+                end: fallbackLine + chunkLines.length - 1,
+                nextSearchOffset: fallbackStart + 1,
+            };
         }
 
         const beforeChunk = originalCode.substring(0, chunkStart);
         const startLine = beforeChunk.split('\n').length;
         const endLine = startLine + chunkLines.length - 1;
 
-        return { start: startLine, end: endLine };
+        return {
+            start: startLine,
+            end: endLine,
+            nextSearchOffset: chunkStart + 1,
+        };
     }
 } 

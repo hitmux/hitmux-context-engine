@@ -18,7 +18,7 @@ import {
     ListToolsRequestSchema,
     CallToolRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { Context } from "@hitmux/hitmux-context-engine-core";
+import { Context, configManager } from "@hitmux/hitmux-context-engine-core";
 import { MilvusVectorDatabase } from "@hitmux/hitmux-context-engine-core";
 
 // Import our modular components
@@ -30,17 +30,22 @@ import { ToolHandlers } from "./handlers.js";
 
 class ContextMcpServer {
     private server: Server;
-    private context: Context;
     private snapshotManager: SnapshotManager;
-    private syncManager: SyncManager;
-    private toolHandlers: ToolHandlers;
+    private runtime: {
+        context: Context;
+        syncManager: SyncManager;
+        toolHandlers: ToolHandlers;
+        backgroundSyncStarted: boolean;
+        snapshotValidated: boolean;
+    } | null = null;
+    private runtimePromise: Promise<NonNullable<ContextMcpServer["runtime"]>> | null = null;
 
-    constructor(config: ContextMcpConfig) {
+    constructor() {
         // Initialize MCP server
         this.server = new Server(
             {
-                name: config.name,
-                version: config.version
+                name: "Hitmux Context Engine MCP Server",
+                version: "1.0.0"
             },
             {
                 capabilities: {
@@ -49,6 +54,64 @@ class ContextMcpServer {
             }
         );
 
+        this.snapshotManager = new SnapshotManager();
+        this.snapshotManager.loadCodebaseSnapshot();
+
+        this.setupTools();
+    }
+
+    private formatRuntimeInitializationError(error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+            content: [{
+                type: "text",
+                text: `Error initializing Hitmux Context Engine runtime: ${message}`
+            }],
+            isError: true
+        };
+    }
+
+    private getConfigReadError(): Error | null {
+        const errors = configManager.getReadErrors(process.cwd());
+        if (errors.length === 0) {
+            return null;
+        }
+
+        const details = errors
+            .map((error) => `${error.path}: ${error.message}`)
+            .join("\n");
+        return new Error(`Invalid config.jsonc. Fix the configuration before using MCP tools.\n${details}`);
+    }
+
+    private async getRuntime(): Promise<NonNullable<ContextMcpServer["runtime"]>> {
+        if (this.runtime) {
+            return this.runtime;
+        }
+
+        if (this.runtimePromise) {
+            return this.runtimePromise;
+        }
+
+        this.runtimePromise = Promise.resolve().then(async () => {
+            const configError = this.getConfigReadError();
+            if (configError) {
+                throw configError;
+            }
+
+            const config = createMcpConfig();
+            logConfigurationSummary(config);
+
+            const runtime = await this.createRuntime(config);
+            this.runtime = runtime;
+            return runtime;
+        }).finally(() => {
+            this.runtimePromise = null;
+        });
+
+        return this.runtimePromise;
+    }
+
+    private async createRuntime(config: ContextMcpConfig): Promise<NonNullable<ContextMcpServer["runtime"]>> {
         // Initialize embedding provider
         console.log(`[EMBEDDING] Initializing embedding provider: ${config.embeddingProvider}`);
         console.log(`[EMBEDDING] Using model: ${config.embeddingModel}`);
@@ -63,7 +126,7 @@ class ContextMcpServer {
         });
 
         // Initialize Hitmux Context Engine
-        this.context = new Context({
+        const context = new Context({
             embedding,
             vectorDatabase,
             collectionNameOverride: config.collectionNameOverride,
@@ -76,14 +139,16 @@ class ContextMcpServer {
         });
 
         // Initialize managers
-        this.snapshotManager = new SnapshotManager();
-        this.syncManager = new SyncManager(this.context, this.snapshotManager);
-        this.toolHandlers = new ToolHandlers(this.context, this.snapshotManager);
+        const syncManager = new SyncManager(context, this.snapshotManager);
+        const toolHandlers = new ToolHandlers(context, this.snapshotManager);
 
-        // Load existing codebase snapshot on startup
-        this.snapshotManager.loadCodebaseSnapshot();
-
-        this.setupTools();
+        return {
+            context,
+            syncManager,
+            toolHandlers,
+            backgroundSyncStarted: false,
+            snapshotValidated: false
+        };
     }
 
     private setupTools() {
@@ -95,15 +160,20 @@ Index a codebase directory to enable semantic search using a configurable code s
 
 ✨ **Usage Guidance**:
 - This tool is typically used when search fails due to an unindexed codebase.
+- Before first indexing, create a project ignore file such as .hceignore when generated, large, or private paths should be excluded.
+- The indexer automatically loads .*ignore files it finds in the project tree, including .hceignore, .gitignore, and .cursorignore. Use ignoreFiles only for extra non-default ignore file paths.
+- For an already indexed codebase, use incremental=true to manually sync changed files without rebuilding the full index.
 - If indexing is attempted on an already indexed path, and a conflict is detected, you MUST prompt the user to confirm whether to proceed with a force index (i.e., re-indexing and overwriting the previous index).
 `;
 
 
         const search_description = `
-Search the indexed codebase using natural language queries within a specified absolute path.
+Search the indexed codebase with code-search style queries within a specified absolute path.
 
 ⚠️ **IMPORTANT**:
 - You MUST provide an absolute path.
+- Do NOT pass a broad natural-language sentence as the only query when the user is asking where behavior is implemented.
+- Rewrite natural-language requests into focused code-search terms before calling this tool.
 
 🎯 **When to Use**:
 This tool is versatile and can be used before completing various tasks to retrieve relevant context:
@@ -116,8 +186,22 @@ This tool is versatile and can be used before completing various tasks to retrie
 - **Duplicate detection**: Identify redundant or duplicated code patterns across the codebase
 
 ✨ **Usage Guidance**:
-- If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first.
+- If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first and recommending a project ignore file such as .hceignore.
 - You can then use the index_codebase tool to index the codebase before searching again.
+- For natural-language discovery tasks, generate one focused query per likely implementation angle instead of one broad sentence.
+- Include likely identifiers, class/function names, file names, path segments, and English code/domain terms.
+- Include scope hints such as client, server, shared, UI, network, rendering, storage, validation, worker, or route when relevant.
+- Prefer several short searches and compare their results by path, symbol, and content evidence.
+
+✅ **Good query style**:
+- "authentication middleware token validation"
+- "AuthMiddleware validateToken bearer token"
+- "src/auth middleware token validation"
+- "database migration schema version rollback"
+
+❌ **Poor query style**:
+- "where is the code for this behavior"
+- "find the thing that handles the user request"
 `;
 
         // Define available tools
@@ -137,6 +221,11 @@ This tool is versatile and can be used before completing various tasks to retrie
                                 force: {
                                     type: "boolean",
                                     description: "Force re-indexing even if already indexed",
+                                    default: false
+                                },
+                                incremental: {
+                                    type: "boolean",
+                                    description: "Manually sync changed files for an already indexed codebase without dropping or rebuilding the full index. Use this after reviewing a large automatic incremental-sync warning. Cannot be combined with force=true or dryRun=true.",
                                     default: false
                                 },
                                 splitter: {
@@ -166,7 +255,7 @@ This tool is versatile and can be used before completing various tasks to retrie
                                     items: {
                                         type: "string"
                                     },
-                                    description: "Optional: Additional ignore files to load. Relative paths are resolved from the codebase root (e.g., ['.cursorignore', 'config/index.ignore']).",
+                                    description: "Optional: Additional ignore files to load beyond automatically discovered .*ignore files. Relative paths are resolved from the codebase root (e.g., ['config/index.ignore']).",
                                     default: []
                                 },
                                 maxDepth: {
@@ -195,13 +284,11 @@ This tool is versatile and can be used before completing various tasks to retrie
                                 },
                                 query: {
                                     type: "string",
-                                    description: "Natural language query to search for in the codebase"
+                                    description: "Focused code-search query. Rewrite natural-language requests into likely identifiers, filenames, path words, English domain terms, and scope hints. Prefer multiple short searches over one broad sentence."
                                 },
                                 limit: {
                                     type: "number",
-                                    description: "Maximum number of results to return",
-                                    default: 10,
-                                    maximum: 50
+                                    description: "Optional override for the maximum number of results to return. Leave empty for the bounded default result set; use a specific value only when you need more or fewer results."
                                 },
                                 extensionFilter: {
                                     type: "array",
@@ -250,16 +337,32 @@ This tool is versatile and can be used before completing various tasks to retrie
         // Handle tool execution
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
+            let runtime: NonNullable<ContextMcpServer["runtime"]>;
+            try {
+                runtime = await this.getRuntime();
+                if (!runtime.snapshotValidated) {
+                    await runtime.toolHandlers.validateLegacyZeroEntries();
+                    await runtime.toolHandlers.validateIndexedCollections();
+                    runtime.snapshotValidated = true;
+                }
+                if (!runtime.backgroundSyncStarted) {
+                    console.log('[SYNC-DEBUG] Initializing background sync after first successful runtime initialization...');
+                    runtime.syncManager.startBackgroundSync();
+                    runtime.backgroundSyncStarted = true;
+                }
+            } catch (error) {
+                return this.formatRuntimeInitializationError(error);
+            }
 
             switch (name) {
                 case "index_codebase":
-                    return await this.toolHandlers.handleIndexCodebase(args);
+                    return await runtime.toolHandlers.handleIndexCodebase(args);
                 case "search_code":
-                    return await this.toolHandlers.handleSearchCode(args);
+                    return await runtime.toolHandlers.handleSearchCode(args);
                 case "clear_index":
-                    return await this.toolHandlers.handleClearIndex(args);
+                    return await runtime.toolHandlers.handleClearIndex(args);
                 case "get_indexing_status":
-                    return await this.toolHandlers.handleGetIndexingStatus(args);
+                    return await runtime.toolHandlers.handleGetIndexingStatus(args);
 
                 default:
                     throw new Error(`Unknown tool: ${name}`);
@@ -271,23 +374,13 @@ This tool is versatile and can be used before completing various tasks to retrie
         console.log('[SYNC-DEBUG] MCP server start() method called');
         console.log('Starting Context MCP server...');
 
-        // One-shot startup healing for legacy 0/0+completed snapshot entries
-        // left over from pre-fix MCP versions. Runs before the transport accepts
-        // requests so clients never observe the poisoning state. See Issue #295.
-        await this.toolHandlers.validateLegacyZeroEntries();
-        await this.toolHandlers.validateIndexedCollections();
-
         const transport = new StdioServerTransport();
         console.log('[SYNC-DEBUG] StdioServerTransport created, attempting server connection...');
 
         await this.server.connect(transport);
         console.log("MCP server started and listening on stdio.");
         console.log('[SYNC-DEBUG] Server connection established successfully');
-
-        // Start background sync after server is connected
-        console.log('[SYNC-DEBUG] Initializing background sync...');
-        this.syncManager.startBackgroundSync();
-        console.log('[SYNC-DEBUG] MCP server initialization complete');
+        console.log('[SYNC-DEBUG] MCP protocol ready. Runtime config will be loaded on first tool call.');
     }
 }
 
@@ -302,11 +395,7 @@ async function main() {
         process.exit(0);
     }
 
-    // Create configuration
-    const config = createMcpConfig();
-    logConfigurationSummary(config);
-
-    const server = new ContextMcpServer(config);
+    const server = new ContextMcpServer();
     await server.start();
 }
 

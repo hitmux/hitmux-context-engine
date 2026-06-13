@@ -47,6 +47,25 @@ class TestSplitter implements Splitter {
     setChunkOverlap(): void { }
 }
 
+function createCollectionDescription(codebasePath: string): string {
+    return [
+        `codebasePath:${codebasePath}`,
+        `hitmuxContext:${JSON.stringify({
+            version: 1,
+            codebasePath,
+            embedding: {
+                provider: 'test',
+                model: 'unknown',
+                dimension: 3,
+            },
+            schemaVersion: 2,
+            metadataVersion: 2,
+            splitterType: 'ast',
+            createdAt: '2026-06-12T00:00:00.000Z',
+        })}`,
+    ].join('\n');
+}
+
 const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     createCollection: jest.fn().mockResolvedValue(undefined),
     createHybridCollection: jest.fn().mockResolvedValue(undefined),
@@ -94,6 +113,7 @@ describe('Context hybrid collection recovery', () => {
 
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.hasCollection.mockResolvedValue(true);
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createCollectionDescription(project));
 
         const context = new Context({
             embedding: new TestEmbedding(),

@@ -7,6 +7,7 @@ import {
     CodebaseSnapshotV2,
     CodebaseInfo,
     CodebaseIndexOptions,
+    CodebaseStatsSource,
     CodebaseInfoIndexing,
     CodebaseInfoIndexed,
     CodebaseInfoIndexFailed
@@ -423,7 +424,7 @@ export class SnapshotManager {
      */
     public setCodebaseIndexed(
         codebasePath: string,
-        stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' },
+        stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached'; statsSource?: CodebaseStatsSource },
         indexOptions?: CodebaseIndexOptions
     ): void {
         // Defensive guard: 0/0 + completed is a known-bad state that causes an
@@ -454,6 +455,7 @@ export class SnapshotManager {
             indexedFiles: stats.indexedFiles,
             totalChunks: stats.totalChunks,
             indexStatus: stats.status,
+            ...(stats.statsSource ? { statsSource: stats.statsSource } : {}),
             ...resolvedIndexOptions,
             lastUpdated: new Date().toISOString()
         };
@@ -485,6 +487,32 @@ export class SnapshotManager {
             lastUpdated: new Date().toISOString()
         };
         this.codebaseInfoMap.set(codebasePath, info);
+    }
+
+    public setCodebaseSyncWarning(codebasePath: string, warning: string): void {
+        const info = this.codebaseInfoMap.get(codebasePath);
+        if (!info || info.status !== 'indexed') {
+            return;
+        }
+
+        this.codebaseInfoMap.set(codebasePath, {
+            ...info,
+            syncWarning: warning,
+            lastUpdated: new Date().toISOString()
+        });
+    }
+
+    public clearCodebaseSyncWarning(codebasePath: string): void {
+        const info = this.codebaseInfoMap.get(codebasePath);
+        if (!info || info.status !== 'indexed' || !info.syncWarning) {
+            return;
+        }
+
+        const { syncWarning: _syncWarning, ...cleanInfo } = info;
+        this.codebaseInfoMap.set(codebasePath, {
+            ...cleanInfo,
+            lastUpdated: new Date().toISOString()
+        });
     }
 
     /**

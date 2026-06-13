@@ -13,9 +13,11 @@ import {
     VectorDocument,
     VectorSearchResult,
     HybridSearchRequest,
-    HybridSearchResult
+    HybridSearchResult,
+    DEFAULT_SEARCH_OUTPUT_FIELDS,
+    STRUCTURED_METADATA_FIELDS
 } from './vectordb';
-import { SemanticSearchResult } from './types';
+import { SearchScoreReason, SemanticSearchResult } from './types';
 import { configManager } from './utils/config-manager';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -23,6 +25,15 @@ import * as crypto from 'crypto';
 import { FileSynchronizer } from './sync/synchronizer';
 import { CodebaseIdentityOptions, resolveCodebaseIdentity } from './utils/path-identity';
 import { IgnoreMatcher } from './utils/ignore-matcher';
+import {
+    classifyFileRole,
+    FileRole,
+    FileRoleIntent,
+    inferFileRoleIntent,
+    isFileRoleExplicitlyRequested
+} from './search/file-role';
+import { normalizeLineRange } from './search/line-range';
+import { deduplicateSemanticSearchResults, getNormalizedContentHash } from './search/result-dedupe';
 
 /**
  * Thrown by indexCodebase / processFileList when an AbortSignal fires
@@ -34,6 +45,23 @@ export class IndexAbortError extends Error {
         super(message);
         this.name = 'IndexAbortError';
     }
+}
+
+export class IncrementalIndexTooLargeError extends Error {
+    constructor(
+        public readonly effectiveLines: number,
+        public readonly threshold: number,
+        public readonly changedFiles: number
+    ) {
+        super(
+            `Automatic incremental indexing paused because ${changedFiles} added/modified file(s) contain ${effectiveLines} effective lines, exceeding the automatic sync limit of ${threshold}. Check whether these files should be ignored in .hceignore. If they should be indexed, run an explicit MCP index_codebase call with incremental=true after reviewing the change set.`
+        );
+        this.name = 'IncrementalIndexTooLargeError';
+    }
+}
+
+interface ReindexByChangeOptions {
+    skipEffectiveLineLimit?: boolean;
 }
 
 /**
@@ -53,6 +81,8 @@ export class EmbeddingError extends Error {
     }
 }
 
+const AUTOMATIC_INCREMENTAL_EFFECTIVE_LINE_LIMIT = 10_000;
+
 export class IndexingVerificationError extends Error {
     constructor(message: string) {
         super(message);
@@ -64,6 +94,13 @@ export class EmbeddingModelMismatchError extends Error {
     constructor(message: string) {
         super(message);
         this.name = 'EmbeddingModelMismatchError';
+    }
+}
+
+export class CollectionSchemaMismatchError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'CollectionSchemaMismatchError';
     }
 }
 
@@ -104,8 +141,58 @@ interface CollectionMetadata {
     version: 1;
     codebasePath: string;
     embedding: CollectionEmbeddingMetadata;
+    schemaVersion?: number;
+    metadataVersion?: number;
+    splitterType?: string;
     createdAt: string;
 }
+
+interface RankedSearchResult extends SemanticSearchResult {
+    vectorScore: number;
+    lexicalScore: number;
+    ownerTier: number;
+    originalRank: number;
+    lexicalMetadata?: QueryRow;
+}
+
+type QueryRow = Record<string, unknown>;
+
+interface LexicalMatchScore {
+    score: number;
+    reasons: SearchScoreReason[];
+    ownerTier: number;
+}
+
+interface LexicalSearchTerms {
+    strongAnchors: string[];
+    weakDescriptors: string[];
+    roleHints: string[];
+    pathHints: string[];
+    recallTerms: string[];
+    scoringTerms: string[];
+}
+
+interface RankedLexicalCandidate {
+    result: SemanticSearchResult;
+    metadata: QueryRow;
+    lexicalScore: LexicalMatchScore;
+}
+
+const LEXICAL_OWNER_TIERS = {
+    exactFilename: 600,
+    exactDefinition: 500,
+    pathOwner: 400,
+    reference: 300,
+    semantic: 0
+} as const;
+
+const LEXICAL_EXACT_CANDIDATE_LIMIT_MIN = 100;
+const LEXICAL_EXACT_CANDIDATE_LIMIT_MAX = 200;
+const LEXICAL_BROAD_CANDIDATE_LIMIT_MIN = 40;
+const LEXICAL_BROAD_CANDIDATE_LIMIT_MAX = 80;
+const SEARCH_CANDIDATE_LIMIT_MULTIPLIER = 4;
+const SEARCH_CANDIDATE_LIMIT_MIN = 80;
+const SEARCH_CANDIDATE_LIMIT_MAX = 200;
 
 const DEFAULT_SUPPORTED_EXTENSIONS = [
     // Programming languages
@@ -191,6 +278,8 @@ export class Context {
     private static readonly MAX_COLLECTION_NAME_LENGTH = 255;
     private static readonly COLLECTION_METADATA_PREFIX = 'hitmuxContext:';
     private static readonly SKIP_EMBEDDING_MODEL_CHECK_ENV = 'HITMUX_CONTEXT_ENGINE_SKIP_EMBEDDING_MODEL_CHECK';
+    private static readonly COLLECTION_SCHEMA_VERSION = 2;
+    private static readonly COLLECTION_METADATA_VERSION = 2;
 
     private embedding: Embedding;
     private vectorDatabase: VectorDatabase;
@@ -516,7 +605,7 @@ export class Context {
         // 2. Check and prepare vector collection
         progressCallback?.({ phase: 'Preparing collection...', current: 0, total: 100, percentage: 0 });
         console.log(`Debug2: Preparing vector collection for codebase${forceReindex ? ' (FORCE REINDEX)' : ''}`);
-        await this.prepareCollection(codebasePath, forceReindex);
+        await this.prepareCollection(codebasePath, forceReindex, splitter);
 
         // 3. Recursively traverse codebase to get all supported files
         progressCallback?.({ phase: 'Scanning files...', current: 5, total: 100, percentage: 5 });
@@ -584,28 +673,23 @@ export class Context {
         additionalSupportedExtensions: string[] = [],
         requestSplitter?: Splitter,
         additionalIgnoreFiles: string[] = [],
-        maxDepth?: number
+        maxDepth?: number,
+        options: ReindexByChangeOptions = {}
     ): Promise<{ added: number, removed: number, modified: number }> {
         const collectionName = this.getCollectionName(codebasePath);
-        const synchronizer = this.synchronizers.get(collectionName);
         const splitter = requestSplitter || this.codeSplitter;
 
-        if (!synchronizer) {
-            // Recreate the synchronizer with the same request-scoped options that
-            // were used for the original indexing task.
-            const ignorePatterns = await this.loadIgnorePatterns(codebasePath, additionalIgnorePatterns, additionalIgnoreFiles);
-            const supportedExtensions = this.getEffectiveSupportedExtensions(additionalSupportedExtensions);
+        // Recreate the synchronizer on each sync so newly added or edited
+        // ignore files affect the next incremental check without a restart.
+        const ignorePatterns = await this.loadIgnorePatterns(codebasePath, additionalIgnorePatterns, additionalIgnoreFiles);
+        const supportedExtensions = this.getEffectiveSupportedExtensions(additionalSupportedExtensions);
+        const currentSynchronizer = new FileSynchronizer(codebasePath, ignorePatterns, supportedExtensions, { maxDepth });
+        await currentSynchronizer.initialize();
+        this.synchronizers.set(collectionName, currentSynchronizer);
 
-            // To be safe, let's initialize if it's not there.
-            const newSynchronizer = new FileSynchronizer(codebasePath, ignorePatterns, supportedExtensions, { maxDepth });
-            await newSynchronizer.initialize();
-            this.synchronizers.set(collectionName, newSynchronizer);
-        }
-
-        const currentSynchronizer = this.synchronizers.get(collectionName)!;
 
         progressCallback?.({ phase: 'Checking for file changes...', current: 0, total: 100, percentage: 0 });
-        const { added, removed, modified } = await currentSynchronizer.checkForChanges();
+        const { added, removed, modified } = await currentSynchronizer.checkForChanges({ deferSnapshotUpdate: true });
         const totalChanges = added.length + removed.length + modified.length;
 
         if (totalChanges === 0) {
@@ -615,6 +699,19 @@ export class Context {
         }
 
         console.log(`[Context] 🔄 Found changes: ${added.length} added, ${removed.length} removed, ${modified.length} modified.`);
+
+        const filesToIndex = [...added, ...modified].map(f => path.join(codebasePath, f));
+        if (filesToIndex.length > 0) {
+            const effectiveLines = await this.countEffectiveLines(filesToIndex);
+            if (!options.skipEffectiveLineLimit && effectiveLines > AUTOMATIC_INCREMENTAL_EFFECTIVE_LINE_LIMIT) {
+                currentSynchronizer.discardPendingChanges();
+                throw new IncrementalIndexTooLargeError(
+                    effectiveLines,
+                    AUTOMATIC_INCREMENTAL_EFFECTIVE_LINE_LIMIT,
+                    filesToIndex.length
+                );
+            }
+        }
 
         let processedChanges = 0;
         const updateProgress = (phase: string) => {
@@ -635,9 +732,6 @@ export class Context {
             updateProgress(`Deleted old chunks for ${file}`);
         }
 
-        // Handle added and modified files
-        const filesToIndex = [...added, ...modified].map(f => path.join(codebasePath, f));
-
         if (filesToIndex.length > 0) {
             await this.processFileList(
                 filesToIndex,
@@ -649,10 +743,91 @@ export class Context {
             );
         }
 
+        await currentSynchronizer.commitPendingChanges();
+
         console.log(`[Context] ✅ Re-indexing complete. Added: ${added.length}, Removed: ${removed.length}, Modified: ${modified.length}`);
         progressCallback?.({ phase: 'Re-indexing complete!', current: totalChanges, total: totalChanges, percentage: 100 });
 
         return { added: added.length, removed: removed.length, modified: modified.length };
+    }
+
+    private async countEffectiveLines(filePaths: string[]): Promise<number> {
+        let total = 0;
+
+        for (const filePath of filePaths) {
+            total += await this.countEffectiveLinesInFile(filePath);
+        }
+
+        return total;
+    }
+
+    private async countEffectiveLinesInFile(filePath: string): Promise<number> {
+        const content = await fs.promises.readFile(filePath, 'utf-8');
+        const lines = content.split(/\r?\n/);
+        let effectiveLines = 0;
+        let inBlockComment = false;
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) {
+                continue;
+            }
+
+            const result = this.stripLeadingCommentOnlySyntax(trimmed, inBlockComment);
+            inBlockComment = result.inBlockComment;
+            if (result.hasCode) {
+                effectiveLines++;
+            }
+        }
+
+        return effectiveLines;
+    }
+
+    private stripLeadingCommentOnlySyntax(line: string, inBlockComment: boolean): { hasCode: boolean; inBlockComment: boolean } {
+        let remaining = line;
+        let blockCommentOpen = inBlockComment;
+
+        while (remaining.length > 0) {
+            if (blockCommentOpen) {
+                const blockEnd = remaining.indexOf('*/');
+                if (blockEnd === -1) {
+                    return { hasCode: false, inBlockComment: true };
+                }
+                remaining = remaining.slice(blockEnd + 2).trimStart();
+                blockCommentOpen = false;
+                continue;
+            }
+
+            if (remaining.startsWith('/*')) {
+                const blockEnd = remaining.indexOf('*/', 2);
+                if (blockEnd === -1) {
+                    return { hasCode: false, inBlockComment: true };
+                }
+                remaining = remaining.slice(blockEnd + 2).trimStart();
+                continue;
+            }
+
+            if (remaining.startsWith('<!--')) {
+                const htmlCommentEnd = remaining.indexOf('-->', 4);
+                if (htmlCommentEnd === -1) {
+                    return { hasCode: false, inBlockComment: false };
+                }
+                remaining = remaining.slice(htmlCommentEnd + 3).trimStart();
+                continue;
+            }
+
+            if (
+                remaining.startsWith('//') ||
+                remaining.startsWith('#') ||
+                remaining.startsWith('--')
+            ) {
+                return { hasCode: false, inBlockComment: false };
+            }
+
+            return { hasCode: true, inBlockComment: false };
+        }
+
+        return { hasCode: false, inBlockComment: blockCommentOpen };
     }
 
     private async deleteFileChunks(collectionName: string, relativePath: string): Promise<void> {
@@ -689,9 +864,12 @@ export class Context {
     }
 
     private async performSemanticSearch(codebasePath: string, query: string, topK: number = 5, threshold: number = 0.5, filterExpr?: string): Promise<SemanticSearchResult[]> {
+        const outputLimit = this.normalizeSearchOutputLimit(topK);
+        const candidateLimit = this.getSearchCandidateLimit(outputLimit);
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
         console.log(`[Context] 🔍 Executing ${searchType}: "${query}" in ${codebasePath}`);
+        console.log(`[Context] 🔍 Search limits: output=${outputLimit}, candidates=${candidateLimit}`);
 
         const collectionName = this.getCollectionName(codebasePath);
         console.log(`[Context] 🔍 Using collection: ${collectionName}`);
@@ -725,13 +903,13 @@ export class Context {
                     data: queryEmbedding.vector,
                     anns_field: "vector",
                     param: { "nprobe": 10 },
-                    limit: topK
+                    limit: candidateLimit
                 },
                 {
                     data: query,
                     anns_field: "sparse_vector",
                     param: { "drop_ratio_search": 0.2 },
-                    limit: topK
+                    limit: candidateLimit
                 }
             ];
 
@@ -748,7 +926,7 @@ export class Context {
                         strategy: 'rrf',
                         params: { k: 100 }
                     },
-                    limit: topK,
+                    limit: candidateLimit,
                     filterExpr
                 }
             );
@@ -756,16 +934,13 @@ export class Context {
             console.log(`[Context] 🔍 Raw search results count: ${searchResults.length}`);
 
             // 4. Convert to semantic search result format
-            const results: SemanticSearchResult[] = searchResults.map(result => ({
-                content: result.document.content,
-                relativePath: result.document.relativePath,
-                startLine: result.document.startLine,
-                endLine: result.document.endLine,
-                language: result.document.metadata.language || 'unknown',
-                score: result.score
-            }));
+            const results: SemanticSearchResult[] = searchResults.map(result => this.vectorSearchResultToSemanticSearchResult(
+                result.document,
+                result.score
+            ));
 
-            const dedupedResults = this.deduplicateResults(results);
+            const rankedResults = await this.addLexicalSearchResults(collectionName, query, candidateLimit, outputLimit, filterExpr, results);
+            const dedupedResults = this.deduplicateResults(rankedResults).slice(0, outputLimit);
             console.log(`[Context] ✅ Found ${results.length} results, ${dedupedResults.length} after dedup`);
             if (dedupedResults.length > 0) {
                 console.log(`[Context] 🔍 Top result score: ${dedupedResults[0].score}, path: ${dedupedResults[0].relativePath}`);
@@ -782,23 +957,664 @@ export class Context {
             const searchResults: VectorSearchResult[] = await this.vectorDatabase.search(
                 collectionName,
                 queryEmbedding.vector,
-                { topK, threshold, filterExpr }
+                { topK: candidateLimit, threshold, filterExpr }
             );
 
             // 3. Convert to semantic search result format
-            const results: SemanticSearchResult[] = searchResults.map(result => ({
-                content: result.document.content,
-                relativePath: result.document.relativePath,
-                startLine: result.document.startLine,
-                endLine: result.document.endLine,
-                language: result.document.metadata.language || 'unknown',
-                score: result.score
-            }));
+            const results: SemanticSearchResult[] = searchResults.map(result => this.vectorSearchResultToSemanticSearchResult(
+                result.document,
+                result.score
+            ));
 
-            const dedupedResults = this.deduplicateResults(results);
+            const rankedResults = await this.addLexicalSearchResults(collectionName, query, candidateLimit, outputLimit, filterExpr, results);
+            const dedupedResults = this.deduplicateResults(rankedResults).slice(0, outputLimit);
             console.log(`[Context] ✅ Found ${results.length} results, ${dedupedResults.length} after dedup`);
             return dedupedResults;
         }
+    }
+
+    private normalizeSearchOutputLimit(topK: number): number {
+        return Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 5;
+    }
+
+    private getSearchCandidateLimit(outputLimit: number): number {
+        // Keep visible output small while giving rerank/dedupe enough recall;
+        // the cap bounds Milvus dense/sparse request volume for large limits.
+        return Math.min(
+            Math.max(outputLimit * SEARCH_CANDIDATE_LIMIT_MULTIPLIER, SEARCH_CANDIDATE_LIMIT_MIN),
+            SEARCH_CANDIDATE_LIMIT_MAX
+        );
+    }
+
+    private async addLexicalSearchResults(
+        collectionName: string,
+        query: string,
+        candidateLimit: number,
+        outputLimit: number,
+        filterExpr: string | undefined,
+        vectorResults: SemanticSearchResult[]
+    ): Promise<SemanticSearchResult[]> {
+        const terms = this.extractLexicalSearchTerms(query);
+        if (terms.recallTerms.length === 0) {
+            return vectorResults;
+        }
+
+        const roleIntent = inferFileRoleIntent(query, filterExpr);
+        let exactRows: QueryRow[] = [];
+        let broadRows: QueryRow[] = [];
+        let exactCandidates: RankedLexicalCandidate[] = [];
+        try {
+            const lexicalLimits = this.getLexicalCandidateLimits(candidateLimit);
+            const exactFilter = this.buildExactCandidateFilter(terms, filterExpr);
+            exactRows = await this.vectorDatabase.query(
+                collectionName,
+                exactFilter,
+                [...DEFAULT_SEARCH_OUTPUT_FIELDS],
+                lexicalLimits.exact
+            );
+            exactCandidates = this.rankLexicalRows(exactRows, terms, roleIntent);
+            if (this.shouldQueryBroadLexicalCandidates(exactCandidates, outputLimit, lexicalLimits.exact)) {
+                const lexicalFilter = this.buildLexicalFilter(terms, filterExpr);
+                broadRows = await this.vectorDatabase.query(
+                    collectionName,
+                    lexicalFilter,
+                    [...DEFAULT_SEARCH_OUTPUT_FIELDS],
+                    lexicalLimits.broad
+                );
+            }
+        } catch (error) {
+            throw this.isMissingStructuredFieldError(error)
+                ? this.createCollectionSchemaMismatchError(collectionName, 'Milvus rejected one or more structured lexical filter fields.')
+                : error;
+        }
+
+        if (exactRows.length === 0 && broadRows.length === 0) {
+            return vectorResults;
+        }
+
+        const rankedByKey = new Map<string, RankedSearchResult>();
+        vectorResults.forEach((result, index) => {
+            const lexicalScore = this.scoreLexicalMatchWithReasons(result, terms, {}, roleIntent);
+            const reasons: SearchScoreReason[] = lexicalScore.reasons.length > 0 ? lexicalScore.reasons : ['semantic_match'];
+            rankedByKey.set(this.getSearchResultKey(result), {
+                ...result,
+                vectorScore: result.score,
+                lexicalScore: lexicalScore.score,
+                ownerTier: lexicalScore.ownerTier,
+                scoreReason: this.getPrimaryScoreReason(reasons),
+                scoreReasons: reasons,
+                originalRank: index
+            });
+        });
+
+        const lexicalCandidates = [
+            ...exactCandidates,
+            ...this.rankLexicalRows(this.excludeExistingQueryRows(broadRows, exactRows), terms, roleIntent)
+        ];
+
+        for (const candidate of lexicalCandidates) {
+            const { result, metadata, lexicalScore } = candidate;
+            const key = this.getSearchResultKey(result);
+            const existing = rankedByKey.get(key);
+            const reasons: SearchScoreReason[] = lexicalScore.reasons.length > 0 ? lexicalScore.reasons : ['semantic_match'];
+
+            if (existing) {
+                existing.lexicalScore = Math.max(existing.lexicalScore, lexicalScore.score);
+                existing.ownerTier = Math.max(existing.ownerTier, lexicalScore.ownerTier);
+                existing.score = Math.max(existing.score, result.score);
+                existing.scoreReasons = this.mergeScoreReasons(existing.scoreReasons ?? [], reasons);
+                existing.scoreReason = this.getPrimaryScoreReason(existing.scoreReasons);
+                existing.lexicalMetadata = metadata;
+            } else {
+                rankedByKey.set(key, {
+                    ...result,
+                    vectorScore: 0,
+                    lexicalScore: lexicalScore.score,
+                    ownerTier: lexicalScore.ownerTier,
+                    scoreReason: this.getPrimaryScoreReason(reasons),
+                    scoreReasons: reasons,
+                    lexicalMetadata: metadata,
+                    originalRank: vectorResults.length + rankedByKey.size
+                });
+            }
+        }
+
+        return [...rankedByKey.values()]
+            .sort((a, b) => {
+                const ownerTierDelta = b.ownerTier - a.ownerTier;
+                if (ownerTierDelta !== 0) return ownerTierDelta;
+
+                const lexicalDelta = b.lexicalScore - a.lexicalScore;
+                if (lexicalDelta !== 0) return lexicalDelta;
+
+                const vectorDelta = b.vectorScore - a.vectorScore;
+                if (vectorDelta !== 0) return vectorDelta;
+
+                return a.originalRank - b.originalRank;
+            })
+            .map(({
+                vectorScore: _vectorScore,
+                lexicalScore: _lexicalScore,
+                ownerTier: _ownerTier,
+                originalRank: _originalRank,
+                lexicalMetadata: _lexicalMetadata,
+                ...result
+            }) => result);
+    }
+
+    private getLexicalCandidateLimits(topK: number): { exact: number; broad: number } {
+        const normalizedTopK = Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 5;
+
+        return {
+            exact: Math.min(
+                Math.max(normalizedTopK * 20, LEXICAL_EXACT_CANDIDATE_LIMIT_MIN),
+                LEXICAL_EXACT_CANDIDATE_LIMIT_MAX
+            ),
+            broad: Math.min(
+                Math.max(normalizedTopK * 8, LEXICAL_BROAD_CANDIDATE_LIMIT_MIN),
+                LEXICAL_BROAD_CANDIDATE_LIMIT_MAX
+            )
+        };
+    }
+
+    private shouldQueryBroadLexicalCandidates(exactCandidates: RankedLexicalCandidate[], topK: number, exactLimit: number): boolean {
+        const normalizedTopK = Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 5;
+        const exactEnoughThreshold = Math.min(normalizedTopK, exactLimit);
+        const effectiveExactCandidates = exactCandidates.filter(candidate =>
+            candidate.lexicalScore.ownerTier >= LEXICAL_OWNER_TIERS.exactDefinition
+        );
+        return effectiveExactCandidates.length < exactEnoughThreshold;
+    }
+
+    private extractLexicalSearchTerms(query: string): LexicalSearchTerms {
+        const rawTerms = query
+            .split(/[^A-Za-z0-9_./-]+/)
+            .map(term => term.trim())
+            .filter(term => term.length >= 3 && term.length <= 120);
+
+        const strongAnchors = new Set<string>();
+        const weakDescriptors = new Set<string>();
+        const roleHints = new Set<string>();
+        const pathHints = new Set<string>();
+        for (const term of rawTerms) {
+            if (!/^[A-Za-z0-9_./-]+$/.test(term)) {
+                continue;
+            }
+
+            const isPathLike = /[./-]/.test(term);
+            const isIdentifierLike = /[A-Z]/.test(term) && /[a-z]/.test(term);
+            const isLongSpecificToken = term.length >= 12 && !/^[a-z]+$/.test(term);
+            const isRoleHint = this.isFileRoleHintToken(term);
+            if (isPathLike) {
+                pathHints.add(term);
+                const basename = path.basename(term, path.extname(term));
+                if (basename && basename !== term && basename.length >= 3) {
+                    pathHints.add(basename);
+                }
+            } else if (isIdentifierLike || isLongSpecificToken) {
+                strongAnchors.add(term);
+            } else if (isRoleHint) {
+                roleHints.add(term);
+            } else if (/^[a-z][a-z0-9_-]*$/i.test(term)) {
+                weakDescriptors.add(term);
+            }
+        }
+
+        const primaryTerms = [
+            ...strongAnchors,
+            ...pathHints,
+        ].slice(0, 8);
+        const fallbackRecallTerms = primaryTerms.length > 0
+            ? primaryTerms
+            : [...roleHints].slice(0, 8);
+
+        return {
+            strongAnchors: [...strongAnchors].slice(0, 8),
+            weakDescriptors: [...weakDescriptors].slice(0, 8),
+            roleHints: [...roleHints].slice(0, 8),
+            pathHints: [...pathHints].slice(0, 8),
+            recallTerms: fallbackRecallTerms,
+            scoringTerms: [
+                ...strongAnchors,
+                ...pathHints,
+                ...roleHints,
+            ].slice(0, 12)
+        };
+    }
+
+    private buildLexicalFilter(terms: LexicalSearchTerms, filterExpr?: string): string {
+        const termFilters = terms.recallTerms
+            .map(term => this.escapeFilterString(term))
+            .flatMap(term => [
+                `relativePath like "%${term}%"`,
+                `content like "%${term}%"`,
+                `primarySymbol like "%${term}%"`,
+                `basename like "%${term}%"`,
+                `pathSegment0 like "%${term}%"`,
+                `pathSegment1 like "%${term}%"`,
+                `pathSegment2 like "%${term}%"`,
+                `pathSegment3 like "%${term}%"`,
+                `pathSegment4 like "%${term}%"`
+            ]);
+
+        const lexicalFilter = `(${termFilters.join(' or ')})`;
+        if (filterExpr && filterExpr.trim().length > 0) {
+            return `(${filterExpr}) and ${lexicalFilter}`;
+        }
+
+        return lexicalFilter;
+    }
+
+    private buildExactCandidateFilter(terms: LexicalSearchTerms, filterExpr?: string): string {
+        const termFilters = terms.recallTerms
+            .map(term => this.escapeFilterString(term))
+            .flatMap(term => {
+                const filters = [
+                    `relativePath like "%${term}%"`,
+                    `basename == "${term}"`,
+                    `primarySymbol == "${term}"`,
+                    `primarySymbol like "%${term}%"`,
+                    `pathSegment0 == "${term}"`,
+                    `pathSegment1 == "${term}"`,
+                    `pathSegment2 == "${term}"`,
+                    `pathSegment3 == "${term}"`,
+                    `pathSegment4 == "${term}"`
+                ];
+
+                if (this.isIdentifierTerm(term)) {
+                    filters.push(
+                        `(isDefinition == true and primarySymbol == "${term}")`,
+                        `content like "%class ${term}%"`,
+                        `content like "%interface ${term}%"`,
+                        `content like "%function ${term}%"`,
+                        `content like "%def ${term}%"`,
+                        `content like "%func ${term}%"`,
+                        `content like "%fn ${term}%"`,
+                        `content like "%struct ${term}%"`,
+                        `content like "%const ${term}%"`,
+                        `content like "%type ${term}%"`,
+                        `content like "%enum ${term}%"`
+                    );
+                }
+
+                return filters;
+            });
+
+        const exactFilter = `(${termFilters.join(' or ')})`;
+        if (filterExpr && filterExpr.trim().length > 0) {
+            return `(${filterExpr}) and ${exactFilter}`;
+        }
+
+        return exactFilter;
+    }
+
+    private isMissingStructuredFieldError(error: unknown): boolean {
+        const message = error instanceof Error ? error.message : String(error);
+        return STRUCTURED_METADATA_FIELDS.some(field => message.includes(field))
+            && /field|schema|output|not.*exist|not.*found|cannot.*find|undefined/i.test(message);
+    }
+
+    private isIdentifierTerm(term: string): boolean {
+        return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(term);
+    }
+
+    private isFileRoleHintToken(term: string): boolean {
+        return /^(?:__tests__|tests?|specs?|e2e|readme|docs?|documentation|markdown|mdx?|css|scss|sass|less|stylus?|styles?|stylesheet|generated|dist|build|bundle|minified|min)$/i.test(term);
+    }
+
+    private vectorSearchResultToSemanticSearchResult(document: VectorDocument, score: number): SemanticSearchResult {
+        const lineRange = normalizeLineRange({
+            startLine: document.startLine,
+            endLine: document.endLine,
+            metadata: document.metadata,
+            content: document.content
+        });
+
+        return {
+            content: document.content,
+            relativePath: document.relativePath,
+            ...lineRange,
+            language: document.metadata.language || 'unknown',
+            score,
+            scoreReason: 'semantic_match',
+            scoreReasons: ['semantic_match']
+        };
+    }
+
+    private rankLexicalRows(rows: QueryRow[], terms: LexicalSearchTerms, roleIntent: FileRoleIntent): RankedLexicalCandidate[] {
+        return rows
+            .map(row => {
+                const metadata = this.getRowMetadata(row);
+                const result = this.rowToSemanticSearchResult(row, terms, metadata, roleIntent);
+                const lexicalScore = this.scoreLexicalMatchWithReasons(result, terms, metadata, roleIntent);
+                const reasons: SearchScoreReason[] = lexicalScore.reasons.length > 0 ? lexicalScore.reasons : ['semantic_match'];
+                result.score = lexicalScore.score;
+                result.scoreReason = this.getPrimaryScoreReason(reasons);
+                result.scoreReasons = reasons;
+
+                return { result, metadata, lexicalScore };
+            })
+            .sort((a, b) => {
+                const ownerTierDelta = b.lexicalScore.ownerTier - a.lexicalScore.ownerTier;
+                if (ownerTierDelta !== 0) return ownerTierDelta;
+
+                const scoreDelta = b.lexicalScore.score - a.lexicalScore.score;
+                if (scoreDelta !== 0) return scoreDelta;
+
+                const pathDelta = a.result.relativePath.localeCompare(b.result.relativePath);
+                if (pathDelta !== 0) return pathDelta;
+
+                return a.result.startLine - b.result.startLine;
+            });
+    }
+
+    private excludeExistingQueryRows(rows: QueryRow[], existingRows: QueryRow[]): QueryRow[] {
+        const existingKeys = new Set(existingRows.map(row => this.getQueryRowKey(row)));
+        return rows.filter(row => !existingKeys.has(this.getQueryRowKey(row)));
+    }
+
+    private getQueryRowKey(row: QueryRow): string {
+        return [
+            typeof row.relativePath === 'string' ? row.relativePath : '',
+            String(row.startLine ?? ''),
+            String(row.endLine ?? ''),
+            typeof row.id === 'string' ? row.id : ''
+        ].join(':');
+    }
+
+    private mergeScoreReasons(existingReasons: SearchScoreReason[], newReasons: SearchScoreReason[]): SearchScoreReason[] {
+        const merged = new Set<SearchScoreReason>([...existingReasons, ...newReasons]);
+        return [...merged].sort((a, b) => this.getScoreReasonPriority(b) - this.getScoreReasonPriority(a));
+    }
+
+    private getPrimaryScoreReason(reasons: SearchScoreReason[]): SearchScoreReason {
+        return this.mergeScoreReasons(reasons, [])[0] ?? 'semantic_match';
+    }
+
+    private getScoreReasonPriority(reason: SearchScoreReason): number {
+        switch (reason) {
+            case 'exact_filename':
+                return 300;
+            case 'exact_symbol_definition':
+                return 300;
+            case 'path_match':
+                return 200;
+            case 'reference_match':
+                return 100;
+            case 'semantic_match':
+                return 0;
+        }
+    }
+
+    private escapeFilterString(value: string): string {
+        return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    }
+
+    private getRowMetadata(row: QueryRow): QueryRow {
+        const structuredMetadata = this.getStructuredMetadataFromRow(row);
+        if (typeof row.metadata === 'string') {
+            try {
+                const parsed = JSON.parse(row.metadata) as unknown;
+                return this.isQueryRow(parsed) ? { ...parsed, ...structuredMetadata } : structuredMetadata;
+            } catch {
+                return structuredMetadata;
+            }
+        } else if (this.isQueryRow(row.metadata)) {
+            return { ...row.metadata, ...structuredMetadata };
+        }
+
+        return structuredMetadata;
+    }
+
+    private getStructuredMetadataFromRow(row: QueryRow): QueryRow {
+        const metadata: QueryRow = {};
+        for (const field of STRUCTURED_METADATA_FIELDS) {
+            const value = row[field];
+            if (typeof value === 'string' || typeof value === 'boolean') {
+                metadata[field] = value;
+            }
+        }
+        return metadata;
+    }
+
+    private rowToSemanticSearchResult(
+        row: QueryRow,
+        terms: LexicalSearchTerms,
+        metadata: QueryRow = this.getRowMetadata(row),
+        roleIntent: FileRoleIntent = inferFileRoleIntent(terms.scoringTerms.join(' '))
+    ): SemanticSearchResult {
+        const content = typeof row.content === 'string' ? row.content : '';
+        const lineRange = normalizeLineRange({
+            startLine: row.startLine,
+            endLine: row.endLine,
+            metadata,
+            content
+        });
+        const result: SemanticSearchResult = {
+            content,
+            relativePath: typeof row.relativePath === 'string' ? row.relativePath : '',
+            ...lineRange,
+            language: typeof metadata.language === 'string' ? metadata.language : this.getLanguageFromExtension(String(row.fileExtension || '')),
+            score: 0
+        };
+        const lexicalScore = this.scoreLexicalMatchWithReasons(result, terms, metadata, roleIntent);
+        const reasons: SearchScoreReason[] = lexicalScore.reasons.length > 0 ? lexicalScore.reasons : ['semantic_match'];
+        result.score = lexicalScore.score;
+        result.scoreReason = this.getPrimaryScoreReason(reasons);
+        result.scoreReasons = reasons;
+        return result;
+    }
+
+    private isQueryRow(value: unknown): value is QueryRow {
+        return typeof value === 'object' && value !== null && !Array.isArray(value);
+    }
+
+    private scoreLexicalMatch(
+        result: SemanticSearchResult,
+        terms: LexicalSearchTerms,
+        metadata: QueryRow = {},
+        roleIntent: FileRoleIntent = inferFileRoleIntent(terms.scoringTerms.join(' '))
+    ): number {
+        return this.scoreLexicalMatchWithReasons(result, terms, metadata, roleIntent).score;
+    }
+
+    private scoreLexicalMatchWithReasons(
+        result: SemanticSearchResult,
+        terms: LexicalSearchTerms,
+        metadata: QueryRow = {},
+        roleIntent: FileRoleIntent = inferFileRoleIntent(terms.scoringTerms.join(' '))
+    ): LexicalMatchScore {
+        const relativePath = result.relativePath;
+        const filename = path.basename(relativePath);
+        const basename = path.basename(relativePath, path.extname(relativePath));
+        const lowerPath = relativePath.toLowerCase();
+        const lowerFilename = filename.toLowerCase();
+        const lowerBasename = basename.toLowerCase();
+        const content = result.content;
+        const lowerContent = content.toLowerCase();
+        const metadataFileName = this.getMetadataString(metadata, 'fileName');
+        const metadataBasename = this.getMetadataString(metadata, 'basename');
+        const symbols = this.getMetadataStringArray(metadata, 'symbols');
+        const definitionIdentifiers = this.getMetadataStringArray(metadata, 'definitionIdentifiers');
+        const pathTokens = this.getMetadataStringArray(metadata, 'pathTokens');
+
+        let score = 0;
+        let ownerTier: number = LEXICAL_OWNER_TIERS.semantic;
+        const reasons = new Set<SearchScoreReason>();
+        const promoteOwnerTier = (tier: number) => {
+            ownerTier = Math.max(ownerTier, tier);
+        };
+
+        for (const term of terms.scoringTerms) {
+            const lowerTerm = term.toLowerCase();
+
+            if (filename === term || lowerFilename === lowerTerm || metadataFileName.toLowerCase() === lowerTerm) {
+                score += 500;
+                reasons.add('exact_filename');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.exactFilename);
+            } else if (basename === term || lowerBasename === lowerTerm || metadataBasename.toLowerCase() === lowerTerm) {
+                score += 420;
+                reasons.add('exact_filename');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.exactFilename);
+            } else if (relativePath.includes(term)) {
+                score += 90;
+                reasons.add('path_match');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.pathOwner);
+            } else if (lowerPath.includes(lowerTerm)) {
+                score += 70;
+                reasons.add('path_match');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.pathOwner);
+            }
+
+            if (definitionIdentifiers.some(symbol => symbol === term || symbol.toLowerCase() === lowerTerm)) {
+                score += 360;
+                reasons.add('exact_symbol_definition');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.exactDefinition);
+            } else if (this.hasDefinitionMatch(content, term)) {
+                score += 320;
+                reasons.add('exact_symbol_definition');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.exactDefinition);
+            } else if (symbols.some(symbol => symbol === term || symbol.toLowerCase() === lowerTerm)) {
+                score += 260;
+                reasons.add('reference_match');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.reference);
+            }
+
+            if (pathTokens.some(token => token === term || token.toLowerCase() === lowerTerm)) {
+                score += 140;
+                reasons.add('path_match');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.pathOwner);
+            }
+
+            if (content.includes(term)) {
+                score += 100;
+                reasons.add('reference_match');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.reference);
+            } else if (lowerContent.includes(lowerTerm)) {
+                score += 50;
+                reasons.add('reference_match');
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.reference);
+            }
+        }
+
+        if (score > 0) {
+            score += this.scoreWeakDescriptorMatches(result, metadata, terms.weakDescriptors);
+            score += this.scoreFileRoleMatch(result, metadata, roleIntent);
+        }
+
+        const scoreReasons = this.mergeScoreReasons([...reasons], []);
+        return {
+            score,
+            reasons: scoreReasons,
+            ownerTier
+        };
+    }
+
+    private scoreWeakDescriptorMatches(result: SemanticSearchResult, metadata: QueryRow, weakDescriptors: string[]): number {
+        if (weakDescriptors.length === 0) {
+            return 0;
+        }
+
+        const haystacks = [
+            result.relativePath,
+            result.content,
+            this.getMetadataString(metadata, 'fileName'),
+            this.getMetadataString(metadata, 'basename'),
+            ...this.getMetadataStringArray(metadata, 'pathTokens'),
+            ...this.getMetadataStringArray(metadata, 'symbols'),
+            ...this.getMetadataStringArray(metadata, 'definitionIdentifiers')
+        ].map(value => value.toLowerCase());
+
+        let score = 0;
+        for (const descriptor of weakDescriptors) {
+            const lowerDescriptor = descriptor.toLowerCase();
+            if (haystacks.some(value => value.includes(lowerDescriptor))) {
+                score += 15;
+            }
+        }
+
+        return Math.min(score, 45);
+    }
+
+    private scoreFileRoleMatch(result: SemanticSearchResult, metadata: QueryRow, roleIntent: FileRoleIntent): number {
+        const role = this.getFileRole(result, metadata);
+        if (isFileRoleExplicitlyRequested(role, roleIntent, result.relativePath)) {
+            return role === 'implementation' && roleIntent.preferredRoles.size > 0 ? 0 : 120;
+        }
+
+        switch (role) {
+            case 'implementation':
+                return 80;
+            case 'test':
+            case 'style':
+                return -80;
+            case 'docs':
+                return -70;
+            case 'config':
+                return -40;
+            case 'generated':
+                return -120;
+            case 'barrel':
+                return -60;
+            case 'entrypoint':
+                return 20;
+        }
+    }
+
+    private getFileRole(result: SemanticSearchResult, metadata: QueryRow): FileRole {
+        const metadataRole = this.getMetadataString(metadata, 'fileRole');
+        if (this.isFileRole(metadataRole)) {
+            return metadataRole;
+        }
+
+        return classifyFileRole(result.relativePath);
+    }
+
+    private isFileRole(value: string): value is FileRole {
+        return value === 'implementation'
+            || value === 'test'
+            || value === 'docs'
+            || value === 'style'
+            || value === 'config'
+            || value === 'generated'
+            || value === 'barrel'
+            || value === 'entrypoint';
+    }
+
+    private getMetadataString(metadata: QueryRow, key: string): string {
+        const value = metadata[key];
+        return typeof value === 'string' ? value : '';
+    }
+
+    private getMetadataStringArray(metadata: QueryRow, key: string): string[] {
+        const value = metadata[key];
+        if (!Array.isArray(value)) {
+            return [];
+        }
+
+        return value.filter((item): item is string => typeof item === 'string');
+    }
+
+    private hasDefinitionMatch(content: string, term: string): boolean {
+        const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const definitionPatterns = [
+            new RegExp(`\\b(?:export\\s+)?(?:default\\s+)?(?:abstract\\s+)?(?:class|interface|function|type|enum|const|let|var)\\s+${escapedTerm}\\b`),
+            new RegExp(`\\b(?:async\\s+)?def\\s+${escapedTerm}\\s*\\(`),
+            new RegExp(`\\bfunc\\s+(?:\\([^)]+\\)\\s*)?${escapedTerm}\\s*\\(`),
+            new RegExp(`\\b(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${escapedTerm}\\s*\\(`),
+            new RegExp(`\\b(?:pub(?:\\([^)]*\\))?\\s+)?(?:struct|enum|trait|mod)\\s+${escapedTerm}\\b`),
+            new RegExp(`\\b(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\\s)+(?:[A-Za-z_$][A-Za-z0-9_$<>\\[\\],.?]*\\s+)+${escapedTerm}\\s*\\(`),
+            new RegExp(`^#{1,6}\\s+${escapedTerm}(?:\\s|$)`, 'm'),
+        ];
+        return definitionPatterns.some(pattern => pattern.test(content));
+    }
+
+    private getSearchResultKey(result: SemanticSearchResult): string {
+        if (result.lineRangeUnavailable) {
+            return `${result.relativePath}:unknown:${crypto.createHash('sha1').update(result.content).digest('hex')}`;
+        }
+
+        return `${result.relativePath}:${result.startLine}:${result.endLine}`;
     }
 
     private async withSearchTimeout<T>(operation: Promise<T>, codebasePath: string, query: string): Promise<T> {
@@ -821,30 +1637,8 @@ export class Context {
         }
     }
 
-    /**
-     * Deduplicate search results by file + line range overlap.
-     * Keeps higher-scored result when two results from the same file overlap >50%.
-     */
     private deduplicateResults(results: SemanticSearchResult[]): SemanticSearchResult[] {
-        const kept: SemanticSearchResult[] = [];
-
-        for (const result of results) {
-            const overlaps = kept.some((existing) => {
-                if (existing.relativePath !== result.relativePath) return false;
-                const overlapStart = Math.max(existing.startLine, result.startLine);
-                const overlapEnd = Math.min(existing.endLine, result.endLine);
-                if (overlapStart > overlapEnd) return false;
-                // Line ranges are inclusive (endLine = startLine + N - 1).
-                const overlapSize = overlapEnd - overlapStart + 1;
-                const resultSize = result.endLine - result.startLine + 1;
-                return resultSize > 0 && overlapSize / resultSize > 0.5;
-            });
-            if (!overlaps) {
-                kept.push(result);
-            }
-        }
-
-        return kept;
+        return deduplicateSemanticSearchResults(results);
     }
 
     /**
@@ -951,7 +1745,7 @@ export class Context {
     /**
      * Prepare vector collection
      */
-    private async prepareCollection(codebasePath: string, forceReindex: boolean = false): Promise<void> {
+    private async prepareCollection(codebasePath: string, forceReindex: boolean = false, splitter: Splitter = this.codeSplitter): Promise<void> {
         const isHybrid = this.getIsHybrid();
         const collectionType = isHybrid === true ? 'hybrid vector' : 'vector';
         console.log(`[Context] 🔧 Preparing ${collectionType} collection for codebase: ${codebasePath}${forceReindex ? ' (FORCE REINDEX)' : ''}`);
@@ -980,7 +1774,7 @@ export class Context {
         console.log(`[Context] 🔍 Detecting embedding dimension for ${this.embedding.getProvider()} provider...`);
         const dimension = await this.embedding.detectDimension();
         console.log(`[Context] 📏 Detected dimension: ${dimension} for ${this.embedding.getProvider()}`);
-        const description = this.createCollectionDescription(codebasePath, this.getCurrentEmbeddingMetadata(dimension));
+        const description = this.createCollectionDescription(codebasePath, this.getCurrentEmbeddingMetadata(dimension), splitter);
         if (isHybrid === true) {
             await this.vectorDatabase.createHybridCollection(collectionName, dimension, description);
         } else {
@@ -991,22 +1785,22 @@ export class Context {
     }
 
     private async validateExistingCollectionEmbedding(collectionName: string, currentDimension?: number): Promise<void> {
-        if (this.isEmbeddingModelCheckSkipped()) {
-            console.warn(`[Context] ⚠️ Skipping embedding model compatibility check because ${Context.SKIP_EMBEDDING_MODEL_CHECK_ENV} is set.`);
-            return;
-        }
-
         let description: string;
         try {
             description = await this.vectorDatabase.getCollectionDescription(collectionName);
         } catch (error) {
-            console.warn(`[Context] ⚠️ Unable to read collection metadata for '${collectionName}', embedding model compatibility was not verified: ${error instanceof Error ? error.message : String(error)}`);
-            return;
+            throw this.createCollectionSchemaMismatchError(collectionName, `Unable to read hitmuxContext collection metadata: ${error instanceof Error ? error.message : String(error)}.`);
         }
 
         const storedMetadata = this.parseCollectionMetadata(description);
         if (!storedMetadata) {
-            console.warn(`[Context] ⚠️ Collection '${collectionName}' has no embedding metadata, embedding model compatibility was not verified.`);
+            throw this.createCollectionSchemaMismatchError(collectionName, 'Missing hitmuxContext collection metadata.');
+        }
+
+        this.assertCurrentCollectionSchema(collectionName, storedMetadata);
+
+        if (this.isEmbeddingModelCheckSkipped()) {
+            console.warn(`[Context] ⚠️ Skipping embedding model compatibility check because ${Context.SKIP_EMBEDDING_MODEL_CHECK_ENV} is set.`);
             return;
         }
 
@@ -1027,19 +1821,19 @@ export class Context {
 
         if (mismatches.length === 0) {
             console.log(`[Context] ✅ Collection '${collectionName}' embedding metadata matches current configuration (${currentEmbedding.provider}/${currentEmbedding.model}, dimension ${currentEmbedding.dimension}).`);
-            return;
+        } else {
+            const message = [
+                `Embedding model mismatch for collection '${collectionName}'.`,
+                `Indexed with provider=${storedEmbedding.provider}, model=${storedEmbedding.model}, dimension=${storedEmbedding.dimension};`,
+                `current provider=${currentEmbedding.provider}, model=${currentEmbedding.model}, dimension=${currentEmbedding.dimension}.`,
+                `Details: ${mismatches.join('; ')}.`,
+                `Reindex the codebase or set ${Context.SKIP_EMBEDDING_MODEL_CHECK_ENV}=true to bypass this check.`
+            ].join(' ');
+
+            console.error(`[Context] ❌ ${message}`);
+            throw new EmbeddingModelMismatchError(message);
         }
 
-        const message = [
-            `Embedding model mismatch for collection '${collectionName}'.`,
-            `Indexed with provider=${storedEmbedding.provider}, model=${storedEmbedding.model}, dimension=${storedEmbedding.dimension};`,
-            `current provider=${currentEmbedding.provider}, model=${currentEmbedding.model}, dimension=${currentEmbedding.dimension}.`,
-            `Details: ${mismatches.join('; ')}.`,
-            `Reindex the codebase or set ${Context.SKIP_EMBEDDING_MODEL_CHECK_ENV}=true to bypass this check.`
-        ].join(' ');
-
-        console.error(`[Context] ❌ ${message}`);
-        throw new EmbeddingModelMismatchError(message);
     }
 
     private getCurrentEmbeddingMetadata(dimension: number): CollectionEmbeddingMetadata {
@@ -1050,11 +1844,14 @@ export class Context {
         };
     }
 
-    private createCollectionDescription(codebasePath: string, embedding: CollectionEmbeddingMetadata): string {
+    private createCollectionDescription(codebasePath: string, embedding: CollectionEmbeddingMetadata, splitter: Splitter = this.codeSplitter): string {
         const metadata: CollectionMetadata = {
             version: 1,
             codebasePath,
             embedding,
+            schemaVersion: Context.COLLECTION_SCHEMA_VERSION,
+            metadataVersion: Context.COLLECTION_METADATA_VERSION,
+            splitterType: this.getSplitterTypeName(splitter),
             createdAt: new Date().toISOString(),
         };
 
@@ -1092,12 +1889,49 @@ export class Context {
                     model: embedding.model,
                     dimension: embedding.dimension,
                 },
+                schemaVersion: typeof parsed.schemaVersion === 'number' ? parsed.schemaVersion : undefined,
+                metadataVersion: typeof parsed.metadataVersion === 'number' ? parsed.metadataVersion : undefined,
+                splitterType: typeof parsed.splitterType === 'string' ? parsed.splitterType : undefined,
                 createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : '',
             };
         } catch (error) {
             console.warn(`[Context] ⚠️ Failed to parse collection embedding metadata: ${error instanceof Error ? error.message : String(error)}`);
             return undefined;
         }
+    }
+
+    private assertCurrentCollectionSchema(collectionName: string, metadata: CollectionMetadata): void {
+        const schemaVersion = metadata.schemaVersion ?? 1;
+        const metadataVersion = metadata.metadataVersion ?? 1;
+        const mismatches: string[] = [];
+
+        if (schemaVersion !== Context.COLLECTION_SCHEMA_VERSION) {
+            mismatches.push(`schemaVersion indexed=${schemaVersion} current=${Context.COLLECTION_SCHEMA_VERSION}`);
+        }
+        if (metadataVersion !== Context.COLLECTION_METADATA_VERSION) {
+            mismatches.push(`metadataVersion indexed=${metadataVersion} current=${Context.COLLECTION_METADATA_VERSION}`);
+        }
+
+        if (mismatches.length === 0) {
+            return;
+        }
+
+        throw this.createCollectionSchemaMismatchError(collectionName, mismatches.join('; '));
+    }
+
+    private createCollectionSchemaMismatchError(collectionName: string, detail: string): CollectionSchemaMismatchError {
+        return new CollectionSchemaMismatchError(`Collection '${collectionName}' uses an unsupported search schema. ${detail} Reindex the codebase with force=true to create schema v2 metadata fields.`);
+    }
+
+    private getSplitterTypeName(splitter: Splitter): string {
+        const constructorName = splitter.constructor?.name;
+        if (constructorName === 'AstCodeSplitter') {
+            return 'ast';
+        }
+        if (constructorName === 'LangChainCodeSplitter') {
+            return 'langchain';
+        }
+        return constructorName || 'custom';
     }
 
     private isEmbeddingModelCheckSkipped(): boolean {
@@ -1162,7 +1996,7 @@ export class Context {
         signal?: AbortSignal
     ): Promise<{ processedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
         const isHybrid = this.getIsHybrid();
-        const EMBEDDING_BATCH_SIZE = Math.max(1, Math.floor(configManager.getNumber('embeddingBatchSize') || 100));
+        const EMBEDDING_BATCH_SIZE = Math.max(1, Math.floor(configManager.getNumber('embeddingBatchSize') || 32));
         const EMBEDDING_CONCURRENCY = Math.max(1, Math.floor(configManager.getNumber('embeddingConcurrency') || 1));
         const CHUNK_LIMIT = 450000;
         console.log(`[Context] 🔧 Using embeddingBatchSize: ${EMBEDDING_BATCH_SIZE}`);
@@ -1361,65 +2195,151 @@ export class Context {
 
         if (isHybrid === true) {
             // Create hybrid vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => {
-                if (!chunk.metadata.filePath) {
-                    throw new Error(`Missing filePath in chunk metadata at index ${index}`);
-                }
-
-                const relativePath = path.relative(codebasePath, chunk.metadata.filePath);
-                const fileExtension = path.extname(chunk.metadata.filePath);
-                const { filePath: _filePath, startLine: _startLine, endLine: _endLine, ...restMetadata } = chunk.metadata;
-
-                return {
-                    id: this.generateId(relativePath, chunk.metadata.startLine || 0, chunk.metadata.endLine || 0, chunk.content),
-                    content: chunk.content, // Full text content for BM25 and storage
-                    vector: embeddings[index].vector, // Dense vector
-                    relativePath,
-                    startLine: chunk.metadata.startLine || 0,
-                    endLine: chunk.metadata.endLine || 0,
-                    fileExtension,
-                    metadata: {
-                        ...restMetadata,
-                        codebasePath,
-                        language: chunk.metadata.language || 'unknown',
-                        chunkIndex: index
-                    }
-                };
-            });
+            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index));
 
             // Store to vector database
             await this.vectorDatabase.insertHybrid(this.getCollectionName(codebasePath), documents);
         } else {
             // Create regular vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => {
-                if (!chunk.metadata.filePath) {
-                    throw new Error(`Missing filePath in chunk metadata at index ${index}`);
-                }
-
-                const relativePath = path.relative(codebasePath, chunk.metadata.filePath);
-                const fileExtension = path.extname(chunk.metadata.filePath);
-                const { filePath: _filePath, startLine: _startLine, endLine: _endLine, ...restMetadata } = chunk.metadata;
-
-                return {
-                    id: this.generateId(relativePath, chunk.metadata.startLine || 0, chunk.metadata.endLine || 0, chunk.content),
-                    vector: embeddings[index].vector,
-                    content: chunk.content,
-                    relativePath,
-                    startLine: chunk.metadata.startLine || 0,
-                    endLine: chunk.metadata.endLine || 0,
-                    fileExtension,
-                    metadata: {
-                        ...restMetadata,
-                        codebasePath,
-                        language: chunk.metadata.language || 'unknown',
-                        chunkIndex: index
-                    }
-                };
-            });
+            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index));
 
             // Store to vector database
             await this.vectorDatabase.insert(this.getCollectionName(codebasePath), documents);
         }
+    }
+
+    private createVectorDocument(chunk: CodeChunk, embedding: EmbeddingVector, codebasePath: string, chunkIndex: number): VectorDocument {
+        if (!chunk.metadata.filePath) {
+            throw new Error(`Missing filePath in chunk metadata at index ${chunkIndex}`);
+        }
+
+        const relativePath = path.relative(codebasePath, chunk.metadata.filePath);
+        const normalizedRelativePath = relativePath.replace(/\\/g, '/');
+        const fileExtension = path.extname(chunk.metadata.filePath);
+        const { filePath: _filePath, startLine: _startLine, endLine: _endLine, ...restMetadata } = chunk.metadata;
+        const sourceStartLine = chunk.metadata.startLine || 0;
+        const sourceEndLine = chunk.metadata.endLine || 0;
+        const searchMetadata = this.createSearchMetadata(normalizedRelativePath, chunk.content, restMetadata);
+        const structuredFields = this.createStructuredDocumentFields(searchMetadata);
+
+        return {
+            id: this.generateId(normalizedRelativePath, sourceStartLine, sourceEndLine, chunk.content),
+            vector: embedding.vector,
+            content: chunk.content,
+            relativePath: normalizedRelativePath,
+            startLine: sourceStartLine,
+            endLine: sourceEndLine,
+            fileExtension,
+            ...structuredFields,
+            metadata: {
+                ...restMetadata,
+                ...searchMetadata,
+                ...structuredFields,
+                codebasePath,
+                language: chunk.metadata.language || 'unknown',
+                sourceStartLine,
+                sourceEndLine,
+                chunkIndex
+            }
+        };
+    }
+
+    private createSearchMetadata(relativePath: string, content: string, chunkMetadata: Record<string, unknown>): QueryRow {
+        const fileName = path.posix.basename(relativePath);
+        const extension = path.posix.extname(fileName);
+        const basename = path.posix.basename(fileName, extension);
+        const pathTokens = this.extractPathTokens(relativePath);
+        const definitionIdentifierSet = new Set<string>(this.extractDefinitionIdentifiers(content));
+        const symbols = new Set<string>(definitionIdentifierSet);
+        const isDefinition = chunkMetadata.isDefinition === true;
+        const symbolName = typeof chunkMetadata.symbolName === 'string' ? chunkMetadata.symbolName : '';
+
+        if (symbolName.length > 0) {
+            symbols.add(symbolName);
+            if (isDefinition) {
+                definitionIdentifierSet.add(symbolName);
+            }
+        }
+
+        const definitionIdentifiers = [...definitionIdentifierSet];
+        const primarySymbol = symbolName || definitionIdentifiers[0] || '';
+        const pathSegments = this.extractPathSegments(relativePath);
+
+        return {
+            fileName,
+            basename,
+            pathTokens,
+            symbols: [...symbols],
+            definitionIdentifiers,
+            primarySymbol,
+            symbolKind: typeof chunkMetadata.symbolKind === 'string' ? chunkMetadata.symbolKind : '',
+            chunkKind: typeof chunkMetadata.chunkKind === 'string' ? chunkMetadata.chunkKind : 'code',
+            isDefinition,
+            contentHash: crypto.createHash('sha1').update(content).digest('hex'),
+            normalizedContentHash: getNormalizedContentHash(content),
+            fileRole: classifyFileRole(relativePath, extension),
+            pathSegment0: pathSegments[0] || '',
+            pathSegment1: pathSegments[1] || '',
+            pathSegment2: pathSegments[2] || '',
+            pathSegment3: pathSegments[3] || '',
+            pathSegment4: pathSegments[4] || '',
+        };
+    }
+
+    private createStructuredDocumentFields(metadata: QueryRow): Partial<VectorDocument> {
+        return {
+            primarySymbol: this.getMetadataString(metadata, 'primarySymbol'),
+            symbolKind: this.getMetadataString(metadata, 'symbolKind'),
+            chunkKind: this.getMetadataString(metadata, 'chunkKind'),
+            isDefinition: metadata.isDefinition === true,
+            fileRole: this.getMetadataString(metadata, 'fileRole'),
+            basename: this.getMetadataString(metadata, 'basename'),
+            pathSegment0: this.getMetadataString(metadata, 'pathSegment0'),
+            pathSegment1: this.getMetadataString(metadata, 'pathSegment1'),
+            pathSegment2: this.getMetadataString(metadata, 'pathSegment2'),
+            pathSegment3: this.getMetadataString(metadata, 'pathSegment3'),
+            pathSegment4: this.getMetadataString(metadata, 'pathSegment4'),
+        };
+    }
+
+    private extractPathTokens(relativePath: string): string[] {
+        return [...new Set(
+            relativePath
+                .split(/[\\/._-]+/)
+                .map(token => token.trim())
+                .filter(token => token.length >= 2)
+        )];
+    }
+
+    private extractPathSegments(relativePath: string): string[] {
+        return relativePath
+            .replace(/\\/g, '/')
+            .split('/')
+            .map(segment => segment.trim())
+            .filter(segment => segment.length > 0)
+            .slice(0, 5);
+    }
+
+    private extractDefinitionIdentifiers(content: string): string[] {
+        const identifiers = new Set<string>();
+        const definitionPatterns = [
+            /\b(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|function|type|enum|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/g,
+            /\b(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+            /\bfunc\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+            /\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+            /\b(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|mod)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g,
+            /\b(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)+(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
+            /^#{1,6}\s+(.+?)\s*#*\s*$/gm,
+        ];
+
+        for (const pattern of definitionPatterns) {
+            let match: RegExpExecArray | null;
+            while ((match = pattern.exec(content)) !== null) {
+                identifiers.add(match[1].trim());
+            }
+        }
+
+        return [...identifiers];
     }
 
     /**
@@ -1461,9 +2381,9 @@ export class Context {
     private getLanguageFromExtension(ext: string): string {
         const languageMap: Record<string, string> = {
             '.ts': 'typescript',
-            '.tsx': 'typescript',
+            '.tsx': 'tsx',
             '.js': 'javascript',
-            '.jsx': 'javascript',
+            '.jsx': 'jsx',
             '.py': 'python',
             '.java': 'java',
             '.cpp': 'cpp',
@@ -1486,6 +2406,8 @@ export class Context {
             '.exs': 'elixir',
             '.lua': 'lua',
             '.luau': 'luau',
+            '.md': 'markdown',
+            '.markdown': 'markdown',
             '.ipynb': 'jupyter'
         };
         return languageMap[ext] || 'text';
@@ -1538,7 +2460,7 @@ export class Context {
         try {
             let fileBasedPatterns: string[] = [];
 
-            // Load root ignore files and scoped nested .gitignore files.
+            // Load root and nested .*ignore files with directory-local scope.
             const ignoreFiles = await this.findIgnoreFiles(codebasePath, additionalIgnoreFiles);
             for (const ignoreFile of ignoreFiles) {
                 const patterns = await this.loadIgnoreFile(ignoreFile.filePath, path.relative(codebasePath, ignoreFile.filePath));
@@ -1597,9 +2519,7 @@ export class Context {
                     const relativePath = path.relative(codebasePath, fullPath).replace(/\\/g, '/');
 
                     if (entry.isFile()) {
-                        if (!currentRelativePath && entry.name.startsWith('.') && entry.name.endsWith('ignore')) {
-                            ignoreFiles.push({ filePath: fullPath, scopeRelativePath: '' });
-                        } else if (currentRelativePath && entry.name === '.gitignore') {
+                        if (entry.name.startsWith('.') && entry.name.endsWith('ignore')) {
                             ignoreFiles.push({ filePath: fullPath, scopeRelativePath: currentRelativePath });
                         }
                     } else if (entry.isDirectory() && !baseMatcher.shouldIgnore(relativePath, true)) {

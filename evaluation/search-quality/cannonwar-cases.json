@@ -1,0 +1,210 @@
+{
+    "name": "cannonwar-search-quality",
+    "codebasePath": "/opt/CannonWar",
+    "manualBaseline": {
+        "exactSymbolOrFileCases": {
+            "strong": 8,
+            "partial": 2,
+            "weak": 5
+        },
+        "naturalLanguageCases": {
+            "strong": 8,
+            "partial": 4,
+            "weak": 3
+        }
+    },
+    "cases": [
+        {
+            "id": "exact-render-worker-bridge",
+            "query": "RenderWorkerBridge render worker bridge class",
+            "expected": [{ "path": "src/workers/bridge/renderWorkerBridge.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-render-worker-init",
+            "query": "worker initialization detects capabilities and creates render worker bridge",
+            "expected": [
+                { "path": "src/workers/init.ts", "role": "implementation" },
+                { "path": "src/workers/bridge/renderWorkerBridge.ts", "role": "implementation" }
+            ],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-save-manager",
+            "query": "SaveManager save load serialization",
+            "expected": [{ "path": "src/systems/save/saveManager.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-local-save-restore",
+            "query": "local game save restore world towers monsters buildings money",
+            "expected": [{ "path": "src/systems/save/saveManager.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-interpolation-system",
+            "query": "InterpolationSystem network rendering interpolation snapshots",
+            "expected": [{ "path": "src/network/rendering/interpolation.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-entity-snapshot-interpolation",
+            "query": "client renders server entity snapshots with interpolation between network ticks",
+            "expected": [
+                { "path": "src/network/rendering/interpolation.ts", "role": "implementation" },
+                { "path": "src/network/rendering/networkWorldAdapter.ts", "role": "implementation" }
+            ],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-network-event-emitter",
+            "query": "NetworkEventEmitter network event listener dispatch",
+            "expected": [{ "path": "src/network/eventEmitter.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-network-reconnection",
+            "query": "network client reconnect handles room connection and event callbacks",
+            "expected": [
+                { "path": "src/network/networkClient.ts", "role": "implementation" },
+                { "path": "src/network/reconnectionManager.ts", "role": "implementation" }
+            ],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-manual-cannon-panel",
+            "query": "ManualCannonPanel manual cannon targeting UI panel",
+            "expected": [{ "path": "src/ui/interfaces/battle/manualCannonPanel.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-manual-cannon-validation",
+            "query": "manual cannon fire validation range ammo owned tower auto target radius",
+            "expected": [{ "path": "shared/validation/towerValidation.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-game-room",
+            "query": "GameRoom server room game loop messages",
+            "expected": [{ "path": "server/src/rooms/GameRoom.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-server-game-loop",
+            "query": "server room advances game state broadcasts snapshots and handles player input",
+            "expected": [{ "path": "server/src/rooms/GameRoom.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-spatial-query-system",
+            "query": "SpatialQuerySystem find nearby towers monsters buildings bullets",
+            "expected": [{ "path": "src/game/spatial/spatialQuerySystem.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-client-spatial-grid",
+            "query": "client spatial hash grid collision nearby entity lookup",
+            "expected": [
+                { "path": "src/core/physics/spatialHashGrid.ts", "role": "implementation" },
+                { "path": "src/game/spatial/spatialQuerySystem.ts", "role": "implementation" }
+            ],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-tower-validation",
+            "query": "towerValidation validateBuildTowerBasic validateUpgradeTower validateSellTower",
+            "expected": [{ "path": "shared/validation/towerValidation.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-spawn-monster-validation",
+            "query": "validateSpawnMonster monster spawn validation cooldown target player",
+            "expected": [{ "path": "shared/validation/monsterValidation.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-server-input-validator",
+            "query": "InputValidator server validate player tower spawner messages",
+            "expected": [{ "path": "server/src/validation/inputValidator.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-server-bullet-manager",
+            "query": "BulletManager server combat bullets update collisions",
+            "expected": [{ "path": "server/src/systems/combat/bulletManager.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-tower-attack-system",
+            "query": "TowerAttackSystem server tower attack target acquire fire",
+            "expected": [{ "path": "server/src/systems/combat/towerAttack.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-damage-calculator",
+            "query": "DamageCalculator armor damage critical elemental modifiers",
+            "expected": [{ "path": "server/src/systems/combat/damageCalculator.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-vision-system",
+            "query": "VisionSystem visibility broadcast filter fog of war",
+            "expected": [{ "path": "server/src/systems/vision/visionSystem.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "exact-visibility-map",
+            "query": "VisibilityMap stores visible cells player vision",
+            "expected": [{ "path": "server/src/systems/vision/visibilityMap.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-server-territory-ownership",
+            "query": "server computes territory ownership influence and expansion from player structures",
+            "expected": [{ "path": "server/src/systems/territory/territoryCalculator.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-server-energy-income",
+            "query": "server calculates energy income from mines territory and production rules",
+            "expected": [{ "path": "server/src/systems/energy/energyCalculator.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-server-mine-ownership",
+            "query": "server updates mine capture state and ownership over time",
+            "expected": [{ "path": "server/src/systems/mine/mineManager.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-client-ghost-tower-prediction",
+            "query": "client shows ghost tower prediction and reconciles with server state",
+            "expected": [{ "path": "src/network/rendering/clientPrediction.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-network-world-render-adapter",
+            "query": "adapter exposes network state through the world interface used by rendering",
+            "expected": [{ "path": "src/network/rendering/networkWorldAdapter.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-render-proxy-entities",
+            "query": "client render proxies translate network towers monsters buildings and bullets",
+            "expected": [{ "path": "src/network/rendering/renderProxy.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-multiplayer-ui-world-facade",
+            "query": "multiplayer UI panel manager reads world state through network client facade",
+            "expected": [{ "path": "src/ui/interfaces/battle/multiplayerWorldFacade.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        },
+        {
+            "id": "nl-client-entity-lifecycle",
+            "query": "client creates removes and updates towers monsters bullets and buildings in the world",
+            "expected": [{ "path": "src/game/entities/entityManager.ts", "role": "implementation" }],
+            "manualLabel": "pending_manual_review"
+        }
+    ]
+}

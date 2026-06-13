@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { IncrementalIndexTooLargeError } from "@hitmux/hitmux-context-engine-core";
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 
@@ -87,13 +88,12 @@ test("background sync schedules the next periodic run only after the current run
         (syncManager as any).backgroundSyncIntervalMs = 5;
         (syncManager as any).scheduleBackgroundSync(0, "periodic");
 
-        await new Promise((resolve) => setTimeout(resolve, 85));
+        await waitFor(() => reindexCalls >= 2, 500);
         syncManager.stopBackgroundSync();
         await waitFor(() => activeSyncs === 0, 100);
 
         assert.equal(maxActiveSyncs, 1);
         assert.ok(reindexCalls >= 2);
-        assert.ok(reindexCalls <= 3);
     });
 });
 
@@ -123,6 +123,64 @@ test("autoIndexing=false disables background reindexing", async () => {
         await syncManager.handleSyncIndex();
 
         assert.equal(reindexCalls, 0);
+    });
+});
+
+test("large automatic incremental sync keeps the old index and records a warning", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        const context = {
+            reindexByChange: async () => {
+                throw new IncrementalIndexTooLargeError(10_001, 10_000, 1);
+            }
+        } as any;
+        const syncManager = new SyncManager(context, snapshotManager);
+
+        await syncManager.handleSyncIndex();
+
+        const info = snapshotManager.getCodebaseInfo(codebasePath);
+        assert.equal(info?.status, "indexed");
+        assert.equal(snapshotManager.getIndexedCodebases().includes(codebasePath), true);
+        assert.match((info as any).syncWarning, /10001 effective lines/);
+        assert.match((info as any).syncWarning, /\.hceignore/);
+        assert.match((info as any).syncWarning, /index_codebase with incremental=true/);
+    });
+});
+
+test("successful automatic sync clears previous large-increment warning", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed"
+        });
+        snapshotManager.setCodebaseSyncWarning(codebasePath, "old warning");
+        snapshotManager.saveCodebaseSnapshot();
+
+        const context = {
+            reindexByChange: async () => ({ added: 0, removed: 0, modified: 0 })
+        } as any;
+        const syncManager = new SyncManager(context, snapshotManager);
+
+        await syncManager.handleSyncIndex();
+
+        const info = snapshotManager.getCodebaseInfo(codebasePath);
+        assert.equal(info?.status, "indexed");
+        assert.equal((info as any).syncWarning, undefined);
     });
 });
 

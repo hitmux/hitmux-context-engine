@@ -38,6 +38,7 @@ export interface CodebaseSnapshotV1 {
 // New format (v2) - structured with codebase information
 
 export type RequestSplitterType = 'ast' | 'langchain';
+export type CodebaseStatsSource = 'index_run' | 'collection_row_count';
 
 // Request-level indexing options stored with a codebase's snapshot entry.
 export interface CodebaseIndexOptions {
@@ -65,6 +66,8 @@ export interface CodebaseInfoIndexed extends CodebaseInfoBase {
     indexedFiles: number;        // Number of files indexed
     totalChunks: number;         // Total number of chunks generated
     indexStatus: 'completed' | 'limit_reached';  // Status from indexing result
+    statsSource?: CodebaseStatsSource; // Missing means a normal full index from older snapshots
+    syncWarning?: string;         // Warning from automatic incremental sync while preserving the existing index
 }
 
 // Index failed state - when indexing failed

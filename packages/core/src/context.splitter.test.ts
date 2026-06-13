@@ -119,6 +119,22 @@ describe('Context request-scoped splitters', () => {
             .flatMap(([, documents]) => documents);
         expect(insertedDocuments).toHaveLength(1);
         expect(insertedDocuments[0].content).toBe('request:const value = 1;');
+        expect(insertedDocuments[0].metadata).toMatchObject({
+            fileName: 'index.ts',
+            basename: 'index',
+            pathTokens: ['index', 'ts'],
+            symbols: ['value'],
+            definitionIdentifiers: ['value'],
+            chunkKind: 'code',
+        });
+        expect(insertedDocuments[0]).toMatchObject({
+            primarySymbol: 'value',
+            chunkKind: 'code',
+            isDefinition: false,
+            fileRole: 'implementation',
+            basename: 'index',
+            pathSegment0: 'index.ts',
+        });
     });
 
     it('uses a request-scoped splitter for changed files during sync reindexing', async () => {
@@ -190,9 +206,58 @@ describe('Context request-scoped splitters', () => {
         expect(insertedDocuments[0].relativePath).toBe('Token.sol');
     });
 
-    it('indexes Elixir, Lua, and Luau files by default with language metadata', async () => {
+    it('adds splitter definition symbols to definitionIdentifiers', async () => {
+        const project = path.join(tempRoot, 'project-symbol-metadata');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'registry.go'), 'body without recognizable declaration');
+
+        const vectorDatabase = createVectorDatabase();
+        const splitter: Splitter = {
+            async split(_code: string, language: string, filePath?: string): Promise<CodeChunk[]> {
+                return [{
+                    content: 'body without recognizable declaration',
+                    metadata: {
+                        startLine: 1,
+                        endLine: 1,
+                        language,
+                        filePath,
+                        symbolName: 'RegisterRoom',
+                        symbolKind: 'function',
+                        chunkKind: 'function_definition',
+                        isDefinition: true,
+                    },
+                }];
+            },
+            setChunkSize(): void { },
+            setChunkOverlap(): void { },
+        };
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: splitter,
+        });
+
+        await context.indexCodebase(project);
+
+        const insertedDocument = vectorDatabase.insert.mock.calls
+            .flatMap(([, documents]) => documents)[0];
+
+        expect(insertedDocument).toMatchObject({
+            primarySymbol: 'RegisterRoom',
+            symbolKind: 'function',
+            chunkKind: 'function_definition',
+            isDefinition: true,
+        });
+        expect(insertedDocument.metadata.definitionIdentifiers).toEqual(['RegisterRoom']);
+    });
+
+    it('indexes TSX, JSX, Markdown, Elixir, Lua, and Luau files by default with language metadata', async () => {
         const project = path.join(tempRoot, 'project-language-support');
         await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'Panel.tsx'), 'export function Panel() { return null; }');
+        await fs.writeFile(path.join(project, 'Widget.jsx'), 'export function Widget() { return null; }');
+        await fs.writeFile(path.join(project, 'README.md'), '# Usage\n\nDetails');
         await fs.writeFile(path.join(project, 'greeter.ex'), 'defmodule Greeter do\n  def hello, do: :ok\nend');
         await fs.writeFile(path.join(project, 'script.exs'), 'IO.puts("hello")');
         await fs.writeFile(path.join(project, 'init.lua'), 'local value = 1');
@@ -213,6 +278,9 @@ describe('Context request-scoped splitters', () => {
             splitter.calls.map(call => [path.basename(call.filePath || ''), call.language])
         );
 
+        expect(callsByFile.get('Panel.tsx')).toBe('tsx');
+        expect(callsByFile.get('Widget.jsx')).toBe('jsx');
+        expect(callsByFile.get('README.md')).toBe('markdown');
         expect(callsByFile.get('greeter.ex')).toBe('elixir');
         expect(callsByFile.get('script.exs')).toBe('elixir');
         expect(callsByFile.get('init.lua')).toBe('lua');
@@ -222,7 +290,7 @@ describe('Context request-scoped splitters', () => {
             .flatMap(([, documents]) => documents)
             .map(document => document.relativePath)
             .sort();
-        expect(indexedPaths).toEqual(['game.luau', 'greeter.ex', 'init.lua', 'script.exs']);
+        expect(indexedPaths).toEqual(['Panel.tsx', 'README.md', 'Widget.jsx', 'game.luau', 'greeter.ex', 'init.lua', 'script.exs']);
     });
 
     it('reports AST splitter supported languages', () => {
@@ -236,7 +304,7 @@ describe('Context request-scoped splitters', () => {
             hasBuiltinFallback: true,
         });
         expect(context.getSplitterInfo().supportedLanguages).toEqual(
-            expect.arrayContaining(['c', 'cpp', 'java', 'scala', 'typescript'])
+            expect.arrayContaining(['c', 'cpp', 'java', 'markdown', 'scala', 'tsx', 'typescript'])
         );
     });
 });

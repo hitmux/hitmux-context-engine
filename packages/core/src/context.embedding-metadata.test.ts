@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
-import { Context, EmbeddingModelMismatchError } from './context';
+import { CollectionSchemaMismatchError, Context, EmbeddingModelMismatchError } from './context';
 import { Embedding, EmbeddingVector } from './embedding';
 import { VectorDatabase } from './vectordb';
 
@@ -98,7 +98,13 @@ describe('Context embedding collection metadata', () => {
         await fs.writeFile(path.join(configDir, 'config.jsonc'), JSON.stringify(config), 'utf-8');
     }
 
-    function createDescription(codebasePath: string, model: string = 'model-a', dimension: number = 3): string {
+    function createDescription(
+        codebasePath: string,
+        model: string = 'model-a',
+        dimension: number = 3,
+        schemaVersion: number = 2,
+        metadataVersion: number = 2
+    ): string {
         return [
             `codebasePath:${codebasePath}`,
             `hitmuxContext:${JSON.stringify({
@@ -109,6 +115,9 @@ describe('Context embedding collection metadata', () => {
                     model,
                     dimension,
                 },
+                schemaVersion,
+                metadataVersion,
+                splitterType: 'ast',
                 createdAt: '2026-06-10T00:00:00.000Z',
             })}`,
         ].join('\n');
@@ -135,6 +144,11 @@ describe('Context embedding collection metadata', () => {
             provider: 'test',
             model: 'model-a',
             dimension: 3,
+        });
+        expect(metadata).toMatchObject({
+            schemaVersion: 2,
+            metadataVersion: 2,
+            splitterType: 'ast',
         });
     });
 
@@ -166,7 +180,7 @@ describe('Context embedding collection metadata', () => {
         });
 
         await expect(context.getPreparedCollection(project)).resolves.toBeUndefined();
-        expect(vectorDatabase.getCollectionDescription).not.toHaveBeenCalled();
+        expect(vectorDatabase.getCollectionDescription).toHaveBeenCalledTimes(1);
         expect(vectorDatabase.createCollection).not.toHaveBeenCalled();
     });
 
@@ -184,5 +198,20 @@ describe('Context embedding collection metadata', () => {
         await expect(context.semanticSearch(project, 'query')).rejects.toBeInstanceOf(EmbeddingModelMismatchError);
         expect(vectorDatabase.search).not.toHaveBeenCalled();
         expect(vectorDatabase.hybridSearch).not.toHaveBeenCalled();
+    });
+
+    it('rejects an existing collection that uses legacy search metadata schema', async () => {
+        const project = path.join(tempRoot, 'project');
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.hasCollection.mockResolvedValue(true);
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project, 'model-a', 3, 1, 1));
+
+        const context = new Context({
+            embedding: new TestEmbedding('test', 'model-a', 3),
+            vectorDatabase,
+        });
+
+        await expect(context.getPreparedCollection(project)).rejects.toBeInstanceOf(CollectionSchemaMismatchError);
+        expect(vectorDatabase.createCollection).not.toHaveBeenCalled();
     });
 });

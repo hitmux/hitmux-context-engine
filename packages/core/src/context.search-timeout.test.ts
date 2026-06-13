@@ -26,6 +26,23 @@ class TestEmbedding extends Embedding {
     }
 }
 
+const TEST_COLLECTION_DESCRIPTION = [
+    'codebasePath:/repo',
+    `hitmuxContext:${JSON.stringify({
+        version: 1,
+        codebasePath: '/repo',
+        embedding: {
+            provider: 'test',
+            model: 'unknown',
+            dimension: 3,
+        },
+        schemaVersion: 2,
+        metadataVersion: 2,
+        splitterType: 'ast',
+        createdAt: '2026-06-12T00:00:00.000Z',
+    })}`,
+].join('\n');
+
 const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     createCollection: jest.fn().mockResolvedValue(undefined),
     createHybridCollection: jest.fn().mockResolvedValue(undefined),
@@ -39,7 +56,7 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     hybridSearch: jest.fn().mockReturnValue(new Promise(() => undefined)),
     delete: jest.fn().mockResolvedValue(undefined),
     query: jest.fn().mockResolvedValue([{ id: 'chunk-1' }]),
-    getCollectionDescription: jest.fn().mockResolvedValue(''),
+    getCollectionDescription: jest.fn().mockResolvedValue(TEST_COLLECTION_DESCRIPTION),
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
     getCollectionRowCount: jest.fn().mockResolvedValue(1),
 });

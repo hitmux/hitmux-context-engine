@@ -8,7 +8,10 @@ export {
     HybridSearchOptions,
     HybridSearchResult,
     RerankStrategy,
-    COLLECTION_LIMIT_MESSAGE
+    COLLECTION_LIMIT_MESSAGE,
+    DEFAULT_SEARCH_OUTPUT_FIELDS,
+    STRUCTURED_METADATA_FIELDS,
+    StructuredMetadataField
 } from './types';
 
 // Implementation class exports

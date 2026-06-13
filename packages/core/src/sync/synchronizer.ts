@@ -19,6 +19,10 @@ export interface FileSynchronizerOptions {
     snapshotBaseDir?: string;
 }
 
+export interface CheckForChangesOptions {
+    deferSnapshotUpdate?: boolean;
+}
+
 export class SnapshotTooLargeError extends Error {
     constructor(message: string) {
         super(message);
@@ -38,6 +42,11 @@ export class FileSynchronizer {
     private maxDepth?: number;
     private maxSnapshotBytes?: number;
     private snapshotBaseDir?: string;
+    private pendingSnapshotUpdate: {
+        fileHashes: Map<string, string>;
+        fileStates: Map<string, FileSnapshotState>;
+        merkleDAG: MerkleDAG;
+    } | null = null;
     private static readonly DEFAULT_MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024;
 
     constructor(rootDir: string, ignorePatterns: string[] = [], supportedExtensions: string[] = [], options: FileSynchronizerOptions = {}) {
@@ -221,7 +230,7 @@ export class FileSynchronizer {
         console.log(`[Synchronizer] File synchronizer initialized. Loaded ${this.fileHashes.size} file hashes.`);
     }
 
-    public async checkForChanges(): Promise<{ added: string[], removed: string[], modified: string[] }> {
+    public async checkForChanges(options: CheckForChangesOptions = {}): Promise<{ added: string[], removed: string[], modified: string[] }> {
         console.log('[Synchronizer] Checking for file changes...');
 
         const newFileHashes = await this.generateFileHashes(this.rootDir);
@@ -236,6 +245,16 @@ export class FileSynchronizer {
         if (changes.added.length > 0 || changes.removed.length > 0) {
             console.log('[Synchronizer] Merkle DAG has changed. Comparing file states...');
             const fileChanges = this.compareStates(this.fileHashes, newFileHashes);
+
+            if (options.deferSnapshotUpdate) {
+                this.pendingSnapshotUpdate = {
+                    fileHashes: newFileHashes,
+                    fileStates: newFileStates,
+                    merkleDAG: newMerkleDAG
+                };
+                console.log(`[Synchronizer] Found changes: ${fileChanges.added.length} added, ${fileChanges.removed.length} removed, ${fileChanges.modified.length} modified. Snapshot update deferred.`);
+                return fileChanges;
+            }
 
             this.fileHashes = newFileHashes;
             this.fileStates = newFileStates;
@@ -254,6 +273,22 @@ export class FileSynchronizer {
 
         console.log('[Synchronizer] No changes detected based on Merkle DAG comparison.');
         return { added: [], removed: [], modified: [] };
+    }
+
+    public async commitPendingChanges(): Promise<void> {
+        if (!this.pendingSnapshotUpdate) {
+            return;
+        }
+
+        this.fileHashes = this.pendingSnapshotUpdate.fileHashes;
+        this.fileStates = this.pendingSnapshotUpdate.fileStates;
+        this.merkleDAG = this.pendingSnapshotUpdate.merkleDAG;
+        this.pendingSnapshotUpdate = null;
+        await this.saveSnapshot();
+    }
+
+    public discardPendingChanges(): void {
+        this.pendingSnapshotUpdate = null;
     }
 
     private fileStatesEqual(a: Map<string, FileSnapshotState>, b: Map<string, FileSnapshotState>): boolean {

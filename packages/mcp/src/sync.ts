@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { Context, FileSynchronizer, configManager } from "@hitmux/hitmux-context-engine-core";
+import { Context, FileSynchronizer, IncrementalIndexTooLargeError, configManager } from "@hitmux/hitmux-context-engine-core";
 import { SnapshotManager } from "./snapshot.js";
 import type { RequestSplitterType } from "./config.js";
 import { createRequestSplitter, resolveRequestSplitterType } from "./splitter.js";
@@ -212,6 +212,12 @@ export class SyncManager {
 
                     console.log(`[SYNC-DEBUG] Reindex stats for '${codebasePath}':`, stats);
                     console.log(`[SYNC-DEBUG] Codebase sync completed in ${codebaseElapsed}ms`);
+                    const previousInfo = this.snapshotManager.getCodebaseInfo(codebasePath);
+                    const hadSyncWarning = previousInfo?.status === 'indexed' && typeof previousInfo.syncWarning === 'string';
+                    this.snapshotManager.clearCodebaseSyncWarning(codebasePath);
+                    if (hadSyncWarning) {
+                        this.snapshotManager.saveCodebaseSnapshot();
+                    }
 
                     // Accumulate total stats
                     totalStats.added += stats.added;
@@ -225,6 +231,14 @@ export class SyncManager {
                     }
                 } catch (error: any) {
                     const codebaseElapsed = Date.now() - codebaseStartTime;
+                    if (error instanceof IncrementalIndexTooLargeError) {
+                        const warning = `Automatic incremental indexing paused: detected ${error.effectiveLines} effective lines across ${error.changedFiles} added/modified file(s), exceeding the ${error.threshold} line limit. Check whether this is a large batch of files that should be added to .hceignore. If the files should be indexed, review the change set and run index_codebase with incremental=true from MCP.`;
+                        console.warn(`[SYNC] ${warning}`);
+                        this.snapshotManager.setCodebaseSyncWarning(codebasePath, warning);
+                        this.snapshotManager.saveCodebaseSnapshot();
+                        continue;
+                    }
+
                     console.error(`[SYNC-DEBUG] Error syncing codebase '${codebasePath}' after ${codebaseElapsed}ms:`, error);
                     console.error(`[SYNC-DEBUG] Error stack:`, error.stack);
 

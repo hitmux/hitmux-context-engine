@@ -92,9 +92,3 @@ describe('FileSynchronizer snapshot safety', () => {
         expect(fileHashes.has(path.join('src', 'nested', 'deep.ts'))).toBe(false);
     });
 });
-
-async function writeConfig(homeDir: string, config: Record<string, unknown>): Promise<void> {
-    const configDir = path.join(homeDir, '.hitmux-context-engine');
-    await fs.mkdir(configDir, { recursive: true });
-    await fs.writeFile(path.join(configDir, 'config.jsonc'), JSON.stringify(config), 'utf-8');
-}

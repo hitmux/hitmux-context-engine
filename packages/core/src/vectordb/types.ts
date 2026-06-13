@@ -8,7 +8,45 @@ export interface VectorDocument {
     endLine: number;
     fileExtension: string;
     metadata: Record<string, any>;
+    primarySymbol?: string;
+    symbolKind?: string;
+    chunkKind?: string;
+    isDefinition?: boolean;
+    fileRole?: string;
+    basename?: string;
+    pathSegment0?: string;
+    pathSegment1?: string;
+    pathSegment2?: string;
+    pathSegment3?: string;
+    pathSegment4?: string;
 }
+
+export const STRUCTURED_METADATA_FIELDS = [
+    'primarySymbol',
+    'symbolKind',
+    'chunkKind',
+    'isDefinition',
+    'fileRole',
+    'basename',
+    'pathSegment0',
+    'pathSegment1',
+    'pathSegment2',
+    'pathSegment3',
+    'pathSegment4',
+] as const;
+
+export type StructuredMetadataField = typeof STRUCTURED_METADATA_FIELDS[number];
+
+export const DEFAULT_SEARCH_OUTPUT_FIELDS = [
+    'id',
+    'content',
+    'relativePath',
+    'startLine',
+    'endLine',
+    'fileExtension',
+    'metadata',
+    ...STRUCTURED_METADATA_FIELDS,
+] as const;
 
 export interface SearchOptions {
     topK?: number;

@@ -1,10 +1,18 @@
 import * as fs from "fs";
 import * as path from "path";
-import { Context, COLLECTION_LIMIT_MESSAGE, FileSynchronizer, IndexAbortError } from "@hitmux/hitmux-context-engine-core";
+import * as os from "os";
+import * as crypto from "crypto";
+import { Context, COLLECTION_LIMIT_MESSAGE, FileSynchronizer, IndexAbortError, normalizeCodebaseIdentityPath } from "@hitmux/hitmux-context-engine-core";
 import { SnapshotManager } from "./snapshot.js";
-import { getBooleanFromConfig, type CodebaseIndexOptions, type RequestSplitterType } from "./config.js";
-import { createRequestSplitter, isRequestSplitterType } from "./splitter.js";
+import { getBooleanFromConfig, type CodebaseIndexOptions, type CodebaseInfoIndexed, type RequestSplitterType } from "./config.js";
+import { createRequestSplitter, isRequestSplitterType, resolveRequestSplitterType } from "./splitter.js";
+import { analyzeFilenameLikeQuery, formatFilenameQueryNotice, searchResultsAreFallbackMatches } from "./search-filename-query.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
+
+const DEFAULT_SEARCH_RESULT_LIMIT = 20;
+const SOURCE_CONTEXT_WINDOW_LINES = 4;
+const SEARCH_CONTEXT_MAX_CHARS = 5000;
+const NOT_INDEXED_INDEXING_HINT = "Please index it first using the index_codebase tool. Before first indexing, create a project ignore file such as .hceignore when you need to exclude generated, large, or private paths. The indexer automatically loads .*ignore files it finds in the project tree, so files like .hceignore, .gitignore, and .cursorignore are applied without passing ignoreFiles.";
 
 export class ToolHandlers {
     private context: Context;
@@ -36,6 +44,10 @@ export class ToolHandlers {
             }],
             isError: true
         };
+    }
+
+    private notIndexedResponse(absolutePath: string) {
+        return this.errorResponse(`Error: Codebase '${absolutePath}' is not indexed. ${NOT_INDEXED_INDEXING_HINT}`);
     }
 
     private validateRequiredStringArgs(toolName: string, args: any, fields: string[]): { error: ReturnType<ToolHandlers["errorResponse"]> | null } {
@@ -81,6 +93,125 @@ export class ToolHandlers {
             .filter((item) => item.length > 0);
     }
 
+    private normalizeOptionalSearchLimit(value: unknown): { limit?: number; error?: ReturnType<ToolHandlers["errorResponse"]> } {
+        if (value === undefined || value === null) {
+            return {};
+        }
+
+        if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+            return {
+                error: this.errorResponse("Error: search_code argument 'limit' must be a positive number when provided.")
+            };
+        }
+
+        return { limit: Math.floor(value) };
+    }
+
+    private formatSearchResultLocation(result: any): { location: string; warning?: string } {
+        if (this.hasValidLineRange(result)) {
+            return {
+                location: `${result.relativePath}:${result.startLine}-${result.endLine}`
+            };
+        }
+
+        return {
+            location: `${result.relativePath}:unknown`,
+            warning: typeof result.lineRangeWarning === "string" && result.lineRangeWarning.length > 0
+                ? result.lineRangeWarning
+                : "line range unavailable; re-index this codebase to refresh line metadata."
+        };
+    }
+
+    private hasValidLineRange(result: any): result is { relativePath: string; startLine: number; endLine: number } {
+        return result?.lineRangeUnavailable !== true
+            && typeof result?.startLine === "number"
+            && typeof result?.endLine === "number"
+            && Number.isInteger(result.startLine)
+            && Number.isInteger(result.endLine)
+            && result.startLine > 0
+            && result.endLine >= result.startLine;
+    }
+
+    private formatSearchScoreReason(result: any): string | undefined {
+        const scoreReasons = Array.isArray(result?.scoreReasons)
+            ? result.scoreReasons.filter((reason: unknown): reason is string => typeof reason === "string" && reason.length > 0)
+            : [];
+        if (scoreReasons.length > 0) {
+            return scoreReasons.join(", ");
+        }
+
+        return typeof result?.scoreReason === "string" && result.scoreReason.length > 0
+            ? result.scoreReason
+            : undefined;
+    }
+
+    private formatSearchResultContext(result: any, codebasePath: string): { context: string; source: string; warning?: string } {
+        const fallbackContent = truncateContent(String(result?.content ?? ""), SEARCH_CONTEXT_MAX_CHARS);
+        if (!this.hasValidLineRange(result)) {
+            return {
+                context: fallbackContent,
+                source: "indexed chunk fallback"
+            };
+        }
+
+        const resolvedPath = this.resolveResultSourcePath(codebasePath, result.relativePath);
+        if (!resolvedPath) {
+            return {
+                context: fallbackContent,
+                source: "indexed chunk fallback",
+                warning: "source rehydrate skipped because the result path is outside the indexed codebase."
+            };
+        }
+
+        try {
+            const source = fs.readFileSync(resolvedPath, "utf-8");
+            const lines = source.split(/\r?\n/);
+            const contextStartLine = Math.max(1, result.startLine - SOURCE_CONTEXT_WINDOW_LINES);
+            const contextEndLine = Math.min(lines.length, result.endLine + SOURCE_CONTEXT_WINDOW_LINES);
+
+            if (contextStartLine > contextEndLine) {
+                return {
+                    context: fallbackContent,
+                    source: "indexed chunk fallback",
+                    warning: "source rehydrate failed because the indexed line range is outside the current source file."
+                };
+            }
+
+            return {
+                context: truncateContent(lines.slice(contextStartLine - 1, contextEndLine).join("\n"), SEARCH_CONTEXT_MAX_CHARS),
+                source: `current source file, lines ${contextStartLine}-${contextEndLine}; indexed range ${result.startLine}-${result.endLine}`
+            };
+        } catch {
+            return {
+                context: fallbackContent,
+                source: "indexed chunk fallback",
+                warning: "source rehydrate failed; using indexed chunk fallback."
+            };
+        }
+    }
+
+    private resolveResultSourcePath(codebasePath: string, relativePath: unknown): string | null {
+        if (typeof relativePath !== "string" || relativePath.trim().length === 0) {
+            return null;
+        }
+
+        const resolvedPath = path.resolve(codebasePath, relativePath);
+        const relativeToCodebase = path.relative(codebasePath, resolvedPath);
+        if (relativeToCodebase.startsWith("..") || path.isAbsolute(relativeToCodebase)) {
+            return null;
+        }
+
+        return resolvedPath;
+    }
+
+    private async resolveSearchResultLimit(explicitLimit: number | undefined, _codebasePath: string): Promise<number> {
+        if (explicitLimit !== undefined) {
+            return explicitLimit;
+        }
+
+        return DEFAULT_SEARCH_RESULT_LIMIT;
+    }
+
     private isInteractiveIndexingEnabled(): boolean {
         return getBooleanFromConfig("interactiveIndexing", true);
     }
@@ -114,7 +245,28 @@ export class ToolHandlers {
      * the client treats 0/0 as "not indexed" and triggers force reindex, which
      * deletes real data and rewrites 0/0 — an infinite loop. See Issue #295.
      */
-    private async queryCollectionStats(codebasePath: string): Promise<{ indexedFiles: number; totalChunks: number } | null> {
+    private async queryIndexedFileCount(collectionName: string, rowCount: number): Promise<number | undefined> {
+        try {
+            const rows = await this.context.getVectorDatabase().query(collectionName, '', ['relativePath'], rowCount);
+            const filePaths = new Set<string>();
+
+            for (const row of rows) {
+                if (typeof row.relativePath === 'string' && row.relativePath.length > 0) {
+                    filePaths.add(row.relativePath);
+                }
+            }
+
+            if (filePaths.size > 0) {
+                return filePaths.size;
+            }
+        } catch (error) {
+            console.warn(`[SNAPSHOT-RECOVERY] Failed to query distinct indexed files for '${collectionName}':`, error);
+        }
+
+        return undefined;
+    }
+
+    private async queryCollectionStats(codebasePath: string): Promise<{ indexedFiles: number; totalChunks: number; statsSource: 'collection_row_count' } | null> {
         try {
             const collectionName = this.context.getCollectionName(codebasePath);
             const rowCount = await this.context.getVectorDatabase().getCollectionRowCount(collectionName);
@@ -126,15 +278,60 @@ export class ToolHandlers {
                 console.warn(`[SNAPSHOT-RECOVERY] Collection '${collectionName}' truly empty — NOT writing recovered entry (would poison client)`);
                 return null;
             }
-            // rowCount is chunk count, not file count. Without a metadata query
-            // we don't have the real file count; the snapshot will be corrected
-            // on the next full index. Using rowCount for both is imprecise but
-            // keeps the state non-zero so the client doesn't misread it as empty.
-            return { indexedFiles: rowCount, totalChunks: rowCount };
+
+            const indexedFiles = await this.queryIndexedFileCount(collectionName, rowCount);
+            return { indexedFiles: indexedFiles ?? 0, totalChunks: rowCount, statsSource: 'collection_row_count' };
         } catch (error) {
             console.warn(`[SNAPSHOT-RECOVERY] Failed to query stats for '${codebasePath}':`, error);
             return null;
         }
+    }
+
+    private getMerkleTrackedFileCount(codebasePath: string): number | undefined {
+        try {
+            const normalizedPath = normalizeCodebaseIdentityPath(codebasePath);
+            const hash = crypto.createHash('md5').update(normalizedPath).digest('hex');
+            const snapshotPath = path.join(os.homedir(), '.hitmux-context-engine', 'merkle', `${hash}.json`);
+            const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
+            if (Array.isArray(snapshot.fileHashes)) {
+                return snapshot.fileHashes.length;
+            }
+            if (snapshot.fileHashes && typeof snapshot.fileHashes === 'object') {
+                return Object.keys(snapshot.fileHashes).length;
+            }
+        } catch {
+            return undefined;
+        }
+
+        return undefined;
+    }
+
+    private hasRecoveredStats(codebasePath: string, info: CodebaseInfoIndexed): boolean {
+        if (info.statsSource === 'collection_row_count') {
+            return true;
+        }
+
+        const trackedFileCount = this.getMerkleTrackedFileCount(codebasePath);
+        return trackedFileCount !== undefined
+            && info.indexedFiles === info.totalChunks
+            && trackedFileCount !== info.indexedFiles;
+    }
+
+    private formatIndexedStatistics(codebasePath: string, info: CodebaseInfoIndexed): string {
+        if (this.hasRecoveredStats(codebasePath, info)) {
+            if (info.statsSource === 'collection_row_count' && info.indexedFiles > 0) {
+                return `${info.indexedFiles} files, ${info.totalChunks} chunks`;
+            }
+
+            const trackedFileCount = this.getMerkleTrackedFileCount(codebasePath);
+            if (trackedFileCount !== undefined) {
+                return `${trackedFileCount} files, ${info.totalChunks} chunks`;
+            }
+
+            return `file count unknown, ${info.totalChunks} chunks`;
+        }
+
+        return `${info.indexedFiles} files, ${info.totalChunks} chunks`;
     }
 
     /**
@@ -194,14 +391,12 @@ export class ToolHandlers {
                 }
 
                 if (rowCount > 0) {
-                    // Heal: rewrite with real row count. rowCount is chunk count;
-                    // without a cheap file-count query we reuse it for both fields.
-                    // Imprecise but keeps the state non-zero and will be corrected
-                    // on the next full index.
+                    const indexedFiles = await this.queryIndexedFileCount(collectionName, rowCount);
                     this.snapshotManager.setCodebaseIndexed(codebasePath, {
-                        indexedFiles: rowCount,
+                        indexedFiles: indexedFiles ?? 0,
                         totalChunks: rowCount,
                         status: 'completed' as const,
+                        statsSource: 'collection_row_count' as const,
                     });
                     healed++;
                     console.log(`[SNAPSHOT-VALIDATE] Healed legacy 0/0 entry '${codebasePath}' → rows=${rowCount}`);
@@ -412,6 +607,12 @@ export class ToolHandlers {
             // so we don't persist a poisoning 0/0+completed entry (Issue #295).
             for (const cloudCodebase of cloudCodebases) {
                 if (!localCodebases.has(cloudCodebase)) {
+                    const indexingCodebase = this.snapshotManager.findIndexingCodebasePath(cloudCodebase);
+                    if (indexingCodebase !== undefined) {
+                        console.log(`[SYNC-CLOUD] ⏭️  Skipped recovery for ${cloudCodebase} because '${indexingCodebase}' is currently indexing`);
+                        continue;
+                    }
+
                     const stats = await this.queryCollectionStats(cloudCodebase);
                     if (stats) {
                         this.snapshotManager.setCodebaseIndexed(cloudCodebase, {
@@ -450,17 +651,30 @@ export class ToolHandlers {
             return arrayValidation.error;
         }
 
-        const { path: codebasePath, force, splitter, maxDepth, dryRun } = args;
+        const { path: codebasePath, force, splitter, maxDepth, dryRun, incremental } = args;
         const forceReindex = force || false;
+        const incrementalIndex = incremental === true;
+        const splitterWasProvided = typeof splitter === "string";
         const requestedSplitter = splitter || 'ast'; // Default to AST
         const customFileExtensions = this.normalizeStringArray(args.customExtensions);
         const customIgnorePatterns = this.normalizeStringArray(args.ignorePatterns);
         const customIgnoreFiles = this.normalizeStringArray(args.ignoreFiles);
+        const customFileExtensionsProvided = Array.isArray(args.customExtensions);
+        const customIgnorePatternsProvided = Array.isArray(args.ignorePatterns);
+        const customIgnoreFilesProvided = Array.isArray(args.ignoreFiles);
         const requestMaxDepth = Number.isFinite(maxDepth) && maxDepth >= 0
             ? Math.floor(maxDepth)
             : undefined;
+        const requestMaxDepthProvided = requestMaxDepth !== undefined;
 
         try {
+            if (incrementalIndex && forceReindex) {
+                return this.errorResponse("Error: index_codebase arguments 'incremental' and 'force' are mutually exclusive. Use incremental=true for manual change sync, or force=true for full re-index.");
+            }
+            if (incrementalIndex && dryRun === true) {
+                return this.errorResponse("Error: index_codebase incremental=true cannot be combined with dryRun=true.");
+            }
+
             // Validate splitter parameter
             if (!isRequestSplitterType(requestedSplitter)) {
                 return {
@@ -597,12 +811,31 @@ export class ToolHandlers {
                 }
             }
 
+            if (incrementalIndex) {
+                return await this.handleManualIncrementalIndexing(
+                    absolutePath,
+                    codebasePath,
+                    splitterType,
+                    {
+                        splitterWasProvided,
+                        customFileExtensions,
+                        customIgnorePatterns,
+                        customIgnoreFiles,
+                        customFileExtensionsProvided,
+                        customIgnorePatternsProvided,
+                        customIgnoreFilesProvided,
+                        requestMaxDepth,
+                        requestMaxDepthProvided
+                    }
+                );
+            }
+
             // Check if already indexed (unless force is true)
             if (!forceReindex && this.snapshotManager.getIndexedCodebases().includes(absolutePath)) {
                 return {
                     content: [{
                         type: "text",
-                        text: `Codebase '${absolutePath}' is already indexed. Use force=true to re-index.`
+                        text: `Codebase '${absolutePath}' is already indexed. Use incremental=true to manually sync changed files, or force=true to full re-index.`
                     }],
                     isError: true
                 };
@@ -732,6 +965,76 @@ export class ToolHandlers {
         }
     }
 
+    private async handleManualIncrementalIndexing(
+        absolutePath: string,
+        originalPath: string,
+        requestedSplitter: RequestSplitterType,
+        options: {
+            splitterWasProvided: boolean;
+            customFileExtensions: string[];
+            customIgnorePatterns: string[];
+            customIgnoreFiles: string[];
+            customFileExtensionsProvided: boolean;
+            customIgnorePatternsProvided: boolean;
+            customIgnoreFilesProvided: boolean;
+            requestMaxDepth?: number;
+            requestMaxDepthProvided: boolean;
+        }
+    ): Promise<any> {
+        const info = this.snapshotManager.getCodebaseInfo(absolutePath);
+        if (!info || info.status !== 'indexed') {
+            return this.notIndexedResponse(absolutePath);
+        }
+
+        const splitterType = options.splitterWasProvided
+            ? requestedSplitter
+            : resolveRequestSplitterType(info.requestSplitter);
+        const ignorePatterns = options.customIgnorePatternsProvided
+            ? options.customIgnorePatterns
+            : info.requestIgnorePatterns || [];
+        const customExtensions = options.customFileExtensionsProvided
+            ? options.customFileExtensions
+            : info.requestCustomExtensions || [];
+        const ignoreFiles = options.customIgnoreFilesProvided
+            ? options.customIgnoreFiles
+            : info.requestIgnoreFiles || [];
+        const maxDepth = options.requestMaxDepthProvided
+            ? options.requestMaxDepth
+            : info.requestMaxDepth;
+
+        const stats = await this.context.reindexByChange(
+            absolutePath,
+            undefined,
+            ignorePatterns,
+            customExtensions,
+            createRequestSplitter(splitterType),
+            ignoreFiles,
+            maxDepth,
+            { skipEffectiveLineLimit: true }
+        );
+
+        this.snapshotManager.clearCodebaseSyncWarning(absolutePath);
+        this.snapshotManager.saveCodebaseSnapshot();
+
+        const pathInfo = originalPath !== absolutePath
+            ? `\nNote: Input path '${originalPath}' was resolved to absolute path '${absolutePath}'`
+            : '';
+        const optionInfo = [
+            `splitter=${splitterType}`,
+            customExtensions.length > 0 ? `customExtensions=${customExtensions.join(', ')}` : null,
+            ignorePatterns.length > 0 ? `ignorePatterns=${ignorePatterns.join(', ')}` : null,
+            ignoreFiles.length > 0 ? `ignoreFiles=${ignoreFiles.join(', ')}` : null,
+            maxDepth !== undefined ? `maxDepth=${maxDepth}` : null
+        ].filter((item): item is string => item !== null).join('; ');
+
+        return {
+            content: [{
+                type: "text",
+                text: `Manual incremental indexing completed for '${absolutePath}'.${pathInfo}\nChanges: Added ${stats.added}, Removed ${stats.removed}, Modified ${stats.modified}.\nOptions: ${optionInfo}`
+            }]
+        };
+    }
+
     private async startBackgroundIndexing(
         codebasePath: string,
         forceReindex: boolean,
@@ -853,8 +1156,11 @@ export class ToolHandlers {
             return validation.error;
         }
 
-        const { path: codebasePath, query, limit = 10, extensionFilter } = args;
-        const resultLimit = limit || 10;
+        const { path: codebasePath, query, limit, extensionFilter } = args;
+        const normalizedLimit = this.normalizeOptionalSearchLimit(limit);
+        if (normalizedLimit.error) {
+            return normalizedLimit.error;
+        }
 
         try {
             // Sync indexed codebases from cloud first
@@ -914,22 +1220,10 @@ export class ToolHandlers {
                         isIndexed = true;
                         // Continue with search (don't return error)
                     } else {
-                        return {
-                            content: [{
-                                type: "text",
-                                text: `Error: Codebase '${absolutePath}' is not indexed. Please index it first using the index_codebase tool.`
-                            }],
-                            isError: true
-                        };
+                        return this.notIndexedResponse(absolutePath);
                     }
                 } else {
-                    return {
-                        content: [{
-                            type: "text",
-                            text: `Error: Codebase '${absolutePath}' is not indexed. Please index it first using the index_codebase tool.`
-                        }],
-                        isError: true
-                    };
+                    return this.notIndexedResponse(absolutePath);
                 }
             }
 
@@ -966,11 +1260,19 @@ export class ToolHandlers {
                 filterExpr = `fileExtension in [${quoted}]`;
             }
 
+            const resultLimit = await this.resolveSearchResultLimit(normalizedLimit.limit, searchCodebasePath);
+            const filenameQueryStatus = await analyzeFilenameLikeQuery({
+                query,
+                codebasePath: searchCodebasePath,
+                getCollectionName: () => this.context.getCollectionName(searchCodebasePath),
+                getVectorDatabase: () => this.context.getVectorDatabase()
+            });
+
             // Search in the specified codebase
             const searchResults = await this.context.semanticSearch(
                 searchCodebasePath,
                 query,
-                Math.min(resultLimit, 50),
+                resultLimit,
                 0.3,
                 filterExpr
             );
@@ -990,7 +1292,11 @@ export class ToolHandlers {
                     }
                 }
 
+                const filenameNotice = formatFilenameQueryNotice(filenameQueryStatus, false);
                 let noResultsMessage = `No results found for query: "${query}" in codebase '${searchCodebasePath}'`;
+                if (filenameNotice.length > 0) {
+                    noResultsMessage = `${filenameNotice}\n\n${noResultsMessage}`;
+                }
                 if (searchCodebasePath !== absolutePath) {
                     noResultsMessage += `\nRequested path '${absolutePath}' is covered by indexed codebase '${searchCodebasePath}'.`;
                 }
@@ -1006,18 +1312,31 @@ export class ToolHandlers {
             }
 
             // Format results
+            const useFallbackMatchLabel = searchResultsAreFallbackMatches(filenameQueryStatus);
             const formattedResults = searchResults.map((result: any, index: number) => {
-                const location = `${result.relativePath}:${result.startLine}-${result.endLine}`;
-                const context = truncateContent(result.content, 5000);
+                const { location, warning } = this.formatSearchResultLocation(result);
+                const scoreReason = this.formatSearchScoreReason(result);
+                const sourceContext = this.formatSearchResultContext(result, searchCodebasePath);
                 const codebaseInfo = path.basename(searchCodebasePath);
+                const resultLabel = useFallbackMatchLabel ? "Fallback match" : "Source context";
+                const warnings = [warning, sourceContext.warning].filter((value): value is string => typeof value === "string" && value.length > 0);
 
-                return `${index + 1}. Code snippet (${result.language}) [${codebaseInfo}]\n` +
+                return `${index + 1}. ${resultLabel} (${result.language}) [${codebaseInfo}]\n` +
                     `   Location: ${location}\n` +
+                    warnings.map((value) => `   Warning: ${value}\n`).join('') +
+                    `   Context source: ${sourceContext.source}\n` +
+                    (scoreReason ? `   Score reason: ${scoreReason}\n` : '') +
                     `   Rank: ${index + 1}\n` +
-                    `   Context: \n\`\`\`${result.language}\n${context}\n\`\`\`\n`;
+                    `   Context: \n\`\`\`${result.language}\n${sourceContext.context}\n\`\`\`\n`;
             }).join('\n');
 
-            let resultMessage = `Found ${searchResults.length} results for query: "${query}" in codebase '${searchCodebasePath}'${indexingStatusMessage}`;
+            const filenameNotice = formatFilenameQueryNotice(filenameQueryStatus, searchResults.length > 0);
+            let resultMessage = useFallbackMatchLabel
+                ? `Found ${searchResults.length} fallback matches for query: "${query}" in codebase '${searchCodebasePath}'${indexingStatusMessage}`
+                : `Found ${searchResults.length} results for query: "${query}" in codebase '${searchCodebasePath}'${indexingStatusMessage}`;
+            if (filenameNotice.length > 0) {
+                resultMessage += `\n${filenameNotice}`;
+            }
             if (searchCodebasePath !== absolutePath) {
                 resultMessage += `\nRequested path '${absolutePath}' is covered by indexed codebase '${searchCodebasePath}'.`;
             }
@@ -1254,10 +1573,13 @@ export class ToolHandlers {
             switch (status) {
                 case 'indexed':
                     if (info && 'indexedFiles' in info) {
-                        const indexedInfo = info as any;
+                        const indexedInfo = info as CodebaseInfoIndexed;
                         statusMessage = `✅ Codebase '${statusCodebasePath}' is fully indexed and ready for search.`;
-                        statusMessage += `\n📊 Statistics: ${indexedInfo.indexedFiles} files, ${indexedInfo.totalChunks} chunks`;
+                        statusMessage += `\n📊 Statistics: ${this.formatIndexedStatistics(statusCodebasePath, indexedInfo)}`;
                         statusMessage += `\n📅 Status: ${indexedInfo.indexStatus}`;
+                        if (indexedInfo.syncWarning) {
+                            statusMessage += `\n⚠️  Sync warning: ${indexedInfo.syncWarning}`;
+                        }
                         statusMessage += `\n🕐 Last updated: ${new Date(indexedInfo.lastUpdated).toLocaleString()}`;
                     } else {
                         statusMessage = `✅ Codebase '${statusCodebasePath}' is fully indexed and ready for search.`;
@@ -1299,7 +1621,7 @@ export class ToolHandlers {
 
                 case 'not_found':
                 default:
-                    statusMessage = `❌ Codebase '${absolutePath}' is not indexed. Please use the index_codebase tool to index it first.`;
+                    statusMessage = `❌ Codebase '${absolutePath}' is not indexed. ${NOT_INDEXED_INDEXING_HINT}`;
                     break;
             }
 

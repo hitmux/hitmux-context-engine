@@ -47,6 +47,11 @@ export interface HitmuxConfig {
 
 export type HitmuxConfigKey = keyof HitmuxConfig;
 
+export interface ConfigReadError {
+    path: string;
+    message: string;
+}
+
 export class ConfigManager {
     getConfigFilePath(): string {
         return this.getGlobalConfigFilePath();
@@ -65,6 +70,41 @@ export class ConfigManager {
             ...this.readConfigFile(this.getGlobalConfigFilePath()),
             ...this.readConfigFile(this.getProjectConfigFilePath())
         };
+    }
+
+    getReadErrors(projectRoot: string = process.cwd()): ConfigReadError[] {
+        return [
+            this.validateConfigFile(this.getGlobalConfigFilePath()),
+            this.validateConfigFile(this.getProjectConfigFilePath(projectRoot))
+        ].filter((error): error is ConfigReadError => error !== null);
+    }
+
+    private validateConfigFile(configPath: string): ConfigReadError | null {
+        try {
+            if (!fs.existsSync(configPath)) {
+                return null;
+            }
+
+            const content = fs.readFileSync(configPath, 'utf-8').trim();
+            if (!content) {
+                return null;
+            }
+
+            const parsed = JSON.parse(stripJsonComments(content));
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                return {
+                    path: configPath,
+                    message: 'expected a JSON object'
+                };
+            }
+
+            return null;
+        } catch (error) {
+            return {
+                path: configPath,
+                message: error instanceof Error ? error.message : String(error)
+            };
+        }
     }
 
     private readConfigFile(configPath: string): HitmuxConfig {

@@ -6,6 +6,10 @@ export interface CodeChunk {
         endLine: number;
         language?: string;
         filePath?: string;
+        chunkKind?: string;
+        symbolName?: string;
+        symbolKind?: string;
+        isDefinition?: boolean;
     };
 }
 

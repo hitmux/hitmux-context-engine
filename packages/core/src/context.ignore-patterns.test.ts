@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
-import { Context } from './context';
+import { Context, IncrementalIndexTooLargeError } from './context';
 import { Embedding, EmbeddingVector } from './embedding';
 import { Splitter, CodeChunk } from './splitter';
 import { FileSynchronizer } from './sync/synchronizer';
@@ -204,6 +204,119 @@ describe('Context ignore pattern isolation', () => {
         }
     });
 
+    it('stops automatic change indexing when added effective lines exceed the safety limit', async () => {
+        const project = path.join(tempRoot, 'project-large-increment');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'initial.ts'), 'const initial = true;\n');
+
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        try {
+            await context.reindexByChange(project);
+            vectorDatabase.insert.mockClear();
+
+            const lines = Array.from({ length: 10_001 }, (_, index) => `const value${index} = ${index};`).join('\n');
+            await fs.writeFile(path.join(project, 'large.ts'), `${lines}\n`);
+
+            const result = context.reindexByChange(project);
+            await expect(result).rejects.toMatchObject({
+                name: 'IncrementalIndexTooLargeError',
+                effectiveLines: 10_001,
+                threshold: 10_000,
+                changedFiles: 1,
+            });
+            await expect(context.reindexByChange(project)).rejects.toBeInstanceOf(IncrementalIndexTooLargeError);
+            expect(vectorDatabase.insert).not.toHaveBeenCalled();
+        } finally {
+            await FileSynchronizer.deleteSnapshot(project);
+        }
+    });
+
+    it('reloads ignore files before change indexing so newly ignored large files do not trip the safety limit', async () => {
+        const project = path.join(tempRoot, 'project-large-increment-ignored');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'initial.ts'), 'const initial = true;\n');
+
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        try {
+            await context.reindexByChange(project);
+            vectorDatabase.insert.mockClear();
+
+            const lines = Array.from({ length: 10_001 }, (_, index) => `const value${index} = ${index};`).join('\n');
+            await fs.writeFile(path.join(project, 'large.ts'), `${lines}\n`);
+            await fs.writeFile(path.join(project, '.hceignore'), 'large.ts\n');
+
+            await expect(context.reindexByChange(project)).resolves.toEqual({
+                added: 0,
+                removed: 0,
+                modified: 0,
+            });
+            expect(vectorDatabase.insert).not.toHaveBeenCalled();
+        } finally {
+            await FileSynchronizer.deleteSnapshot(project);
+        }
+    });
+
+    it('keeps large pending changes detectable after the safety limit stops automatic change indexing', async () => {
+        const project = path.join(tempRoot, 'project-large-increment-repeat');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'initial.ts'), 'const initial = true;\n');
+
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase: createVectorDatabase(),
+            codeSplitter: new TestSplitter(),
+        });
+
+        try {
+            await context.reindexByChange(project);
+
+            const lines = Array.from({ length: 10_001 }, (_, index) => `const value${index} = ${index};`).join('\n');
+            await fs.writeFile(path.join(project, 'large.ts'), `${lines}\n`);
+
+            await expect(context.reindexByChange(project)).rejects.toBeInstanceOf(IncrementalIndexTooLargeError);
+            await expect(context.reindexByChange(project)).rejects.toBeInstanceOf(IncrementalIndexTooLargeError);
+        } finally {
+            await FileSynchronizer.deleteSnapshot(project);
+        }
+    });
+
+    it('counts effective lines without blank lines or comment-only lines for incremental safety', async () => {
+        const project = path.join(tempRoot, 'project-effective-lines');
+        await fs.mkdir(project);
+
+        const context = new Context({ vectorDatabase: createVectorDatabase() });
+        const filePath = path.join(project, 'sample.ts');
+        await fs.writeFile(filePath, [
+            '',
+            '// comment',
+            '# shell-style comment',
+            '/* block',
+            ' * continuation',
+            ' */',
+            'const a = 1;',
+            'const b = 2; // trailing comment',
+            '* markdown-style content should count',
+            ''
+        ].join('\n'));
+
+        await expect((context as any).countEffectiveLines([filePath])).resolves.toBe(3);
+    });
+
     it('treats leading-slash directory ignore patterns as root-anchored and recursive during indexing', async () => {
         const project = path.join(tempRoot, 'project');
         await fs.mkdir(path.join(project, 'Library'), { recursive: true });
@@ -297,6 +410,39 @@ describe('Context ignore pattern isolation', () => {
         const project = path.join(tempRoot, 'project-nested-gitignore');
         await fs.mkdir(path.join(project, 'src', 'nested'), { recursive: true });
         await fs.writeFile(path.join(project, 'src', '.gitignore'), '*.ts\n!keep.ts\n');
+        await fs.writeFile(path.join(project, 'root.ts'), 'root file should stay');
+        await fs.writeFile(path.join(project, 'src', 'drop.ts'), 'nested ignore should drop this');
+        await fs.writeFile(path.join(project, 'src', 'keep.ts'), 'nested ignore should keep this');
+        await fs.writeFile(path.join(project, 'src', 'nested', 'drop.ts'), 'nested ignore should drop descendants too');
+        await fs.writeFile(path.join(project, 'src', 'nested', 'keep.md'), 'regular file');
+
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        await context.indexCodebase(project);
+
+        const insertedDocuments = vectorDatabase.insert.mock.calls
+            .flatMap(([, documents]) => documents);
+        const indexedPaths = insertedDocuments
+            .map(document => document.relativePath.replace(/\\/g, '/'))
+            .sort();
+
+        expect(indexedPaths).toEqual([
+            'root.ts',
+            'src/keep.ts',
+            'src/nested/keep.md',
+        ]);
+    });
+
+    it('honors nested dot-ignore files relative to their directory during indexing', async () => {
+        const project = path.join(tempRoot, 'project-nested-hceignore');
+        await fs.mkdir(path.join(project, 'src', 'nested'), { recursive: true });
+        await fs.writeFile(path.join(project, 'src', '.hceignore'), '*.ts\n!keep.ts\n');
         await fs.writeFile(path.join(project, 'root.ts'), 'root file should stay');
         await fs.writeFile(path.join(project, 'src', 'drop.ts'), 'nested ignore should drop this');
         await fs.writeFile(path.join(project, 'src', 'keep.ts'), 'nested ignore should keep this');

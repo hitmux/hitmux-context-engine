@@ -26,11 +26,11 @@ Indexes a codebase directory for hybrid search. Useful arguments include:
 
 `search_code`
 
-Searches an indexed codebase with a natural language query.
+Searches an indexed codebase with a focused code-search query.
 
 - `path`: codebase path.
-- `query`: search query.
-- `topK`: max number of results.
+- `query`: focused query using likely identifiers, filenames, path words, domain terms, and scope hints.
+- `limit`: optional max number of returned results. Leave empty for the bounded default.
 
 `clear_index`
 
@@ -86,6 +86,8 @@ Database note: Use Local Milvus with `address: "localhost:19530"`. For self-host
 - `indexCodebase(path, progressCallback?, forceReindex?)`
 - `reindexByChange(path, progressCallback?)`
 - `semanticSearch(path, query, topK?, threshold?, filterExpr?)`
+
+`semanticSearch` keeps `topK` as the core API name for the returned result count. Internally, search uses a larger bounded candidate pool before dedupe/rerank, so the visible result count does not cap initial dense/sparse recall.
 - `hasIndex(path)`
 - `clearIndex(path, progressCallback?)`
 - `addCustomIgnorePatterns(patterns)`

@@ -111,6 +111,34 @@ Local Milvus:
 }
 ```
 
+Local Milvus deployment on Linux without Docker:
+
+```bash
+MILVUS_VERSION=2.6.9
+wget "https://github.com/milvus-io/milvus/releases/download/v${MILVUS_VERSION}/milvus_${MILVUS_VERSION}-1_amd64.deb" \
+    -O "/tmp/milvus_${MILVUS_VERSION}-1_amd64.deb"
+sudo apt install -y "/tmp/milvus_${MILVUS_VERSION}-1_amd64.deb"
+sudo systemctl enable --now milvus
+```
+
+Verify the service before indexing:
+
+```bash
+systemctl is-active milvus
+dpkg-query -W -f='${Package} ${Version}\n' milvus
+ss -ltnp | rg '(:19530|:9091|:2379|:2380)'
+```
+
+The MCP config only needs the local gRPC endpoint:
+
+```jsonc
+{
+    "milvusAddress": "localhost:19530"
+}
+```
+
+Do not set `milvusToken` for a default local package install. After switching from a remote database or changing embedding model/provider, re-index affected codebases so collection metadata matches the active embedding configuration.
+
 Self-hosted remote Milvus:
 
 ```jsonc
@@ -235,7 +263,7 @@ The trigger watcher listens to `~/.hitmux-context-engine/.sync-trigger`. Touchin
     "hybridMode": true,
 
     "searchTimeoutMs": 30000,
-    "embeddingBatchSize": 100,
+    "embeddingBatchSize": 32,
     "embeddingConcurrency": 1,
     "customExtensions": [".vue", ".svelte", ".astro"],
     "customIgnorePatterns": ["temp/**", "*.backup"],
