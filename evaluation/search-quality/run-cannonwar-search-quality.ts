@@ -699,6 +699,7 @@ async function main(): Promise<void> {
     const vectorDatabase = new MilvusVectorDatabase({
         address: config.milvusAddress,
         ...(config.milvusToken && { token: config.milvusToken }),
+        useSystemProxy: config.databaseUseSystemProxy,
     });
     const context = new Context({
         embedding,

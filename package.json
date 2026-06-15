@@ -1,6 +1,6 @@
 {
     "name": "hitmux-context-engine",
-    "version": "0.1.19",
+    "version": "0.1.20",
     "description": "A powerful code indexing tool with multi-platform support",
     "private": true,
     "scripts": {
@@ -8,7 +8,7 @@
         "build:core": "pnpm --filter @hitmux/hitmux-context-engine-core build",
         "build:mcp": "pnpm clean:build && tsc --build --force packages/core packages/mcp",
         "build:aliases": "pnpm -r --parallel --filter @hitmux/hce --filter @hitmux/hitmux-context-engine build",
-        "build:examples": "pnpm -r --parallel --filter='./examples/*' build",
+        "build:examples": "pnpm build:core && pnpm -r --parallel --filter='./examples/*' build",
         "dev": "pnpm -r --filter='./packages/*' dev",
         "dev:core": "pnpm --filter @hitmux/hitmux-context-engine-core dev",
         "dev:mcp": "pnpm --filter @hitmux/hitmux-context-engine-mcp dev",

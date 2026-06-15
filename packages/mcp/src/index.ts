@@ -36,6 +36,7 @@ import {
     createEmbeddingInstance,
     logEmbeddingProviderInfo,
 } from "./embedding.js";
+import { runCliTestCommand } from "./cli-test.js";
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 import { ToolHandlers } from "./handlers.js";
@@ -572,6 +573,11 @@ async function main() {
         console.log(
             `[MCP] Completed global config comments for missing fields: ${ensureConfigResult.appendedKeys.join(", ")}`,
         );
+    }
+
+    if (args[0] === "test") {
+        const exitCode = await runCliTestCommand(args.slice(1));
+        process.exit(exitCode);
     }
 
     const server = new ContextMcpServer();

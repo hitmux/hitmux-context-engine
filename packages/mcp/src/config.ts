@@ -384,6 +384,11 @@ Usage:
 Options:
  --help, -h Show this help message
 
+Test commands:
+ hce test                 Test embedding and vector database connectivity
+ hce test embedding       Test the configured embedding provider
+ hce test vectordb        Test the configured Milvus/Zilliz connection
+
 Configuration:
  Runtime configuration is read from both files, with project config overriding
  global config for matching fields:

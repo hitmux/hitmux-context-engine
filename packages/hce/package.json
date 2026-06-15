@@ -1,6 +1,6 @@
 {
     "name": "@hitmux/hce",
-    "version": "0.1.19",
+    "version": "0.1.20",
     "description": "Short package alias for the Hitmux Context Engine MCP server",
     "type": "module",
     "bin": {

@@ -8,7 +8,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 function parseArgs(argv) {
     const options = {
         path: process.cwd(),
-        command: process.env.HCE_MCP_COMMAND || "hce",
+        command: process.env.HCE_MCP_COMMAND || "hitmux-context-engine-mcp",
         args: process.env.HCE_MCP_ARGS ? splitShellWords(process.env.HCE_MCP_ARGS) : [],
         timeoutMs: DEFAULT_TIMEOUT_MS,
     };
@@ -57,7 +57,7 @@ function printHelp() {
 Options:
   --path <dir>          Codebase path passed to get_indexing_status.
                         Default: current working directory.
-  --command <cmd>       MCP server command. Default: HCE_MCP_COMMAND or hce.
+  --command <cmd>       MCP server command. Default: HCE_MCP_COMMAND or hitmux-context-engine-mcp.
   --arg <value>         Add one MCP server argument. Can be repeated.
   --timeout-ms <ms>     Overall timeout. Default: ${DEFAULT_TIMEOUT_MS}.
 

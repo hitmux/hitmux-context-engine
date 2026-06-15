@@ -4,8 +4,9 @@ import { MilvusVectorDatabase } from '../packages/core/src/vectordb/milvus-vecto
 import { AstCodeSplitter } from '../packages/core/src/splitter/ast-splitter';
 
 /**
- * Context End-to-End Test - Complete Workflow
+ * Legacy core-only Context smoke - direct API workflow
  * Includes: Configure Embedding → Configure Vector Database → Create Context → Index Codebase → Semantic Search
+ * This intentionally does not exercise the current MCP config.conf runtime path.
  */
 export async function testContextEndToEnd(config: {
     openaiApiKey: string;

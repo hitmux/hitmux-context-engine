@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hitmux Context Engine End-to-End Test
-Use TypeScriptExecutor to call complete Hitmux Context Engine workflow
+Legacy Hitmux Context Engine core-only end-to-end smoke.
+Uses TypeScriptExecutor to call the direct core API path.
 """
 
 import os
@@ -13,21 +13,24 @@ sys.path.append(str(Path(__file__).parent))
 
 from ts_executor import TypeScriptExecutor
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+
 
 def run_context_endtoend_test():
-    """Run Hitmux Context Engine end-to-end test"""
+    """Run the legacy direct-core end-to-end smoke."""
 
     # Configuration parameters
     config = {
         "openaiApiKey": os.environ.get("OPENAI_API_KEY", "your-openai-api-key"),
         "milvusAddress": os.environ.get("MILVUS_ADDRESS", "localhost:19530"),
         "codebasePath": str(
-            Path(__file__).parent.parent / "packages" / "core" / "src"
+            REPO_ROOT / "packages" / "core" / "src"
         ),  # Index core source code
         "searchQuery": "embedding creation and vector database configuration",
     }
 
-    print("🚀 Starting Hitmux Context Engine end-to-end test")
+    print("🚀 Starting legacy Hitmux Context Engine core-only end-to-end smoke")
     print(f"📊 Configuration:")
     print(f"   - Codebase path: {config['codebasePath']}")
     print(f"   - Vector database: {config['milvusAddress']}")
@@ -38,11 +41,11 @@ def run_context_endtoend_test():
     print()
 
     try:
-        executor = TypeScriptExecutor()
+        executor = TypeScriptExecutor(working_dir=str(REPO_ROOT))
 
         # Call end-to-end test
         result = executor.call_method(
-            "./test_context.ts", "testContextEndToEnd", config
+            str(SCRIPT_DIR / "test_context.ts"), "testContextEndToEnd", config
         )
 
         # Output results
@@ -104,7 +107,7 @@ def run_context_endtoend_test():
 def main():
     """Main function"""
     print("=" * 60)
-    print("🧪 Hitmux Context Engine End-to-End Test")
+    print("🧪 Hitmux Context Engine Legacy Core-Only End-to-End Smoke")
     print("=" * 60)
     print()
 
@@ -126,7 +129,8 @@ def main():
         print("   - Milvus vector database is running properly")
         print("   - packages/core code is accessible")
     print("=" * 60)
+    return 0 if success else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
