@@ -21,6 +21,10 @@ export interface VectorDocument {
     pathSegment4?: string;
 }
 
+export interface InsertOptions {
+    deferFlushLoad?: boolean;
+}
+
 export const STRUCTURED_METADATA_FIELDS = [
     'primarySymbol',
     'symbolKind',
@@ -130,14 +134,19 @@ export interface VectorDatabase {
      * @param collectionName Collection name
      * @param documents Document array
      */
-    insert(collectionName: string, documents: VectorDocument[]): Promise<void>;
+    insert(collectionName: string, documents: VectorDocument[], options?: InsertOptions): Promise<void>;
 
     /**
      * Insert hybrid vector documents
      * @param collectionName Collection name
      * @param documents Document array
      */
-    insertHybrid(collectionName: string, documents: VectorDocument[]): Promise<void>;
+    insertHybrid(collectionName: string, documents: VectorDocument[], options?: InsertOptions): Promise<void>;
+
+    /**
+     * Finalize deferred writes before verification/search.
+     */
+    finalizeCollectionWrites?(collectionName: string): Promise<void>;
 
     /**
      * Search similar vectors

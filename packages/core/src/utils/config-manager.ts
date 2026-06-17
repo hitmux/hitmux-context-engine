@@ -11,6 +11,7 @@ export interface HitmuxConfig {
     embeddingModel?: string;
     embeddingBatchSize?: number;
     embeddingConcurrency?: number;
+    fileProcessingConcurrency?: number;
     openaiApiKey?: string;
     openaiBaseUrl?: string;
     voyageaiApiKey?: string;
@@ -44,6 +45,10 @@ export interface HitmuxConfig {
     syncIntervalMs?: number;
     syncLockStaleMs?: number;
     triggerWatcher?: boolean;
+    projectWatcher?: boolean;
+    projectWatcherDebounceMs?: number;
+    projectWatcherUsePolling?: boolean;
+    projectWatcherFallbackScanIntervalMs?: number;
     splitterType?: string;
     searchTopK?: number;
     searchThreshold?: number;
@@ -309,6 +314,7 @@ const DEFAULT_GLOBAL_CONFIG_ACTIVE_CONTENT = `
 # Default embedding provider.
 embeddingProvider = OpenRouter
 embeddingModel = qwen/qwen3-embedding-4b
+fileProcessingConcurrency = 2
 # openrouterApiKey = sk-or-your-openrouter-api-key
 
 # Local Milvus default. Change this for remote Milvus or Zilliz Cloud.
@@ -322,6 +328,10 @@ databaseUseSystemProxy = false
 # Background sync defaults.
 backgroundSync = true
 triggerWatcher = true
+projectWatcher = true
+projectWatcherDebounceMs = 1000
+projectWatcherUsePolling = false
+projectWatcherFallbackScanIntervalMs = 600000
 `;
 
 const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
@@ -354,6 +364,11 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
         key: 'embeddingConcurrency',
         description: 'Embedding request concurrency for index operations.',
         example: '4'
+    },
+    {
+        key: 'fileProcessingConcurrency',
+        description: 'Read/split worker concurrency for index operations.',
+        example: '2'
     },
     {
         key: 'openaiApiKey',
@@ -519,6 +534,26 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
         key: 'triggerWatcher',
         description: 'Watch ~/.hitmux-context-engine/.sync-trigger for immediate debounced sync.',
         example: 'true'
+    },
+    {
+        key: 'projectWatcher',
+        description: 'Watch indexed project roots and use dirty paths for faster incremental sync.',
+        example: 'true'
+    },
+    {
+        key: 'projectWatcherDebounceMs',
+        description: 'Debounce window for project file watcher events.',
+        example: '1000'
+    },
+    {
+        key: 'projectWatcherUsePolling',
+        description: 'Use polling for project file watchers on filesystems with unreliable native events.',
+        example: 'false'
+    },
+    {
+        key: 'projectWatcherFallbackScanIntervalMs',
+        description: 'Maximum time between full fallback scans while project watcher fast path is active.',
+        example: '600000'
     },
     {
         key: 'splitterType',

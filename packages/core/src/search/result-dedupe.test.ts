@@ -79,6 +79,39 @@ describe('deduplicateSemanticSearchResults', () => {
         expect(deduped.map(result => result.startLine)).toEqual([7, 11]);
     });
 
+    it('does not classify plain call expressions as conflicting definitions', () => {
+        const deduped = deduplicateSemanticSearchResults([
+            createResult({
+                content: [
+                    'loadPayload(workerPayload);',
+                    'sendPayload(workerPayload);',
+                    'flushPayload(workerPayload);',
+                    'trackPayload(workerPayload);',
+                ].join('\n'),
+                startLine: 20,
+                endLine: 23,
+                score: 0.91,
+            }),
+            createResult({
+                content: [
+                    'sendPayload(workerPayload);',
+                    'flushPayload(workerPayload);',
+                    'trackPayload(workerPayload);',
+                    'finalizePayload(workerPayload);',
+                ].join('\n'),
+                startLine: 21,
+                endLine: 24,
+                score: 0.92,
+            }),
+        ]);
+
+        expect(deduped).toHaveLength(1);
+        expect(deduped[0]).toMatchObject({
+            startLine: 21,
+            endLine: 24,
+        });
+    });
+
     it('deduplicates adjacent chunks when they carry the same definition context', () => {
         const deduped = deduplicateSemanticSearchResults([
             createResult({

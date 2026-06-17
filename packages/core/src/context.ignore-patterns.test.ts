@@ -64,7 +64,7 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     query: jest.fn().mockResolvedValue([]),
     getCollectionDescription: jest.fn().mockResolvedValue(''),
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
-    getCollectionRowCount: jest.fn().mockResolvedValue(-1),
+    getCollectionRowCount: jest.fn().mockResolvedValue(999),
 });
 
 describe('Context ignore pattern isolation', () => {
@@ -284,6 +284,132 @@ describe('Context ignore pattern isolation', () => {
             expect(synchronizer?.getFileHash('custom.foo')).toBeDefined();
             expect(synchronizer?.getFileHash('ignored.ts')).toBeUndefined();
             expect(context.getSupportedExtensions()).not.toContain('.foo');
+        } finally {
+            await FileSynchronizer.deleteSnapshot(project);
+        }
+    });
+
+    it('reindexChangedPaths rebuilds only dirty modified files', async () => {
+        const project = path.join(tempRoot, 'project-targeted-modified');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'a.ts'), 'export const a = 1;\n');
+        await fs.writeFile(path.join(project, 'b.ts'), 'export const b = 1;\n');
+
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        try {
+            await context.reindexByChange(project);
+            vectorDatabase.insert.mockClear();
+
+            await fs.writeFile(path.join(project, 'a.ts'), 'export const a = 2;\n');
+            await expect(context.reindexChangedPaths(project, ['a.ts'])).resolves.toEqual({
+                added: 0,
+                removed: 0,
+                modified: 1,
+            });
+
+            expect(vectorDatabase.insert).toHaveBeenCalledTimes(1);
+            expect(vectorDatabase.insert.mock.calls[0][1][0].relativePath).toBe('a.ts');
+        } finally {
+            await FileSynchronizer.deleteSnapshot(project);
+        }
+    });
+
+    it('reindexChangedPaths removes chunks when a dirty file is deleted', async () => {
+        const project = path.join(tempRoot, 'project-targeted-deleted');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'a.ts'), 'export const a = 1;\n');
+
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query.mockResolvedValue([{ id: 'chunk-a' } as any]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        try {
+            await context.reindexByChange(project);
+            vectorDatabase.insert.mockClear();
+            vectorDatabase.delete.mockClear();
+
+            await fs.rm(path.join(project, 'a.ts'));
+            await expect(context.reindexChangedPaths(project, ['a.ts'])).resolves.toEqual({
+                added: 0,
+                removed: 1,
+                modified: 0,
+            });
+
+            expect(vectorDatabase.delete).toHaveBeenCalledWith(expect.any(String), ['chunk-a']);
+            expect(vectorDatabase.insert).not.toHaveBeenCalled();
+        } finally {
+            await FileSynchronizer.deleteSnapshot(project);
+        }
+    });
+
+    it('reindexChangedPaths removes chunks when a dirty file becomes ignored', async () => {
+        const project = path.join(tempRoot, 'project-targeted-ignored');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'a.ts'), 'export const a = 1;\n');
+
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query.mockResolvedValue([{ id: 'chunk-a' } as any]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        try {
+            await context.reindexByChange(project);
+            vectorDatabase.insert.mockClear();
+            vectorDatabase.delete.mockClear();
+
+            await fs.writeFile(path.join(project, '.hceignore'), 'a.ts\n');
+            await expect(context.reindexChangedPaths(project, ['a.ts'])).resolves.toEqual({
+                added: 0,
+                removed: 1,
+                modified: 0,
+            });
+
+            expect(vectorDatabase.delete).toHaveBeenCalledWith(expect.any(String), ['chunk-a']);
+            expect(vectorDatabase.insert).not.toHaveBeenCalled();
+        } finally {
+            await FileSynchronizer.deleteSnapshot(project);
+        }
+    });
+
+    it('reindexChangedPaths keeps pending large additions uncommitted after safety-limit failure', async () => {
+        const project = path.join(tempRoot, 'project-targeted-large');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'initial.ts'), 'const initial = true;\n');
+
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        try {
+            await context.reindexByChange(project);
+            vectorDatabase.insert.mockClear();
+
+            const lines = Array.from({ length: 5_001 }, (_, index) => `const value${index} = ${index};`).join('\n');
+            await fs.writeFile(path.join(project, 'large.ts'), `${lines}\n`);
+
+            await expect(context.reindexChangedPaths(project, ['large.ts'])).rejects.toBeInstanceOf(IncrementalIndexTooLargeError);
+            await expect(context.reindexChangedPaths(project, ['large.ts'])).rejects.toBeInstanceOf(IncrementalIndexTooLargeError);
+            expect(vectorDatabase.insert).not.toHaveBeenCalled();
         } finally {
             await FileSynchronizer.deleteSnapshot(project);
         }

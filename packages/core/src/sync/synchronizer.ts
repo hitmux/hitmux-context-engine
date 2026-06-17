@@ -25,6 +25,10 @@ export interface CheckForChangesOptions {
     deferSnapshotUpdate?: boolean;
 }
 
+export interface CheckChangedPathsOptions {
+    deferSnapshotUpdate?: boolean;
+}
+
 export class SnapshotTooLargeError extends Error {
     constructor(message: string) {
         super(message);
@@ -281,6 +285,71 @@ export class FileSynchronizer {
         return { added: [], removed: [], modified: [] };
     }
 
+    public async checkChangedPaths(relativePaths: string[], options: CheckChangedPathsOptions = {}): Promise<{ added: string[], removed: string[], modified: string[] }> {
+        const normalizedPaths = this.normalizeChangedPaths(relativePaths);
+        console.log(`[Synchronizer] Checking ${normalizedPaths.length} targeted path changes...`);
+
+        const nextFileHashes = new Map(this.fileHashes);
+        const nextFileStates = new Map(this.fileStates);
+        const added: string[] = [];
+        const removed: string[] = [];
+        const modified: string[] = [];
+
+        for (const relativePath of normalizedPaths) {
+            const oldHash = this.fileHashes.get(relativePath);
+            const nextState = await this.readCurrentPathState(relativePath);
+
+            if (!nextState) {
+                if (oldHash !== undefined) {
+                    nextFileHashes.delete(relativePath);
+                    nextFileStates.delete(relativePath);
+                    removed.push(relativePath);
+                }
+                continue;
+            }
+
+            nextFileHashes.set(relativePath, nextState.hash);
+            nextFileStates.set(relativePath, nextState);
+
+            if (oldHash === undefined) {
+                added.push(relativePath);
+            } else if (oldHash !== nextState.hash) {
+                modified.push(relativePath);
+            } else {
+                const oldState = this.fileStates.get(relativePath);
+                if (!this.snapshotStateEqual(oldState, nextState)) {
+                    nextFileStates.set(relativePath, nextState);
+                }
+            }
+        }
+
+        const nextMerkleDAG = this.buildMerkleDAG(nextFileHashes);
+        const hasChanges = added.length > 0 || removed.length > 0 || modified.length > 0;
+        const metadataChanged = !this.fileStatesEqual(this.fileStates, nextFileStates);
+
+        if (options.deferSnapshotUpdate) {
+            if (hasChanges || metadataChanged) {
+                this.pendingSnapshotUpdate = {
+                    fileHashes: nextFileHashes,
+                    fileStates: nextFileStates,
+                    merkleDAG: nextMerkleDAG
+                };
+            }
+            console.log(`[Synchronizer] Targeted changes: ${added.length} added, ${removed.length} removed, ${modified.length} modified. Snapshot update ${hasChanges || metadataChanged ? 'deferred' : 'not needed'}.`);
+            return { added, removed, modified };
+        }
+
+        if (hasChanges || metadataChanged) {
+            this.fileHashes = nextFileHashes;
+            this.fileStates = nextFileStates;
+            this.merkleDAG = nextMerkleDAG;
+            await this.saveSnapshot();
+        }
+
+        console.log(`[Synchronizer] Targeted changes: ${added.length} added, ${removed.length} removed, ${modified.length} modified.`);
+        return { added, removed, modified };
+    }
+
     public async commitPendingChanges(): Promise<void> {
         if (!this.pendingSnapshotUpdate) {
             return;
@@ -370,6 +439,89 @@ export class FileSynchronizer {
         }
 
         return { added, removed, modified };
+    }
+
+    private normalizeChangedPaths(relativePaths: string[]): string[] {
+        const normalized: string[] = [];
+        const seen = new Set<string>();
+
+        for (const relativePath of relativePaths) {
+            const normalizedPath = relativePath
+                .replace(/\\/g, '/')
+                .replace(/^\/+/, '')
+                .split('/')
+                .filter(segment => segment.length > 0 && segment !== '.')
+                .join('/');
+
+            if (
+                normalizedPath.length === 0 ||
+                normalizedPath.startsWith('../') ||
+                normalizedPath.includes('/../') ||
+                seen.has(normalizedPath)
+            ) {
+                continue;
+            }
+
+            seen.add(normalizedPath);
+            normalized.push(normalizedPath);
+        }
+
+        return normalized;
+    }
+
+    private async readCurrentPathState(relativePath: string): Promise<FileSnapshotState | null> {
+        if (this.isBeyondMaxDepth(relativePath) || this.shouldIgnore(relativePath, false)) {
+            return null;
+        }
+
+        const fullPath = path.join(this.rootDir, relativePath);
+        const resolvedRoot = path.resolve(this.rootDir);
+        const resolvedPath = path.resolve(fullPath);
+        if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(`${resolvedRoot}${path.sep}`)) {
+            return null;
+        }
+
+        let stat;
+        try {
+            stat = await fs.stat(fullPath);
+        } catch (error: any) {
+            if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+                return null;
+            }
+            throw error;
+        }
+
+        if (!stat.isFile()) {
+            return null;
+        }
+
+        if (this.shouldIgnore(relativePath, false)) {
+            return null;
+        }
+
+        const ext = path.extname(relativePath);
+        if (this.supportedExtensions.length > 0 && !this.supportedExtensions.includes(ext)) {
+            return null;
+        }
+
+        return this.readFileSnapshotState(fullPath, stat);
+    }
+
+    private isBeyondMaxDepth(relativePath: string): boolean {
+        if (this.maxDepth === undefined) {
+            return false;
+        }
+
+        const directoryDepth = relativePath.split('/').length - 1;
+        return directoryDepth > this.maxDepth;
+    }
+
+    private snapshotStateEqual(a: FileSnapshotState | undefined, b: FileSnapshotState | undefined): boolean {
+        return !!a && !!b &&
+            a.hash === b.hash &&
+            a.mtimeMs === b.mtimeMs &&
+            a.size === b.size &&
+            a.effectiveLines === b.effectiveLines;
     }
 
     public getFileHash(filePath: string): string | undefined {

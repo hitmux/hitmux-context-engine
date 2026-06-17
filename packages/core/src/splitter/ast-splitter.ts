@@ -6,6 +6,10 @@ type ParserConfig = {
     nodeTypes: string[];
 };
 
+type CachedParserConfig = ParserConfig & {
+    cacheKey: string;
+};
+
 function loadParserLanguage(packageName: string, exportName?: string): any {
     const parserModule = require(packageName);
     const languageExport = exportName ? parserModule[exportName] : parserModule.default || parserModule;
@@ -35,6 +39,8 @@ export class AstCodeSplitter implements Splitter {
     private chunkSize: number = 2500;
     private chunkOverlap: number = 300;
     private langchainFallback: any; // LangChainCodeSplitter for fallback
+    private readonly languageCache = new Map<string, any>();
+    private readonly parserCache = new Map<string, Parser>();
 
     constructor(chunkSize?: number, chunkOverlap?: number) {
         if (chunkSize !== undefined) this.chunkSize = chunkSize;
@@ -61,8 +67,7 @@ export class AstCodeSplitter implements Splitter {
         try {
             console.log(`🌳 Using AST splitter for ${language} file: ${filePath || 'unknown'}`);
 
-            const parser = new Parser();
-            parser.setLanguage(langConfig.loadParser());
+            const parser = this.getParser(langConfig);
             const tree = parser.parse(code);
             const rootNode = this.getRootNode(tree);
 
@@ -104,26 +109,49 @@ export class AstCodeSplitter implements Splitter {
         this.langchainFallback.setChunkOverlap(chunkOverlap);
     }
 
-    private getLanguageConfig(language: string): ParserConfig | null {
-        const langMap: Record<string, ParserConfig> = {
-            'javascript': { loadParser: () => loadParserLanguage('tree-sitter-javascript'), nodeTypes: SPLITTABLE_NODE_TYPES.javascript },
-            'js': { loadParser: () => loadParserLanguage('tree-sitter-javascript'), nodeTypes: SPLITTABLE_NODE_TYPES.javascript },
-            'jsx': { loadParser: () => loadParserLanguage('tree-sitter-javascript'), nodeTypes: SPLITTABLE_NODE_TYPES.javascript },
-            'typescript': { loadParser: () => loadParserLanguage('tree-sitter-typescript', 'typescript'), nodeTypes: SPLITTABLE_NODE_TYPES.typescript },
-            'ts': { loadParser: () => loadParserLanguage('tree-sitter-typescript', 'typescript'), nodeTypes: SPLITTABLE_NODE_TYPES.typescript },
-            'tsx': { loadParser: () => loadParserLanguage('tree-sitter-typescript', 'tsx'), nodeTypes: SPLITTABLE_NODE_TYPES.typescript },
-            'python': { loadParser: () => loadParserLanguage('tree-sitter-python'), nodeTypes: SPLITTABLE_NODE_TYPES.python },
-            'py': { loadParser: () => loadParserLanguage('tree-sitter-python'), nodeTypes: SPLITTABLE_NODE_TYPES.python },
-            'java': { loadParser: () => loadParserLanguage('tree-sitter-java'), nodeTypes: SPLITTABLE_NODE_TYPES.java },
-            'cpp': { loadParser: () => loadParserLanguage('tree-sitter-cpp'), nodeTypes: SPLITTABLE_NODE_TYPES.cpp },
-            'c++': { loadParser: () => loadParserLanguage('tree-sitter-cpp'), nodeTypes: SPLITTABLE_NODE_TYPES.cpp },
-            'c': { loadParser: () => loadParserLanguage('tree-sitter-cpp'), nodeTypes: SPLITTABLE_NODE_TYPES.cpp },
-            'go': { loadParser: () => loadParserLanguage('tree-sitter-go'), nodeTypes: SPLITTABLE_NODE_TYPES.go },
-            'rust': { loadParser: () => loadParserLanguage('tree-sitter-rust'), nodeTypes: SPLITTABLE_NODE_TYPES.rust },
-            'rs': { loadParser: () => loadParserLanguage('tree-sitter-rust'), nodeTypes: SPLITTABLE_NODE_TYPES.rust },
-            'cs': { loadParser: () => loadParserLanguage('tree-sitter-c-sharp'), nodeTypes: SPLITTABLE_NODE_TYPES.csharp },
-            'csharp': { loadParser: () => loadParserLanguage('tree-sitter-c-sharp'), nodeTypes: SPLITTABLE_NODE_TYPES.csharp },
-            'scala': { loadParser: () => loadParserLanguage('tree-sitter-scala'), nodeTypes: SPLITTABLE_NODE_TYPES.scala }
+    private getParser(langConfig: CachedParserConfig): Parser {
+        const existingParser = this.parserCache.get(langConfig.cacheKey);
+        if (existingParser) {
+            return existingParser;
+        }
+
+        const parser = new Parser();
+        parser.setLanguage(this.getParserLanguage(langConfig));
+        this.parserCache.set(langConfig.cacheKey, parser);
+        return parser;
+    }
+
+    private getParserLanguage(langConfig: CachedParserConfig): any {
+        const existingLanguage = this.languageCache.get(langConfig.cacheKey);
+        if (existingLanguage) {
+            return existingLanguage;
+        }
+
+        const parserLanguage = langConfig.loadParser();
+        this.languageCache.set(langConfig.cacheKey, parserLanguage);
+        return parserLanguage;
+    }
+
+    private getLanguageConfig(language: string): CachedParserConfig | null {
+        const langMap: Record<string, CachedParserConfig> = {
+            'javascript': { cacheKey: 'javascript', loadParser: () => loadParserLanguage('tree-sitter-javascript'), nodeTypes: SPLITTABLE_NODE_TYPES.javascript },
+            'js': { cacheKey: 'javascript', loadParser: () => loadParserLanguage('tree-sitter-javascript'), nodeTypes: SPLITTABLE_NODE_TYPES.javascript },
+            'jsx': { cacheKey: 'javascript', loadParser: () => loadParserLanguage('tree-sitter-javascript'), nodeTypes: SPLITTABLE_NODE_TYPES.javascript },
+            'typescript': { cacheKey: 'typescript', loadParser: () => loadParserLanguage('tree-sitter-typescript', 'typescript'), nodeTypes: SPLITTABLE_NODE_TYPES.typescript },
+            'ts': { cacheKey: 'typescript', loadParser: () => loadParserLanguage('tree-sitter-typescript', 'typescript'), nodeTypes: SPLITTABLE_NODE_TYPES.typescript },
+            'tsx': { cacheKey: 'tsx', loadParser: () => loadParserLanguage('tree-sitter-typescript', 'tsx'), nodeTypes: SPLITTABLE_NODE_TYPES.typescript },
+            'python': { cacheKey: 'python', loadParser: () => loadParserLanguage('tree-sitter-python'), nodeTypes: SPLITTABLE_NODE_TYPES.python },
+            'py': { cacheKey: 'python', loadParser: () => loadParserLanguage('tree-sitter-python'), nodeTypes: SPLITTABLE_NODE_TYPES.python },
+            'java': { cacheKey: 'java', loadParser: () => loadParserLanguage('tree-sitter-java'), nodeTypes: SPLITTABLE_NODE_TYPES.java },
+            'cpp': { cacheKey: 'cpp', loadParser: () => loadParserLanguage('tree-sitter-cpp'), nodeTypes: SPLITTABLE_NODE_TYPES.cpp },
+            'c++': { cacheKey: 'cpp', loadParser: () => loadParserLanguage('tree-sitter-cpp'), nodeTypes: SPLITTABLE_NODE_TYPES.cpp },
+            'c': { cacheKey: 'cpp', loadParser: () => loadParserLanguage('tree-sitter-cpp'), nodeTypes: SPLITTABLE_NODE_TYPES.cpp },
+            'go': { cacheKey: 'go', loadParser: () => loadParserLanguage('tree-sitter-go'), nodeTypes: SPLITTABLE_NODE_TYPES.go },
+            'rust': { cacheKey: 'rust', loadParser: () => loadParserLanguage('tree-sitter-rust'), nodeTypes: SPLITTABLE_NODE_TYPES.rust },
+            'rs': { cacheKey: 'rust', loadParser: () => loadParserLanguage('tree-sitter-rust'), nodeTypes: SPLITTABLE_NODE_TYPES.rust },
+            'cs': { cacheKey: 'csharp', loadParser: () => loadParserLanguage('tree-sitter-c-sharp'), nodeTypes: SPLITTABLE_NODE_TYPES.csharp },
+            'csharp': { cacheKey: 'csharp', loadParser: () => loadParserLanguage('tree-sitter-c-sharp'), nodeTypes: SPLITTABLE_NODE_TYPES.csharp },
+            'scala': { cacheKey: 'scala', loadParser: () => loadParserLanguage('tree-sitter-scala'), nodeTypes: SPLITTABLE_NODE_TYPES.scala }
         };
 
         return langMap[language.toLowerCase()] || null;

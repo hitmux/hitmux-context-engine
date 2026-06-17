@@ -85,11 +85,19 @@ test("ensureGlobalConfigFile creates a commented default global config", async (
         assert.match(content, /# Project config at \.\/\.hitmux-context-engine\/config\.conf overrides matching fields\./);
         assert.match(content, /embeddingProvider = OpenRouter/);
         assert.match(content, /embeddingModel = qwen\/qwen3-embedding-4b/);
+        assert.doesNotMatch(content, /\nembeddingBatchSize = /);
+        assert.doesNotMatch(content, /\nembeddingConcurrency = /);
+        assert.match(content, /# embeddingBatchSize = 32/);
+        assert.match(content, /# embeddingConcurrency = 4/);
         assert.match(content, /# openrouterApiKey = sk-or-your-openrouter-api-key/);
         assert.match(content, /milvusAddress = localhost:19530/);
         assert.match(content, /embeddingUseSystemProxy = false/);
         assert.match(content, /databaseUseSystemProxy = false/);
         assert.match(content, /# automaticIncrementalEffectiveLineLimit = 5000/);
+        assert.match(content, /projectWatcher = true/);
+        assert.match(content, /projectWatcherDebounceMs = 1000/);
+        assert.match(content, /projectWatcherUsePolling = false/);
+        assert.match(content, /projectWatcherFallbackScanIntervalMs = 600000/);
 
         const secondResult = configManager.ensureGlobalConfigFile();
         assert.deepEqual(secondResult, {
@@ -121,16 +129,21 @@ test("ensureGlobalConfigFile completes existing config using the default templat
         assert.equal(result.created, false);
         assert.equal(result.updated, true);
         assert.ok(result.appendedKeys.includes("embeddingModel"));
+        assert.ok(result.appendedKeys.includes("embeddingBatchSize"));
+        assert.ok(result.appendedKeys.includes("embeddingConcurrency"));
         assert.ok(result.appendedKeys.includes("openrouterApiKey"));
         assert.ok(!result.appendedKeys.includes("embeddingProvider"));
         assert.ok(!result.appendedKeys.includes("milvusAddress"));
         assert.ok(!result.appendedKeys.includes("customExtensions"));
         assert.doesNotMatch(content, /# Missing optional fields added as comments\./);
         assert.match(content, /# Hitmux Context Engine global configuration\./);
-        assert.match(content, /# Default embedding provider\.\nembeddingProvider = OpenAI # keep inline comment\nembeddingModel = qwen\/qwen3-embedding-4b/);
+        assert.match(content, /# Default embedding provider\.\nembeddingProvider = OpenAI # keep inline comment\nembeddingModel = qwen\/qwen3-embedding-4b\nfileProcessingConcurrency = 2/);
         assert.match(content, /# Local Milvus default\. Change this for remote Milvus or Zilliz Cloud\.\n# milvusAddress = remote\.example:19530\n# milvusToken = your-milvus-or-zilliz-token/);
-        assert.match(content, /embeddingModel = qwen\/qwen3-embedding-4b\n# openrouterApiKey = sk-or-your-openrouter-api-key/);
+        assert.match(content, /embeddingModel = qwen\/qwen3-embedding-4b\nfileProcessingConcurrency = 2\n# openrouterApiKey = sk-or-your-openrouter-api-key/);
+        assert.match(content, /# Embedding batch size for index operations\.\n# embeddingBatchSize = 32/);
+        assert.match(content, /# Embedding request concurrency for index operations\.\n# embeddingConcurrency = 4/);
         assert.match(content, /# Effective-line growth limit before automatic incremental sync pauses for manual review\.\n# automaticIncrementalEffectiveLineLimit = 5000/);
+        assert.match(content, /# Background sync defaults\.\nbackgroundSync = true\ntriggerWatcher = true\nprojectWatcher = true\nprojectWatcherDebounceMs = 1000\nprojectWatcherUsePolling = false\nprojectWatcherFallbackScanIntervalMs = 600000/);
         assert.match(content, /# Additional file extensions to index; repeat the field for multiple values\.\ncustomExtensions = \.vue\ncustomExtensions = \.svelte/);
         assert.match(content, /# Existing fields not present in the current default template\.\nfutureOption = keep-me/);
 

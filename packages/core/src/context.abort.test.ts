@@ -68,7 +68,7 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     query: jest.fn().mockResolvedValue([]),
     getCollectionDescription: jest.fn().mockResolvedValue(''),
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
-    getCollectionRowCount: jest.fn().mockResolvedValue(-1),
+    getCollectionRowCount: jest.fn().mockResolvedValue(999),
 });
 
 describe('Context indexCodebase AbortSignal support', () => {
@@ -168,9 +168,10 @@ describe('Context indexCodebase AbortSignal support', () => {
             context.indexCodebase(project, undefined, false, [], [], undefined, controller.signal)
         ).rejects.toBeInstanceOf(IndexAbortError);
 
-        // Two files were processed before the signal fired; the remaining
-        // three must NOT have been split.
-        expect(splitter.calls).toBe(2);
+        // The signal fires on the second split. With bounded file concurrency,
+        // one already-started worker may finish its current split, but no
+        // additional work should continue beyond that in-flight file.
+        expect(splitter.calls).toBeLessThanOrEqual(3);
 
         // No insert should fire after abort: chunks are buffered until the
         // batch threshold (100) so a small project never flushes mid-loop, and
@@ -200,6 +201,8 @@ describe('Context indexCodebase AbortSignal support', () => {
         ).rejects.toBeInstanceOf(IndexAbortError);
 
         expect(splitter.calls).toBe(0);
+        expect(vectorDatabase.hasCollection).not.toHaveBeenCalled();
+        expect(vectorDatabase.dropCollection).not.toHaveBeenCalled();
         expect(vectorDatabase.insert).not.toHaveBeenCalled();
     });
 });

@@ -6,6 +6,7 @@ import {
     FileSynchronizer,
     IncrementalIndexTooLargeError,
     configManager,
+    getEmbeddingIndexingDefaults,
 } from "@hitmux/hitmux-context-engine-core";
 import { SnapshotManager } from "./snapshot.js";
 import type { RequestSplitterType } from "./config.js";
@@ -15,10 +16,13 @@ import {
 } from "./splitter.js";
 import { queryCollectionStats } from "./collection-stats.js";
 import { acquireMcpWriterLock, type McpWriterLock } from "./sync-lock.js";
+import { ProjectChangeTracker, type ProjectChangeState } from "./project-change-tracker.js";
 
 const DEFAULT_INITIAL_SYNC_DELAY_MS = 5_000;
 const DEFAULT_SYNC_INTERVAL_MS = 2 * 60 * 1000;
 const MIN_SYNC_INTERVAL_MS = 1_000;
+const DEFAULT_PROJECT_WATCHER_DEBOUNCE_MS = 1_000;
+const DEFAULT_PROJECT_WATCHER_FALLBACK_SCAN_INTERVAL_MS = 10 * 60 * 1000;
 
 function isBackgroundSyncEnabled(): boolean {
     return configManager.getBoolean("backgroundSync") ?? true;
@@ -45,20 +49,78 @@ function getBackgroundSyncIntervalMs(): number {
     return Math.floor(intervalMs);
 }
 
-function getSyncConcurrency(): number {
-    const concurrency = configManager.getNumber("embeddingConcurrency");
+function getSyncConcurrencyForCodebase(codebasePath: string): number {
+    const concurrency = configManager.getNumber("embeddingConcurrency", codebasePath);
+    const defaultConcurrency = getEmbeddingIndexingDefaults(
+        configManager.getString("embeddingProvider", codebasePath),
+        configManager.getString("embeddingModel", codebasePath),
+    ).concurrency;
     if (concurrency === undefined) {
-        return 4;
+        return defaultConcurrency;
     }
 
     if (!Number.isFinite(concurrency) || concurrency < 1) {
         console.warn(
-            `[SYNC-DEBUG] Invalid config.embeddingConcurrency value '${concurrency}'. Falling back to 4.`,
+            `[SYNC-DEBUG] Invalid config.embeddingConcurrency value '${concurrency}'. Falling back to ${defaultConcurrency}.`,
         );
-        return 4;
+        return defaultConcurrency;
     }
 
     return Math.max(1, Math.floor(concurrency));
+}
+
+function getSyncConcurrency(indexedCodebases: string[]): number {
+    if (indexedCodebases.length === 0) {
+        return 1;
+    }
+
+    return indexedCodebases.reduce(
+        (lowestConcurrency, codebasePath) => Math.min(
+            lowestConcurrency,
+            getSyncConcurrencyForCodebase(codebasePath),
+        ),
+        Number.POSITIVE_INFINITY,
+    );
+}
+
+function isProjectWatcherEnabled(): boolean {
+    return configManager.getBoolean("projectWatcher") ?? true;
+}
+
+function getProjectWatcherDebounceMs(): number {
+    const value = configManager.getNumber("projectWatcherDebounceMs");
+    if (value === undefined) {
+        return DEFAULT_PROJECT_WATCHER_DEBOUNCE_MS;
+    }
+
+    if (!Number.isFinite(value) || value < 0) {
+        console.warn(
+            `[SYNC-DEBUG] Invalid config.projectWatcherDebounceMs value '${value}'. Falling back to ${DEFAULT_PROJECT_WATCHER_DEBOUNCE_MS}ms.`,
+        );
+        return DEFAULT_PROJECT_WATCHER_DEBOUNCE_MS;
+    }
+
+    return Math.floor(value);
+}
+
+function isProjectWatcherPollingEnabled(): boolean {
+    return configManager.getBoolean("projectWatcherUsePolling") ?? false;
+}
+
+function getProjectWatcherFallbackScanIntervalMs(): number {
+    const value = configManager.getNumber("projectWatcherFallbackScanIntervalMs");
+    if (value === undefined) {
+        return DEFAULT_PROJECT_WATCHER_FALLBACK_SCAN_INTERVAL_MS;
+    }
+
+    if (!Number.isFinite(value) || value < 0) {
+        console.warn(
+            `[SYNC-DEBUG] Invalid config.projectWatcherFallbackScanIntervalMs value '${value}'. Falling back to ${DEFAULT_PROJECT_WATCHER_FALLBACK_SCAN_INTERVAL_MS}ms.`,
+        );
+        return DEFAULT_PROJECT_WATCHER_FALLBACK_SCAN_INTERVAL_MS;
+    }
+
+    return Math.floor(value);
 }
 
 export interface CodebaseSyncStatus {
@@ -82,6 +144,8 @@ export class SyncManager {
     private backgroundSyncIntervalMs: number | null = null;
     private backgroundSyncEnabled: boolean = false;
     private syncStatuses: Map<string, CodebaseSyncStatus> = new Map();
+    private projectChangeTracker: ProjectChangeTracker | null = null;
+    private lastFullScanMs: Map<string, number> = new Map();
 
     constructor(context: Context, snapshotManager: SnapshotManager) {
         this.context = context;
@@ -107,6 +171,19 @@ export class SyncManager {
     public getSyncStatus(codebasePath: string): CodebaseSyncStatus | undefined {
         const status = this.syncStatuses.get(codebasePath);
         return status ? { ...status } : undefined;
+    }
+
+    public trackCodebase(codebasePath: string): void {
+        const codebaseInfo = this.snapshotManager.getCodebaseInfo(codebasePath);
+        this.ensureProjectWatcher(codebasePath, codebaseInfo?.requestIgnoreFiles || []);
+    }
+
+    public async syncCodebaseForSearch(
+        codebasePath: string,
+    ): Promise<{ added: number; removed: number; modified: number }> {
+        return this.syncCodebase(codebasePath, 0, 1, {
+            throwOnIncrementalTooLarge: true,
+        });
     }
 
     private setCodebaseSyncStatus(
@@ -153,6 +230,10 @@ export class SyncManager {
         }
 
         const indexedCodebases = this.snapshotManager.getIndexedCodebases();
+        for (const codebasePath of indexedCodebases) {
+            const codebaseInfo = this.snapshotManager.getCodebaseInfo(codebasePath);
+            this.ensureProjectWatcher(codebasePath, codebaseInfo?.requestIgnoreFiles || []);
+        }
 
         if (indexedCodebases.length === 0) {
             console.log("[SYNC-DEBUG] No codebases indexed. Skipping sync.");
@@ -193,7 +274,7 @@ export class SyncManager {
             }
 
             const syncConcurrency = Math.min(
-                getSyncConcurrency(),
+                getSyncConcurrency(indexedCodebases),
                 indexedCodebases.length,
             );
             console.log(
@@ -270,6 +351,7 @@ export class SyncManager {
         codebasePath: string,
         index: number,
         totalCodebases: number,
+        options: { throwOnIncrementalTooLarge?: boolean } = {},
     ): Promise<{ added: number; removed: number; modified: number }> {
         const codebaseStartTime = Date.now();
 
@@ -298,9 +380,7 @@ export class SyncManager {
         }
 
         try {
-            console.log(
-                `[SYNC-DEBUG] Calling context.reindexByChange() for '${codebasePath}'`,
-            );
+            console.log(`[SYNC-DEBUG] Preparing sync for '${codebasePath}'`);
             this.setCodebaseSyncStatus(codebasePath, {
                 phase: "Checking for file changes...",
                 current: 0,
@@ -317,14 +397,17 @@ export class SyncManager {
                 codebaseInfo?.requestCustomExtensions || [];
             const requestIgnoreFiles = codebaseInfo?.requestIgnoreFiles || [];
             const requestMaxDepth = codebaseInfo?.requestMaxDepth;
-            const stats = await this.context.reindexByChange(
+            const progressCallback = (progress: { phase: string; current: number; total: number; percentage: number }) =>
+                this.updateCodebaseSyncProgress(
+                    codebasePath,
+                    codebaseStartTime,
+                    progress,
+                );
+            const state = this.getProjectChangeStateForSync(codebasePath, requestIgnoreFiles);
+            const stats = await this.runContextSyncForState(
                 codebasePath,
-                (progress) =>
-                    this.updateCodebaseSyncProgress(
-                        codebasePath,
-                        codebaseStartTime,
-                        progress,
-                    ),
+                state,
+                progressCallback,
                 requestIgnorePatterns,
                 requestCustomExtensions,
                 createRequestSplitter(requestSplitterType),
@@ -376,6 +459,9 @@ export class SyncManager {
         } catch (error: any) {
             const codebaseElapsed = Date.now() - codebaseStartTime;
             if (error instanceof IncrementalIndexTooLargeError) {
+                if (options.throwOnIncrementalTooLarge === true) {
+                    throw error;
+                }
                 const warning = `Automatic incremental indexing paused: detected ${error.effectiveLines} effective lines across ${error.changedFiles} added/modified file(s), exceeding the ${error.threshold} line limit. Check whether this is a large batch of files that should be added to .hceignore. If the files should be indexed, review the change set and run index_codebase with incremental=true from MCP.`;
                 console.warn(`[SYNC] ${warning}`);
                 this.snapshotManager.setCodebaseSyncWarning(codebasePath, warning);
@@ -418,6 +504,9 @@ export class SyncManager {
 
         // Set up the trigger file watcher first, independent of polling.
         this.setupTriggerWatcher();
+        for (const codebasePath of this.snapshotManager.getIndexedCodebases()) {
+            this.ensureProjectWatcher(codebasePath);
+        }
 
         if (!isBackgroundSyncEnabled()) {
             console.log(
@@ -504,6 +593,112 @@ export class SyncManager {
             clearTimeout(this.backgroundSyncTimer);
             this.backgroundSyncTimer = null;
         }
+        this.stopTriggerWatcher();
+        void this.stopProjectWatcher();
+    }
+
+    public async stopProjectWatcher(): Promise<void> {
+        if (this.projectChangeTracker) {
+            await this.projectChangeTracker.close();
+            this.projectChangeTracker = null;
+        }
+    }
+
+    private ensureProjectWatcher(codebasePath: string, requestIgnoreFiles: string[] = []): void {
+        if (!isProjectWatcherEnabled()) {
+            return;
+        }
+
+        if (!this.projectChangeTracker) {
+            this.projectChangeTracker = new ProjectChangeTracker({
+                debounceMs: getProjectWatcherDebounceMs(),
+                usePolling: isProjectWatcherPollingEnabled(),
+            });
+        }
+
+        this.projectChangeTracker.watch(codebasePath, requestIgnoreFiles);
+    }
+
+    private getProjectChangeStateForSync(codebasePath: string, requestIgnoreFiles: string[] = []): ProjectChangeState | null {
+        if (!isProjectWatcherEnabled()) {
+            return null;
+        }
+
+        this.ensureProjectWatcher(codebasePath, requestIgnoreFiles);
+        return this.projectChangeTracker?.getState(codebasePath) ?? null;
+    }
+
+    private async runContextSyncForState(
+        codebasePath: string,
+        state: ProjectChangeState | null,
+        progressCallback: (progress: { phase: string; current: number; total: number; percentage: number }) => void,
+        requestIgnorePatterns: string[],
+        requestCustomExtensions: string[],
+        requestSplitter: ReturnType<typeof createRequestSplitter>,
+        requestIgnoreFiles: string[],
+        requestMaxDepth: number | undefined,
+    ): Promise<{ added: number; removed: number; modified: number }> {
+        const fallbackIntervalMs = getProjectWatcherFallbackScanIntervalMs();
+        const lastFullScanMs = this.lastFullScanMs.get(codebasePath);
+        const fullScanDue =
+            state === null ||
+            lastFullScanMs === undefined ||
+            Date.now() - lastFullScanMs >= fallbackIntervalMs;
+
+        if (state?.kind === "clean" && !fullScanDue) {
+            progressCallback({ phase: "No watcher changes detected", current: 100, total: 100, percentage: 100 });
+            return { added: 0, removed: 0, modified: 0 };
+        }
+
+        if (
+            state?.kind === "dirty" &&
+            state.paths.length > 0 &&
+            !fullScanDue &&
+            typeof this.context.reindexChangedPaths === "function"
+        ) {
+            console.log(
+                `[SYNC-DEBUG] Calling context.reindexChangedPaths() for '${codebasePath}' with ${state.paths.length} dirty path(s)`,
+            );
+            const stats = await this.context.reindexChangedPaths(
+                codebasePath,
+                state.paths,
+                progressCallback,
+                requestIgnorePatterns,
+                requestCustomExtensions,
+                requestSplitter,
+                requestIgnoreFiles,
+                requestMaxDepth,
+            );
+            this.projectChangeTracker?.markPathsClean(codebasePath, state.paths, state.version);
+            return stats;
+        }
+
+        if (state?.kind === "unknown") {
+            console.log(
+                `[SYNC-DEBUG] Project watcher state is unknown for '${codebasePath}' (${state.reason}); falling back to full change scan.`,
+            );
+        } else if (state?.kind === "dirty" && typeof this.context.reindexChangedPaths !== "function") {
+            console.log(
+                `[SYNC-DEBUG] context.reindexChangedPaths() is unavailable for '${codebasePath}'; falling back to full change scan.`,
+            );
+        } else if (fullScanDue) {
+            console.log(
+                `[SYNC-DEBUG] Project watcher fallback scan is due for '${codebasePath}'; running full change scan.`,
+            );
+        }
+
+        const stats = await this.context.reindexByChange(
+            codebasePath,
+            progressCallback,
+            requestIgnorePatterns,
+            requestCustomExtensions,
+            requestSplitter,
+            requestIgnoreFiles,
+            requestMaxDepth,
+        );
+        this.lastFullScanMs.set(codebasePath, Date.now());
+        this.projectChangeTracker?.markClean(codebasePath, state?.version);
+        return stats;
     }
 
     /**

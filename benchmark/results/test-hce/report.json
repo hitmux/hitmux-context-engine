@@ -1,0 +1,1735 @@
+{
+  "generatedAt": "2026-06-17T04:42:07.274Z",
+  "resultsPath": "/opt/hitmux-context-engine/benchmark/results/test-hce/results.jsonl",
+  "scoreVersion": "file-rank-v2",
+  "projects": [
+    {
+      "project": "CLIProxyAPI",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 66,
+      "primaryTop5": 10,
+      "primaryTop8": 10,
+      "primarySymbolTop5": 9,
+      "primarySymbolTop8": 9,
+      "expectedTop10": 14,
+      "expectedTop20": 16,
+      "manualReview": 11,
+      "failureTaxonomy": {
+        "expected_hit": 16,
+        "search_miss": 4,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 1,
+        "stale_result_path": 20,
+        "same_file_saturation": 9,
+        "anchor_not_recalled": 7,
+        "anchor_recalled_but_reranked": 2
+      },
+      "freshness": {
+        "missingExpectedPathCases": 1,
+        "missingExpectedPathCount": 1,
+        "staleResultPathCases": 20,
+        "staleResultPathCount": 28,
+        "missingExpectedPaths": [
+          {
+            "caseId": "CLIProxyAPI-002",
+            "paths": [
+              "config.example.yaml"
+            ]
+          }
+        ],
+        "staleResultPaths": [
+          {
+            "caseId": "CLIProxyAPI-001",
+            "paths": [
+              "internal/pluginhost/test_helpers_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-002",
+            "paths": [
+              "internal/api/handlers/management/plugins_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-003",
+            "paths": [
+              "internal/pluginhost/config_test.go",
+              "internal/api/server_test.go",
+              "internal/runtime/executor/claude_executor_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-004",
+            "paths": [
+              "internal/logging/gin_logger_test.go",
+              "internal/redisqueue/plugin_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-005",
+            "paths": [
+              "internal/api/handlers/management/plugin_store_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-006",
+            "paths": [
+              "internal/config/disable_image_generation_mode_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-007",
+            "paths": [
+              "internal/runtime/executor/helps/antigravity_grounding_urls_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-008",
+            "paths": [
+              "internal/safemode/example_api_keys_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-009",
+            "paths": [
+              "internal/pluginhost/adapters_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-010",
+            "paths": [
+              "internal/api/redis_queue_protocol_integration_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-011",
+            "paths": [
+              "internal/api/redis_queue_protocol_integration_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-012",
+            "paths": [
+              "internal/auth/codex/openai_auth_test.go",
+              "internal/translator/codex/openai/chat-completions/codex_openai_response_test.go",
+              "internal/translator/codex/openai/responses/codex_openai-responses_request_test.go",
+              "internal/translator/gemini/openai/chat-completions/gemini_openai_signature_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-013",
+            "paths": [
+              "internal/runtime/executor/codex_executor_reasoning_replay_cache_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-014",
+            "paths": [
+              "internal/translator/gemini/openai/chat-completions/gemini_openai_signature_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-015",
+            "paths": [
+              "internal/translator/claude/openai/responses/claude_openai-responses_response_test.go",
+              "internal/registry/model_registry_safety_test.go",
+              "internal/registry/model_registry_cache_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-016",
+            "paths": [
+              "internal/translator/openai/openai/responses/openai_openai-responses_response_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-017",
+            "paths": [
+              "internal/registry/model_registry_hook_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-018",
+            "paths": [
+              "internal/translator/gemini/openai/chat-completions/gemini_openai_signature_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-019",
+            "paths": [
+              "internal/pluginhost/management_test.go"
+            ]
+          },
+          {
+            "caseId": "CLIProxyAPI-020",
+            "paths": [
+              "internal/watcher/watcher_test.go"
+            ]
+          }
+        ]
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "ClassNamePicker",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 97,
+      "primaryTop5": 19,
+      "primaryTop8": 19,
+      "primarySymbolTop5": 17,
+      "primarySymbolTop8": 17,
+      "expectedTop10": 20,
+      "expectedTop20": 20,
+      "manualReview": 3,
+      "failureTaxonomy": {
+        "expected_hit": 20,
+        "search_miss": 0,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 13,
+        "anchor_not_recalled": 1,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "missingExpectedPaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "ClaudeCode",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 87,
+      "primaryTop5": 14,
+      "primaryTop8": 15,
+      "primarySymbolTop5": 14,
+      "primarySymbolTop8": 15,
+      "expectedTop10": 19,
+      "expectedTop20": 19,
+      "manualReview": 5,
+      "failureTaxonomy": {
+        "expected_hit": 19,
+        "search_miss": 1,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 5,
+        "same_file_saturation": 10,
+        "anchor_not_recalled": 3,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "staleResultPathCases": 5,
+        "staleResultPathCount": 5,
+        "missingExpectedPaths": [],
+        "staleResultPaths": [
+          {
+            "caseId": "ClaudeCode-001",
+            "paths": [
+              "src/skills/bundled/claude-api/SKILL.md"
+            ]
+          },
+          {
+            "caseId": "ClaudeCode-005",
+            "paths": [
+              "src/skills/bundled/claude-api/csharp/claude-api.md"
+            ]
+          },
+          {
+            "caseId": "ClaudeCode-016",
+            "paths": [
+              "src/skills/bundled/claude-api/SKILL.md"
+            ]
+          },
+          {
+            "caseId": "ClaudeCode-019",
+            "paths": [
+              "README.md"
+            ]
+          },
+          {
+            "caseId": "ClaudeCode-020",
+            "paths": [
+              "README.md"
+            ]
+          }
+        ]
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "HitWar",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 85,
+      "primaryTop5": 15,
+      "primaryTop8": 15,
+      "primarySymbolTop5": 15,
+      "primarySymbolTop8": 15,
+      "expectedTop10": 18,
+      "expectedTop20": 19,
+      "manualReview": 5,
+      "failureTaxonomy": {
+        "expected_hit": 19,
+        "search_miss": 1,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 1,
+        "stale_result_path": 12,
+        "same_file_saturation": 10,
+        "anchor_not_recalled": 4,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 1,
+        "missingExpectedPathCount": 1,
+        "staleResultPathCases": 12,
+        "staleResultPathCount": 12,
+        "missingExpectedPaths": [
+          {
+            "caseId": "HitWar-015",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          }
+        ],
+        "staleResultPaths": [
+          {
+            "caseId": "HitWar-001",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-002",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-006",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-007",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-008",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-010",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-011",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-012",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-013",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-014",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-015",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          },
+          {
+            "caseId": "HitWar-019",
+            "paths": [
+              "src/core/math/circle.test.ts"
+            ]
+          }
+        ]
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "caddy",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 72,
+      "primaryTop5": 12,
+      "primaryTop8": 13,
+      "primarySymbolTop5": 12,
+      "primarySymbolTop8": 13,
+      "expectedTop10": 14,
+      "expectedTop20": 14,
+      "manualReview": 7,
+      "failureTaxonomy": {
+        "expected_hit": 14,
+        "search_miss": 6,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 2,
+        "stale_result_path": 20,
+        "same_file_saturation": 10,
+        "anchor_not_recalled": 7,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 2,
+        "missingExpectedPathCount": 2,
+        "staleResultPathCases": 20,
+        "staleResultPathCount": 34,
+        "missingExpectedPaths": [
+          {
+            "caseId": "caddy-014",
+            "paths": [
+              "modules/caddyhttp/reverseproxy/headers_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-017",
+            "paths": [
+              "modules/caddyhttp/reverseproxy/selectionpolicies_test.go"
+            ]
+          }
+        ],
+        "staleResultPaths": [
+          {
+            "caseId": "caddy-001",
+            "paths": [
+              "modules/caddytls/capools_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-002",
+            "paths": [
+              "modules/caddytls/capools_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-003",
+            "paths": [
+              "caddyconfig/httpcaddyfile/options_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-004",
+            "paths": [
+              "modules/caddyhttp/matchers_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-005",
+            "paths": [
+              "modules/caddytls/capools_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-006",
+            "paths": [
+              "caddyconfig/httpcaddyfile/httptype_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-007",
+            "paths": [
+              "caddyconfig/httpcaddyfile/httptype_test.go",
+              "caddyconfig/httpcaddyfile/options_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-008",
+            "paths": [
+              "caddyconfig/httpcaddyfile/directives_test.go",
+              "caddyconfig/httpcaddyfile/httptype_test.go",
+              "caddyconfig/httpcaddyfile/addresses_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-009",
+            "paths": [
+              "modules/caddyhttp/rewrite/rewrite_test.go",
+              "caddyconfig/httpcaddyfile/httptype_test.go",
+              "caddyconfig/httpcaddyfile/options_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-010",
+            "paths": [
+              "modules/caddyhttp/server_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-011",
+            "paths": [
+              "modules/caddyhttp/tracing/module_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-012",
+            "paths": [
+              "modules/caddyhttp/fileserver/matcher_test.go",
+              "modules/caddyhttp/encode/encode_bench_test.go",
+              "modules/caddyhttp/reverseproxy/fastcgi/client_test.go",
+              "modules/caddyhttp/metrics_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-013",
+            "paths": [
+              "modules/caddyhttp/fileserver/staticfiles_test.go",
+              "modules/caddyhttp/rewrite/rewrite_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-014",
+            "paths": [
+              "modules/caddyhttp/tracing/module_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-015",
+            "paths": [
+              "modules/caddyhttp/reverseproxy/retries_test.go",
+              "modules/caddyhttp/reverseproxy/admin_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-016",
+            "paths": [
+              "modules/caddyhttp/reverseproxy/admin_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-017",
+            "paths": [
+              "modules/caddyhttp/reverseproxy/admin_test.go",
+              "modules/caddyhttp/reverseproxy/headers_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-018",
+            "paths": [
+              "caddyconfig/httpcaddyfile/options_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-019",
+            "paths": [
+              "caddyconfig/httpcaddyfile/pkiapp_test.go"
+            ]
+          },
+          {
+            "caseId": "caddy-020",
+            "paths": [
+              "modules/caddyhttp/metrics_test.go",
+              "modules/metrics/metrics_test.go",
+              "internal/metrics/metrics_test.go",
+              "modules/caddyhttp/tracing/tracer_test.go"
+            ]
+          }
+        ]
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "fastapi",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 86,
+      "primaryTop5": 15,
+      "primaryTop8": 17,
+      "primarySymbolTop5": 12,
+      "primarySymbolTop8": 14,
+      "expectedTop10": 20,
+      "expectedTop20": 20,
+      "manualReview": 6,
+      "failureTaxonomy": {
+        "expected_hit": 20,
+        "search_miss": 0,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 9,
+        "anchor_not_recalled": 5,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "missingExpectedPaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "gemini-cli",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 81,
+      "primaryTop5": 13,
+      "primaryTop8": 16,
+      "primarySymbolTop5": 11,
+      "primarySymbolTop8": 14,
+      "expectedTop10": 18,
+      "expectedTop20": 18,
+      "manualReview": 6,
+      "failureTaxonomy": {
+        "expected_hit": 18,
+        "search_miss": 2,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 20,
+        "stale_result_path": 20,
+        "same_file_saturation": 7,
+        "anchor_not_recalled": 6,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 20,
+        "missingExpectedPathCount": 87,
+        "staleResultPathCases": 20,
+        "staleResultPathCount": 259,
+        "missingExpectedPaths": [
+          {
+            "caseId": "gemini-cli-001",
+            "paths": [
+              "packages/cli/src/gemini.tsx",
+              "packages/cli/index.ts",
+              "packages/cli/src/core/initializer.ts",
+              "packages/cli/src/nonInteractiveCli.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-002",
+            "paths": [
+              "packages/cli/src/config/config.ts",
+              "packages/cli/src/config/settings.ts",
+              "packages/cli/src/config/auth.ts",
+              "packages/cli/src/config/policy.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-003",
+            "paths": [
+              "packages/cli/src/config/settings.ts",
+              "packages/cli/src/config/settingsSchema.ts",
+              "packages/cli/src/config/settings-validation.ts",
+              "schemas/settings.schema.json"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-004",
+            "paths": [
+              "packages/core/src/config/config.ts",
+              "packages/core/src/tools/tool-registry.ts",
+              "packages/core/src/tools/tool-names.ts",
+              "packages/core/src/tools/definitions/coreTools.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-005",
+            "paths": [
+              "packages/core/src/tools/tool-registry.ts",
+              "packages/core/src/tools/tools.ts",
+              "packages/core/src/tools/tool-names.ts",
+              "packages/core/src/tools/mcp-tool.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-006",
+            "paths": [
+              "packages/core/src/core/client.ts",
+              "packages/core/src/core/geminiChat.ts",
+              "packages/core/src/core/turn.ts",
+              "packages/core/src/context/chatCompressionService.ts",
+              "packages/core/src/fallback/handler.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-007",
+            "paths": [
+              "packages/core/src/core/contentGenerator.ts",
+              "packages/core/src/code_assist/codeAssist.ts",
+              "packages/cli/src/config/auth.ts",
+              "packages/core/src/config/config.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-008",
+            "paths": [
+              "packages/core/src/core/prompts.ts",
+              "packages/core/src/utils/environmentContext.ts",
+              "packages/core/src/prompts/prompt-registry.ts",
+              "packages/core/src/prompts/mcp-prompts.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-009",
+            "paths": [
+              "packages/core/src/scheduler/scheduler.ts",
+              "packages/core/src/scheduler/tool-executor.ts",
+              "packages/core/src/scheduler/state-manager.ts",
+              "packages/core/src/scheduler/policy.ts",
+              "packages/core/src/scheduler/confirmation.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-010",
+            "paths": [
+              "packages/core/src/tools/shell.ts",
+              "packages/core/src/services/shellExecutionService.ts",
+              "packages/core/src/utils/shell-utils.ts",
+              "packages/core/src/tools/shellBackgroundTools.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-011",
+            "paths": [
+              "packages/core/src/tools/read-many-files.ts",
+              "packages/core/src/utils/fileUtils.ts",
+              "packages/core/src/utils/ignorePatterns.ts",
+              "packages/core/src/tools/jit-context.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-012",
+            "paths": [
+              "packages/core/src/tools/edit.ts",
+              "packages/core/src/tools/diff-utils.ts",
+              "packages/core/src/tools/write-file.ts",
+              "packages/core/src/ide/ide-client.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-013",
+            "paths": [
+              "packages/core/src/tools/mcp-client.ts",
+              "packages/core/src/tools/mcp-client-manager.ts",
+              "packages/core/src/tools/mcp-tool.ts",
+              "packages/core/src/mcp/oauth-provider.ts",
+              "packages/core/src/mcp/oauth-token-storage.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-014",
+            "paths": [
+              "packages/core/src/tools/mcp-client-manager.ts",
+              "packages/core/src/tools/mcp-client.ts",
+              "packages/cli/src/commands/mcp.ts",
+              "packages/cli/src/config/mcp/mcpServerEnablement.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-015",
+            "paths": [
+              "packages/core/src/policy/policy-engine.ts",
+              "packages/core/src/policy/types.ts",
+              "packages/core/src/policy/toml-loader.ts",
+              "packages/core/src/scheduler/policy.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-016",
+            "paths": [
+              "packages/core/src/safety/checker-runner.ts",
+              "packages/core/src/safety/registry.ts",
+              "packages/core/src/safety/context-builder.ts",
+              "packages/core/src/safety/protocol.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-017",
+            "paths": [
+              "packages/core/src/context/contextManager.ts",
+              "packages/core/src/context/initializer.ts",
+              "packages/core/src/context/pipeline/orchestrator.ts",
+              "packages/core/src/context/graph/render.ts",
+              "packages/core/src/context/graph/mapper.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-018",
+            "paths": [
+              "packages/cli/src/config/extension-manager.ts",
+              "packages/cli/src/config/extension.ts",
+              "packages/cli/src/config/extensions/extensionEnablement.ts",
+              "packages/cli/src/config/extensions/github.ts",
+              "packages/core/src/skills/skillManager.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-019",
+            "paths": [
+              "packages/core/src/ide/ide-client.ts",
+              "packages/core/src/ide/ide-connection-utils.ts",
+              "packages/core/src/ide/detect-ide.ts",
+              "packages/core/src/ide/types.ts",
+              "packages/vscode-ide-companion/src/ide-server.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-020",
+            "paths": [
+              "packages/core/src/telemetry/sdk.ts",
+              "packages/core/src/telemetry/index.ts",
+              "packages/core/src/telemetry/loggers.ts",
+              "packages/core/src/telemetry/file-exporters.ts",
+              "packages/core/src/telemetry/gcp-exporters.ts"
+            ]
+          }
+        ],
+        "staleResultPaths": [
+          {
+            "caseId": "gemini-cli-001",
+            "paths": [
+              "packages/core/src/utils/authConsent.ts",
+              "packages/cli/src/gemini.tsx",
+              "packages/cli/src/ui/hooks/useGeminiStream.ts",
+              "packages/cli/src/ui/components/GeminiSpinner.tsx",
+              "packages/cli/src/ui/components/messages/GeminiMessage.tsx",
+              "packages/cli/src/ui/hooks/useGeminiStream.test.tsx",
+              "packages/cli/src/config/config.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-002",
+            "paths": [
+              "packages/cli/src/config/config.ts",
+              "packages/core/src/config/config.ts",
+              "packages/core/src/prompts/snippets.ts",
+              "packages/core/src/prompts/snippets.legacy.ts",
+              "packages/core/src/sandbox/utils/commandSafety.ts",
+              "packages/cli/src/services/McpPromptLoader.ts",
+              "packages/cli/src/utils/processUtils.ts",
+              "packages/core/src/core/baseLlmClient.ts",
+              "scripts/releasing/patch-comment.js",
+              "packages/core/src/tools/shell.ts",
+              "scripts/releasing/patch-create-comment.js",
+              "scripts/releasing/patch-trigger.js",
+              "packages/core/src/policy/shell-safety.test.ts",
+              "packages/core/src/config/defaultModelConfigs.ts",
+              "packages/cli/src/config/skipExtensions.test.ts",
+              "packages/core/src/policy/policy-engine.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-003",
+            "paths": [
+              "packages/cli/src/config/settings.ts",
+              "packages/a2a-server/src/config/settings.ts",
+              "packages/core/src/config/config.ts",
+              "packages/cli/src/config/config.ts",
+              "packages/cli/src/ui/components/SettingsDialog.tsx",
+              "packages/cli/src/commands/extensions/configure.ts",
+              "packages/cli/src/ui/components/SettingsDialog.test.tsx",
+              "packages/cli/src/config/sandboxConfig.ts",
+              "packages/cli/src/ui/contexts/SettingsContext.test.tsx"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-004",
+            "paths": [
+              "packages/core/src/config/config.ts",
+              "packages/a2a-server/src/config/config.ts",
+              "packages/core/src/safety/built-in.ts",
+              "packages/core/src/tools/mcp-client.ts",
+              "scripts/lint.js",
+              "packages/core/src/policy/config.ts",
+              "packages/cli/src/ui/components/AgentConfigDialog.tsx",
+              "packages/core/src/index.ts",
+              "packages/core/src/policy/core-tools-mapping.test.ts",
+              "packages/cli/src/config/sandboxConfig.ts",
+              "packages/cli/src/config/sandboxConfig.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-005",
+            "paths": [
+              "packages/core/src/tools/tool-names.ts",
+              "packages/core/src/tools/tool-registry.ts",
+              "packages/cli/src/ui/commands/toolsCommand.ts",
+              "packages/core/src/agents/local-executor.ts",
+              "packages/core/src/tools/mcp-client.ts",
+              "packages/core/src/context/toolOutputMaskingService.ts",
+              "packages/core/src/scheduler/scheduler.ts",
+              "packages/core/src/policy/policy-engine.ts",
+              "packages/core/src/core/client.ts",
+              "packages/core/src/tools/tool-names.test.ts",
+              "packages/core/src/config/config.ts",
+              "packages/core/src/index.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-006",
+            "paths": [
+              "packages/core/src/core/client.ts",
+              "packages/core/src/safety/context-builder.ts",
+              "packages/core/src/ide/ideContext.ts",
+              "packages/core/src/services/loopDetectionService.ts",
+              "packages/core/src/safety/protocol.ts",
+              "packages/core/src/routing/routingStrategy.ts",
+              "packages/cli/src/ui/commands/rewindCommand.tsx",
+              "packages/core/src/context/agentHistoryProvider.ts",
+              "packages/core/src/services/sessionSummaryUtils.ts",
+              "packages/core/src/hooks/hookTranslator.ts",
+              "packages/core/src/hooks/types.ts",
+              "packages/cli/src/ui/commands/chatCommand.ts",
+              "packages/core/src/core/baseLlmClient.test.ts",
+              "packages/cli/src/config/config.ts",
+              "packages/core/src/hooks/hookTranslator.test.ts",
+              "packages/core/src/hooks/hookEventHandler.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-007",
+            "paths": [
+              "packages/cli/src/ui/components/VoiceModelDialog.tsx",
+              "packages/cli/src/ui/components/messages/GeminiMessageContent.tsx",
+              "packages/cli/src/ui/hooks/useGeminiStream.ts",
+              "packages/core/src/sandbox/windows/GeminiSandbox.cs",
+              "packages/cli/src/ui/components/GeminiSpinner.tsx",
+              "packages/core/src/code_assist/server.ts",
+              "packages/cli/src/ui/hooks/useGeminiStream.test.tsx",
+              "packages/core/src/config/config.ts",
+              "packages/devtools/src/index.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-008",
+            "paths": [
+              "packages/core/src/utils/environmentContext.ts",
+              "packages/core/src/prompts/promptProvider.ts",
+              "packages/core/src/agents/types.ts",
+              "packages/core/src/utils/summarizer.ts",
+              "packages/core/src/agents/skill-extraction-agent.ts",
+              "packages/cli/src/services/prompt-processors/types.ts",
+              "packages/cli/src/services/prompt-processors/argumentProcessor.ts",
+              "packages/core/src/prompts/snippets.ts",
+              "packages/core/src/prompts/snippets.legacy.ts",
+              "packages/core/src/context/graph/types.ts",
+              "packages/core/src/routing/strategies/classifierStrategy.ts",
+              "packages/core/src/agents/browser/analyzeScreenshot.ts",
+              "packages/core/src/routing/strategies/numericalClassifierStrategy.ts",
+              "packages/core/src/context/contextManager.barrier.test.ts",
+              "packages/cli/src/config/extensions/consent.ts",
+              "packages/core/src/core/baseLlmClient.test.ts",
+              "packages/core/src/agents/agentLoader.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-009",
+            "paths": [
+              "packages/core/src/telemetry/tool-call-decision.ts",
+              "packages/core/src/tools/tools.ts",
+              "packages/core/src/tools/mcp-tool.ts",
+              "packages/cli/src/ui/hooks/useToolScheduler.ts",
+              "packages/core/src/agents/browser/mcpToolWrapper.ts",
+              "packages/cli/src/ui/components/messages/ToolConfirmationMessage.tsx",
+              "packages/core/src/agents/agent-scheduler.ts",
+              "packages/core/src/scheduler/scheduler.ts",
+              "packages/core/src/scheduler/state-manager.ts",
+              "packages/cli/src/ui/hooks/useConfirmingTool.ts",
+              "packages/core/src/utils/tool-visibility.ts",
+              "packages/cli/src/ui/hooks/useToolScheduler.test.ts",
+              "packages/cli/src/config/settings.ts",
+              "packages/cli/src/ui/hooks/useGeminiStream.test.tsx",
+              "packages/core/src/core/prompts.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-010",
+            "paths": [
+              "packages/cli/src/nonInteractiveCliCommands.ts",
+              "packages/core/src/context/toolOutputMaskingService.ts",
+              "packages/core/src/services/shellExecutionService.ts",
+              "packages/core/src/tools/definitions/dynamic-declaration-helpers.ts",
+              "packages/core/src/utils/fastAckHelper.ts",
+              "packages/core/src/tools/shell.ts",
+              "packages/core/src/services/sandboxManager.ts",
+              "packages/cli/src/ui/commands/types.ts",
+              "packages/core/src/prompts/snippets.legacy.ts",
+              "packages/cli/src/ui/hooks/useExecutionLifecycle.ts",
+              "packages/core/src/sandbox/utils/commandSafety.ts",
+              "packages/core/src/policy/policy-engine.ts",
+              "packages/core/src/utils/shell-utils.ts",
+              "packages/core/src/tools/shell.test.ts",
+              "packages/cli/src/config/config.ts",
+              "packages/cli/src/nonInteractiveCliAgentSession.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-011",
+            "paths": [
+              "packages/core/src/tools/read-many-files.ts",
+              "packages/core/src/utils/ignorePatterns.ts",
+              "packages/core/src/index.ts",
+              "packages/core/src/tools/read-many-files.test.ts",
+              "packages/cli/src/config/config.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-012",
+            "paths": [
+              "packages/core/src/tools/write-file.ts",
+              "packages/cli/src/ui/components/InboxDialog.tsx",
+              "packages/core/src/commands/memory.ts",
+              "packages/core/src/tools/tools.ts",
+              "packages/core/src/tools/edit.ts",
+              "packages/core/src/tools/tool-names.ts",
+              "packages/core/src/services/memoryService.ts",
+              "packages/cli/src/ui/IdeIntegrationNudge.tsx",
+              "packages/cli/src/commands/hooks/migrate.ts",
+              "packages/core/src/agents/skill-extraction-agent.ts",
+              "packages/core/src/policy/utils.ts",
+              "packages/core/src/tools/tool-registry.ts",
+              "packages/core/src/core/client.ts",
+              "packages/cli/src/ui/components/messages/ToolConfirmationMessage.test.tsx",
+              "packages/core/src/config/scoped-config.ts",
+              "packages/cli/src/ui/components/ToolConfirmationQueue.test.tsx"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-013",
+            "paths": [
+              "packages/core/src/prompts/prompt-registry.ts",
+              "packages/core/src/utils/browserConsent.ts",
+              "packages/cli/src/ui/components/triage/TriageIssues.tsx",
+              "packages/cli/src/ui/components/triage/TriageDuplicates.tsx",
+              "packages/core/src/safety/conseca/conseca.ts",
+              "packages/core/src/utils/fastAckHelper.ts",
+              "packages/core/src/tools/mcp-client.ts",
+              "packages/core/src/mcp/oauth-token-storage.ts",
+              "packages/cli/src/services/McpPromptLoader.ts",
+              "packages/cli/src/services/prompt-processors/types.ts",
+              "packages/cli/src/services/prompt-processors/injectionParser.ts",
+              "packages/cli/src/services/prompt-processors/shellProcessor.ts",
+              "scripts/changed_prompt.js",
+              "packages/core/src/index.ts",
+              "packages/cli/src/services/prompt-processors/shellProcessor.test.ts",
+              "packages/core/src/config/storage.ts",
+              "packages/cli/src/services/prompt-processors/atFileProcessor.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-014",
+            "paths": [
+              "packages/core/src/tools/mcp-client.ts",
+              "packages/core/src/core/loggingContentGenerator.ts",
+              "packages/cli/src/ui/components/ContextSummaryDisplay.tsx",
+              "packages/core/src/tools/mcp-client-manager.ts",
+              "packages/cli/src/commands/mcp/list.ts",
+              "packages/cli/src/ui/components/NewAgentsNotification.tsx",
+              "packages/cli/src/ui/commands/extensionsCommand.ts",
+              "packages/cli/src/commands/extensions/enable.ts",
+              "packages/cli/src/acp/commands/extensions.ts",
+              "packages/core/src/telemetry/types.ts",
+              "packages/core/src/tools/mcp-tool.ts",
+              "packages/cli/src/ui/commands/mcpCommand.ts",
+              "packages/core/src/tools/tool-registry.test.ts",
+              "packages/cli/src/config/mcp/mcpServerEnablement.ts",
+              "packages/cli/src/acp/acpSession.test.ts",
+              "packages/cli/src/config/extension.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-015",
+            "paths": [
+              "packages/core/src/policy/config.ts",
+              "packages/core/src/tools/tool-names.ts",
+              "packages/core/src/tools/ask-user.ts",
+              "packages/cli/src/ui/contexts/AskUserActionsContext.tsx",
+              "packages/core/src/index.ts",
+              "packages/core/src/policy/shell-safety.test.ts",
+              "packages/cli/src/config/config.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-016",
+            "paths": [
+              "packages/core/src/safety/context-builder.ts",
+              "packages/core/src/safety/checker-runner.ts",
+              "packages/core/src/policy/config.ts",
+              "packages/core/src/safety/registry.ts",
+              "packages/core/src/policy/types.ts",
+              "packages/core/src/policy/toml-loader.ts",
+              "packages/core/src/safety/protocol.ts",
+              "packages/core/src/policy/policy-engine.ts",
+              "packages/core/src/safety/conseca/conseca.ts",
+              "packages/core/src/safety/built-in.ts",
+              "packages/core/src/policy/policy-engine.test.ts",
+              "packages/cli/src/config/extension-manager.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-017",
+            "paths": [
+              "packages/core/src/context/contextManager.ts",
+              "packages/core/src/core/agentChatHistory.ts",
+              "packages/core/src/core/geminiChat.ts",
+              "packages/core/src/services/loopDetectionService.ts",
+              "packages/core/src/context/agentHistoryProvider.ts",
+              "packages/core/src/context/graph/render.ts",
+              "packages/core/src/context/graph/toGraph.ts",
+              "packages/cli/src/services/prompt-processors/types.ts",
+              "packages/core/src/utils/nextSpeakerChecker.ts",
+              "packages/core/src/prompts/snippets.legacy.ts",
+              "packages/core/src/context/chatCompressionService.ts",
+              "packages/core/src/routing/routingStrategy.ts",
+              "packages/core/src/prompts/snippets.ts",
+              "packages/core/src/core/client.ts",
+              "packages/core/src/core/geminiChat.test.ts",
+              "packages/a2a-server/src/config/settings.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-018",
+            "paths": [
+              "packages/cli/src/config/extensions/consent.ts",
+              "packages/a2a-server/src/config/extension.ts",
+              "packages/cli/src/utils/agentSettings.ts",
+              "packages/cli/src/ui/commands/agentsCommand.ts",
+              "packages/core/src/agents/skill-extraction-agent.ts",
+              "packages/core/src/agents/agent-scheduler.ts",
+              "packages/core/src/agents/browser/browserManager.ts",
+              "packages/core/src/agents/browser/mcpToolWrapper.ts",
+              "packages/core/src/agents/registry.ts",
+              "packages/core/src/agents/remote-invocation.ts",
+              "packages/core/src/agents/a2a-errors.ts",
+              "packages/core/src/agents/auth-provider/factory.ts",
+              "packages/core/src/agents/auth-provider/http-provider.ts",
+              "packages/core/src/config/config-agents-reload.test.ts",
+              "packages/cli/src/config/settingsSchema.ts",
+              "packages/cli/src/config/extension-manager-agents.test.ts",
+              "packages/cli/src/utils/agentSettings.test.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-019",
+            "paths": [
+              "packages/core/src/ide/ide-client.ts",
+              "packages/cli/src/ui/commands/ideCommand.ts",
+              "packages/core/src/ide/ide-installer.ts",
+              "packages/core/src/ide/ide-connection-utils.ts",
+              "packages/cli/src/ui/IdeIntegrationNudge.tsx",
+              "packages/core/src/hooks/types.ts",
+              "packages/core/src/ide/ideContext.ts",
+              "packages/core/src/ide/process-utils.ts",
+              "packages/cli/src/acp/commands/about.ts",
+              "packages/core/src/index.ts",
+              "packages/cli/src/ui/hooks/useIdeTrustListener.test.tsx",
+              "packages/a2a-server/src/config/settings.ts"
+            ]
+          },
+          {
+            "caseId": "gemini-cli-020",
+            "paths": [
+              "packages/cli/src/utils/activityLogger.ts",
+              "packages/cli/src/ui/constants/tips.ts",
+              "scripts/telemetry_gcp.js",
+              "packages/core/src/telemetry/sdk.ts",
+              "packages/core/src/telemetry/config.ts",
+              "scripts/telemetry.js",
+              "scripts/telemetry_genkit.js",
+              "packages/core/src/telemetry/types.ts",
+              "scripts/local_telemetry.js",
+              "packages/core/src/telemetry/index.ts",
+              "packages/cli/src/ui/hooks/useConsoleMessages.test.tsx",
+              "packages/devtools/client/src/App.tsx",
+              "packages/devtools/src/index.ts"
+            ]
+          }
+        ]
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "new-api",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 46,
+      "primaryTop5": 4,
+      "primaryTop8": 5,
+      "primarySymbolTop5": 4,
+      "primarySymbolTop8": 5,
+      "expectedTop10": 9,
+      "expectedTop20": 10,
+      "manualReview": 15,
+      "failureTaxonomy": {
+        "expected_hit": 10,
+        "search_miss": 10,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 20,
+        "same_file_saturation": 6,
+        "anchor_not_recalled": 14,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "staleResultPathCases": 20,
+        "staleResultPathCount": 25,
+        "missingExpectedPaths": [],
+        "staleResultPaths": [
+          {
+            "caseId": "new-api-001",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-002",
+            "paths": [
+              "relay/helper/stream_scanner_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-003",
+            "paths": [
+              "relay/channel/api_request_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-004",
+            "paths": [
+              "service/task_billing_test.go",
+              "relay/channel/openai/image_stream_test.go",
+              "relay/channel/openai/image_edit_test.go",
+              "relay/channel/gemini/relay_gemini_usage_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-005",
+            "paths": [
+              "service/tiered_settle_test.go",
+              "service/task_billing_test.go",
+              "relay/common/relay_info_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-006",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-007",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-008",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-009",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-010",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-011",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-012",
+            "paths": [
+              "relay/channel/openai/image_stream_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-013",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-014",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-015",
+            "paths": [
+              "relay/common/override_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-016",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-017",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-018",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-019",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          },
+          {
+            "caseId": "new-api-020",
+            "paths": [
+              "service/task_billing_test.go"
+            ]
+          }
+        ]
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "notepad-plus-plus",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 70,
+      "primaryTop5": 9,
+      "primaryTop8": 10,
+      "primarySymbolTop5": 3,
+      "primarySymbolTop8": 3,
+      "expectedTop10": 18,
+      "expectedTop20": 18,
+      "manualReview": 17,
+      "failureTaxonomy": {
+        "expected_hit": 18,
+        "search_miss": 2,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 3,
+        "stale_result_path": 16,
+        "same_file_saturation": 11,
+        "anchor_not_recalled": 7,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 3,
+        "missingExpectedPathCount": 12,
+        "staleResultPathCases": 16,
+        "staleResultPathCount": 74,
+        "missingExpectedPaths": [
+          {
+            "caseId": "notepad-plus-plus-018",
+            "paths": [
+              "scintilla/src/CellBuffer.cxx",
+              "scintilla/src/CellBuffer.h",
+              "scintilla/src/UndoHistory.cxx",
+              "scintilla/src/Document.cxx"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-019",
+            "paths": [
+              "lexilla/lexlib/LexerModule.cxx",
+              "lexilla/lexlib/LexerModule.h",
+              "lexilla/lexlib/WordList.cxx",
+              "lexilla/lexers/LexJSON.cxx"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-020",
+            "paths": [
+              "boostregex/BoostRegExSearch.cxx",
+              "boostregex/UTF8DocumentIterator.cxx",
+              "boostregex/UTF8DocumentIterator.h",
+              "boostregex/AnsiDocumentIterator.h"
+            ]
+          }
+        ],
+        "staleResultPaths": [
+          {
+            "caseId": "notepad-plus-plus-001",
+            "paths": [
+              "boostregex/boost/config/requires_threads.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-002",
+            "paths": [
+              "scintilla/src/Platform.h",
+              "boostregex/boost/config/compiler/borland.hpp",
+              "boostregex/boost/config/compiler/visualc.hpp",
+              "boostregex/boost/config/compiler/codegear.hpp",
+              "boostregex/boost/config/detail/suffix.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-003",
+            "paths": [
+              "scintilla/scripts/Dependencies.py",
+              "lexilla/scripts/LexillaData.py",
+              "scintilla/win32/DepGen.py",
+              "scintilla/include/ILoader.h",
+              "boostregex/boost/config/compiler/cray.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-004",
+            "paths": [
+              "scintilla/src/Platform.h",
+              "boostregex/boost/config/user.hpp",
+              "boostregex/boost/config/compiler/gcc.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-005",
+            "paths": [
+              "boostregex/boost/exception/errinfo_api_function.hpp",
+              "scintilla/src/AutoComplete.h",
+              "scintilla/qt/ScintillaEditBase/ScintillaEditBase.h",
+              "scintilla/include/ScintillaCall.h",
+              "scintilla/src/ScintillaBase.h",
+              "scintilla/win32/WinTypes.h",
+              "scintilla/src/CallTip.h",
+              "scintilla/scripts/ScintillaAPIFacer.py"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-006",
+            "paths": [
+              "boostregex/boost/exception/errinfo_file_name.hpp",
+              "scintilla/src/Document.h",
+              "scintilla/include/ILexer.h",
+              "boostregex/UTF8DocumentIterator.h",
+              "scintilla/src/PerLine.h",
+              "boostregex/boost/exception/errinfo_file_open_mode.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-008",
+            "paths": [
+              "boostregex/boost/config/user.hpp",
+              "boostregex/boost/config/detail/select_compiler_config.hpp",
+              "boostregex/boost/config/detail/select_platform_config.hpp",
+              "boostregex/boost/config/detail/select_stdlib_config.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-009",
+            "paths": [
+              "scintilla/scripts/ScintillaData.py",
+              "lexilla/scripts/LexillaData.py",
+              "scintilla/scripts/FileGenerator.py",
+              "boostregex/boost/config/compiler/visualc.hpp",
+              "boostregex/boost/config/compiler/cray.hpp",
+              "boostregex/boost/config/user.hpp",
+              "boostregex/boost/config/no_tr1/memory.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-010",
+            "paths": [
+              "scintilla/scripts/ScintillaAPIFacer.py",
+              "scintilla/scripts/GenerateCharacterCategory.py",
+              "scintilla/scripts/HFacer.py",
+              "scintilla/qt/ScintillaEditBase/ScintillaEditBase.cpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-011",
+            "paths": [
+              "boostregex/boost/exception/info.hpp",
+              "scintilla/src/Platform.h"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-014",
+            "paths": [
+              "lexilla/scripts/LexillaData.py",
+              "boostregex/boost/config/auto_link.hpp",
+              "boostregex/boost/config/compiler/cray.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-016",
+            "paths": [
+              "boostregex/boost/config/platform/vxworks.hpp",
+              "boostregex/boost/config/detail/suffix.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-017",
+            "paths": [
+              "scintilla/src/Document.h"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-018",
+            "paths": [
+              "scintilla/qt/ScintillaEditBase/ScintillaEditBase.cpp",
+              "scintilla/include/ScintillaCall.h",
+              "scintilla/qt/ScintillaEditBase/PlatQt.cpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-019",
+            "paths": [
+              "lexilla/lexlib/LexerModule.h",
+              "lexilla/lexlib/WordList.h",
+              "lexilla/include/Lexilla.h",
+              "lexilla/lexlib/Accessor.h",
+              "boostregex/boost/config/platform/vxworks.hpp",
+              "boostregex/boost/config/detail/suffix.hpp",
+              "boostregex/boost/config/compiler/kai.hpp"
+            ]
+          },
+          {
+            "caseId": "notepad-plus-plus-020",
+            "paths": [
+              "boostregex/boost/regex/v5/regex_search.hpp",
+              "scintilla/include/BoostRegexSearch.h",
+              "boostregex/boost/regex/mfc.hpp",
+              "scintilla/src/Document.h",
+              "boostregex/boost/regex/v5/cregex.hpp",
+              "scintilla/scripts/FileGenerator.py",
+              "boostregex/boost/regex/v5/c_regex_traits.hpp",
+              "boostregex/boost/regex/v5/u32regex_iterator.hpp",
+              "boostregex/boost/regex/v5/regex.hpp",
+              "boostregex/boost/config/stdlib/libstdcpp3.hpp",
+              "boostregex/boost/config/stdlib/dinkumware.hpp",
+              "boostregex/boost/config/compiler/gcc.hpp",
+              "boostregex/boost/config/user.hpp"
+            ]
+          }
+        ]
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "ripgrep",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 97,
+      "primaryTop5": 18,
+      "primaryTop8": 18,
+      "primarySymbolTop5": 18,
+      "primarySymbolTop8": 18,
+      "expectedTop10": 20,
+      "expectedTop20": 20,
+      "manualReview": 0,
+      "failureTaxonomy": {
+        "expected_hit": 20,
+        "search_miss": 0,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 9,
+        "anchor_not_recalled": 0,
+        "anchor_recalled_but_reranked": 1
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "missingExpectedPaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "uv",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 81,
+      "primaryTop5": 14,
+      "primaryTop8": 15,
+      "primarySymbolTop5": 13,
+      "primarySymbolTop8": 14,
+      "expectedTop10": 17,
+      "expectedTop20": 17,
+      "manualReview": 6,
+      "failureTaxonomy": {
+        "expected_hit": 17,
+        "search_miss": 3,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 1,
+        "stale_result_path": 6,
+        "same_file_saturation": 9,
+        "anchor_not_recalled": 5,
+        "anchor_recalled_but_reranked": 1
+      },
+      "freshness": {
+        "missingExpectedPathCases": 1,
+        "missingExpectedPathCount": 1,
+        "staleResultPathCases": 6,
+        "staleResultPathCount": 6,
+        "missingExpectedPaths": [
+          {
+            "caseId": "uv-014",
+            "paths": [
+              "crates/uv-python/download-metadata.json"
+            ]
+          }
+        ],
+        "staleResultPaths": [
+          {
+            "caseId": "uv-003",
+            "paths": [
+              "scripts/publish/test_publish.py"
+            ]
+          },
+          {
+            "caseId": "uv-004",
+            "paths": [
+              "scripts/publish/test_publish.py"
+            ]
+          },
+          {
+            "caseId": "uv-005",
+            "paths": [
+              "scripts/publish/test_publish.py"
+            ]
+          },
+          {
+            "caseId": "uv-007",
+            "paths": [
+              "scripts/publish/test_publish.py"
+            ]
+          },
+          {
+            "caseId": "uv-014",
+            "paths": [
+              "scripts/publish/test_publish.py"
+            ]
+          },
+          {
+            "caseId": "uv-020",
+            "paths": [
+              "scripts/publish/test_publish.py"
+            ]
+          }
+        ]
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "valkey",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 74,
+      "primaryTop5": 14,
+      "primaryTop8": 14,
+      "primarySymbolTop5": 12,
+      "primarySymbolTop8": 12,
+      "expectedTop10": 14,
+      "expectedTop20": 14,
+      "manualReview": 8,
+      "failureTaxonomy": {
+        "expected_hit": 14,
+        "search_miss": 6,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 8,
+        "anchor_not_recalled": 8,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "missingExpectedPaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100
+    }
+  ]
+}

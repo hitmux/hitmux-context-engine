@@ -5,6 +5,7 @@ export interface OpenAIEmbeddingConfig {
     model: string;
     apiKey: string;
     baseURL?: string; // OpenAI supports custom baseURL
+    retryMaxElapsedMs?: number;
 }
 
 export class OpenAIEmbedding extends Embedding {
@@ -13,6 +14,8 @@ export class OpenAIEmbedding extends Embedding {
     private dimension: number = 1536; // Default dimension for text-embedding-3-small
     protected maxTokens: number = 8192; // Maximum tokens for OpenAI embedding models
     private static readonly detectedDimensions = new Map<string, number>();
+    private static readonly retryDelayMs = 3000;
+    private static readonly defaultRetryMaxElapsedMs = 60000;
 
     constructor(config: OpenAIEmbeddingConfig) {
         super();
@@ -42,12 +45,15 @@ export class OpenAIEmbedding extends Embedding {
         // For custom models, make API call to detect dimension
         try {
             const processedText = this.preprocessText(testText);
-            const response = await this.client.embeddings.create({
-                model: model,
-                input: processedText,
-                encoding_format: 'float',
+            const embeddings = await this.withRetry('detect embedding dimension', async () => {
+                const response = await this.client.embeddings.create({
+                    model: model,
+                    input: processedText,
+                    encoding_format: 'float',
+                });
+                return this.getEmbeddingResponseVectors(response, 1);
             });
-            const dimension = response.data[0].embedding.length;
+            const dimension = embeddings[0].length;
             this.cacheDimension(model, dimension);
             return dimension;
         } catch (error) {
@@ -67,20 +73,21 @@ export class OpenAIEmbedding extends Embedding {
         const processedText = this.preprocessText(text);
         const model = this.config.model || 'text-embedding-3-small';
 
-        await this.ensureDimension(model);
-
         try {
-            const response = await this.client.embeddings.create({
-                model: model,
-                input: processedText,
-                encoding_format: 'float',
+            const embeddings = await this.withRetry('generate OpenAI embedding', async () => {
+                const response = await this.client.embeddings.create({
+                    model: model,
+                    input: processedText,
+                    encoding_format: 'float',
+                });
+                return this.getEmbeddingResponseVectors(response, 1);
             });
 
             // Update dimension from actual response
-            this.cacheDimension(model, response.data[0].embedding.length);
+            this.cacheDimension(model, embeddings[0].length);
 
             return {
-                vector: response.data[0].embedding,
+                vector: embeddings[0],
                 dimension: this.dimension
             };
         } catch (error) {
@@ -93,19 +100,20 @@ export class OpenAIEmbedding extends Embedding {
         const processedTexts = this.preprocessTexts(texts);
         const model = this.config.model || 'text-embedding-3-small';
 
-        await this.ensureDimension(model);
-
         try {
-            const response = await this.client.embeddings.create({
-                model: model,
-                input: processedTexts,
-                encoding_format: 'float',
+            const embeddings = await this.withRetry('generate OpenAI batch embeddings', async () => {
+                const response = await this.client.embeddings.create({
+                    model: model,
+                    input: processedTexts,
+                    encoding_format: 'float',
+                });
+                return this.getEmbeddingResponseVectors(response, processedTexts.length);
             });
 
-            this.cacheDimension(model, response.data[0].embedding.length);
+            this.cacheDimension(model, embeddings[0].length);
 
-            return response.data.map((item) => ({
-                vector: item.embedding,
+            return embeddings.map((embedding) => ({
+                vector: embedding,
                 dimension: this.dimension
             }));
         } catch (error) {
@@ -176,6 +184,116 @@ export class OpenAIEmbedding extends Embedding {
         if (!OpenAIEmbedding.getSupportedModels()[model]) {
             OpenAIEmbedding.detectedDimensions.set(this.getDimensionCacheKey(model), dimension);
         }
+    }
+
+    private async withRetry<T>(operationName: string, operation: () => Promise<T>): Promise<T> {
+        let lastError: unknown;
+        const startedAtMs = Date.now();
+        const retryMaxElapsedMs = this.getRetryMaxElapsedMs();
+        for (let attempt = 1; ; attempt += 1) {
+            try {
+                return await operation();
+            } catch (error) {
+                lastError = error;
+                const elapsedMs = Date.now() - startedAtMs;
+                const nextElapsedMs = elapsedMs + OpenAIEmbedding.retryDelayMs;
+                if (!this.isRetryableEmbeddingError(error) || nextElapsedMs > retryMaxElapsedMs) {
+                    throw error;
+                }
+
+                console.warn(
+                    `[OpenAIEmbedding] ${operationName} failed with retryable provider error. ` +
+                    `Retrying in ${OpenAIEmbedding.retryDelayMs}ms ` +
+                    `(attempt ${attempt + 1}, elapsed ${elapsedMs}ms, budget ${retryMaxElapsedMs}ms). ` +
+                    this.getErrorMessage(error)
+                );
+                await this.sleep(OpenAIEmbedding.retryDelayMs);
+            }
+        }
+
+        throw lastError;
+    }
+
+    private getRetryMaxElapsedMs(): number {
+        const configured = this.config.retryMaxElapsedMs;
+        if (configured === undefined) {
+            return OpenAIEmbedding.defaultRetryMaxElapsedMs;
+        }
+
+        if (!Number.isFinite(configured) || configured < 0) {
+            return OpenAIEmbedding.defaultRetryMaxElapsedMs;
+        }
+
+        return Math.floor(configured);
+    }
+
+    private isRetryableEmbeddingError(error: unknown): boolean {
+        const errorRecord = error as { status?: unknown; code?: unknown };
+        if (errorRecord.status === 429 || errorRecord.code === 429 || errorRecord.code === '429') {
+            return true;
+        }
+
+        const message = this.getErrorMessage(error).toLowerCase();
+        return message.includes('http 429') ||
+            message.includes('rate limit') ||
+            message.includes('engine_overloaded') ||
+            message.includes('model busy');
+    }
+
+    private getErrorMessage(error: unknown): string {
+        return error instanceof Error ? error.message : String(error);
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    private getEmbeddingResponseVectors(response: unknown, expectedCount: number): number[][] {
+        const responseRecord = response as {
+            data?: Array<{ embedding?: unknown }>;
+            error?: { message?: unknown; code?: unknown; type?: unknown };
+        } | null;
+
+        if (!responseRecord || !Array.isArray(responseRecord.data)) {
+            throw new Error(
+                `Embedding response missing data array${this.formatProviderError(responseRecord)}${this.formatResponseKeys(responseRecord)}`
+            );
+        }
+
+        if (responseRecord.data.length < expectedCount) {
+            throw new Error(
+                `Embedding response returned ${responseRecord.data.length} item(s), expected ${expectedCount}${this.formatProviderError(responseRecord)}`
+            );
+        }
+
+        return responseRecord.data.slice(0, expectedCount).map((item, index) => {
+            if (!Array.isArray(item.embedding) || !item.embedding.every((value) => typeof value === 'number')) {
+                throw new Error(`Embedding response item ${index} is missing a numeric embedding vector`);
+            }
+            return item.embedding;
+        });
+    }
+
+    private formatProviderError(response: { error?: { message?: unknown; code?: unknown; type?: unknown } } | null): string {
+        const error = response?.error;
+        if (!error) {
+            return '';
+        }
+
+        const details = [
+            typeof error.message === 'string' ? `message=${error.message}` : undefined,
+            typeof error.code === 'string' || typeof error.code === 'number' ? `code=${error.code}` : undefined,
+            typeof error.type === 'string' ? `type=${error.type}` : undefined,
+        ].filter(Boolean);
+        return details.length > 0 ? `; provider error: ${details.join(', ')}` : '; provider error present';
+    }
+
+    private formatResponseKeys(response: object | null): string {
+        if (!response) {
+            return '';
+        }
+
+        return `; response keys: ${Object.keys(response).join(', ') || 'none'}`;
     }
 
     private getDimensionCacheKey(model: string): string {

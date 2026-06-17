@@ -8,7 +8,7 @@
       "cases": [
         {
           "id": "CLIProxyAPI-001",
-          "question": "CLIProxyAPI 的服务启动入口、命令行参数解析、配置加载和不同运行模式分支在哪里实现？",
+          "question": "Where is the CLIProxyAPI service startup entry implemented, including command-line argument parsing, configuration loading, and branches for different run modes?",
           "expected": {
             "primaryPaths": [
               "cmd/server/main.go"
@@ -27,14 +27,13 @@
         },
         {
           "id": "CLIProxyAPI-002",
-          "question": "YAML 配置的数据结构、默认值、插件配置字段和配置文件加载逻辑在哪里定义？",
+          "question": "Where are the YAML configuration data structures, default values, plugin configuration fields, and configuration file loading logic defined?",
           "expected": {
             "primaryPaths": [
               "internal/config/config.go"
             ],
             "acceptablePaths": [
-              "internal/config/parse.go",
-              "config.example.yaml"
+              "internal/config/parse.go"
             ],
             "primarySymbols": [
               "Config",
@@ -48,7 +47,7 @@
         },
         {
           "id": "CLIProxyAPI-003",
-          "question": "从内存中的 YAML payload 解析配置并应用默认值、清洗 API key 和 payload rule 的流程在哪里实现？",
+          "question": "Where is the flow implemented for parsing an in-memory YAML payload into configuration, applying defaults, and sanitizing API keys and payload rules?",
           "expected": {
             "primaryPaths": [
               "internal/config/parse.go"
@@ -65,7 +64,7 @@
         },
         {
           "id": "CLIProxyAPI-004",
-          "question": "HTTP API server 的 Gin 路由、OpenAI/Gemini/Claude 兼容接口、管理接口和启动监听在哪里统一组装？",
+          "question": "Where is the HTTP API server assembled, including Gin routes, OpenAI/Gemini/Claude-compatible APIs, management APIs, and listener startup?",
           "expected": {
             "primaryPaths": [
               "internal/api/server.go"
@@ -85,7 +84,7 @@
         },
         {
           "id": "CLIProxyAPI-005",
-          "question": "Management API 的访问控制、远程管理开关、管理密钥认证、失败次数封禁在哪里处理？",
+          "question": "Where is Management API access control handled, including the remote management switch, management key authentication, and failure-count banning?",
           "expected": {
             "primaryPaths": [
               "internal/api/handlers/management/handler.go"
@@ -104,7 +103,7 @@
         },
         {
           "id": "CLIProxyAPI-006",
-          "question": "管理端读取、写入、校验并持久化 config.yaml，同时保留 YAML 原始格式的接口在哪里实现？",
+          "question": "Where are the management endpoints implemented for reading, writing, validating, and persisting config.yaml while preserving the original YAML formatting?",
           "expected": {
             "primaryPaths": [
               "internal/api/handlers/management/config_basic.go"
@@ -124,7 +123,7 @@
         },
         {
           "id": "CLIProxyAPI-007",
-          "question": "管理端列出、上传、删除、patch 认证 JSON 文件，以及发起 Gemini/Codex/Antigravity OAuth URL 的接口在哪里实现？",
+          "question": "Where are the management endpoints implemented for listing, uploading, deleting, and patching authentication JSON files, and for starting Gemini/Codex/Antigravity OAuth URLs?",
           "expected": {
             "primaryPaths": [
               "internal/api/handlers/management/auth_files.go"
@@ -147,7 +146,7 @@
         },
         {
           "id": "CLIProxyAPI-008",
-          "question": "从配置中的 api-keys 注册请求认证 provider，并从 Authorization、X-Goog-Api-Key、X-Api-Key 或 query 参数识别 API key 的逻辑在哪里？",
+          "question": "Where is the logic that registers request authentication providers from configured api-keys and recognizes API keys from Authorization, X-Goog-Api-Key, X-Api-Key, or query parameters?",
           "expected": {
             "primaryPaths": [
               "internal/access/config_access/provider.go"
@@ -166,7 +165,7 @@
         },
         {
           "id": "CLIProxyAPI-009",
-          "question": "配置热更新时 request auth providers 如何复用、增删或更新，并写回 access manager？",
+          "question": "During config hot reload, where are request auth providers reused, added, removed, or updated, and written back to the access manager?",
           "expected": {
             "primaryPaths": [
               "internal/access/reconcile.go"
@@ -184,7 +183,7 @@
         },
         {
           "id": "CLIProxyAPI-010",
-          "question": "同一个监听端口上如何区分 HTTP/TLS 请求和 Redis RESP 协议连接，并把连接分发到对应处理器？",
+          "question": "How does the same listening port distinguish HTTP/TLS requests from Redis RESP protocol connections and dispatch each connection to the correct handler?",
           "expected": {
             "primaryPaths": [
               "internal/api/protocol_multiplexer.go"
@@ -204,7 +203,7 @@
         },
         {
           "id": "CLIProxyAPI-011",
-          "question": "Redis 兼容的 usage 队列 LPOP/RPOP、usage/errors 订阅和 AUTH 处理在哪里实现？",
+          "question": "Where are Redis-compatible usage queue LPOP/RPOP, usage/errors subscriptions, and AUTH handling implemented?",
           "expected": {
             "primaryPaths": [
               "internal/api/redis_queue_protocol.go",
@@ -227,7 +226,7 @@
         },
         {
           "id": "CLIProxyAPI-012",
-          "question": "Codex/OpenAI OAuth 的授权 URL、PKCE token exchange、本地 callback server 和 token bundle 生成在哪里实现？",
+          "question": "Where are the Codex/OpenAI OAuth authorization URL, PKCE token exchange, local callback server, and token bundle generation implemented?",
           "expected": {
             "primaryPaths": [
               "internal/auth/codex/openai_auth.go",
@@ -250,7 +249,7 @@
         },
         {
           "id": "CLIProxyAPI-013",
-          "question": "Codex 执行器如何把请求转换为 OpenAI Responses 上游请求、处理 streaming、compact、签名错误和 reasoning replay？",
+          "question": "How does the Codex executor convert requests into upstream OpenAI Responses requests and handle streaming, compaction, signature errors, and reasoning replay?",
           "expected": {
             "primaryPaths": [
               "internal/runtime/executor/codex_executor.go"
@@ -272,7 +271,7 @@
         },
         {
           "id": "CLIProxyAPI-014",
-          "question": "Gemini 官方 API key/OAuth 执行器的 generateContent、streamGenerateContent 和 countTokens 请求在哪里实现？",
+          "question": "Where are generateContent, streamGenerateContent, and countTokens requests implemented for the official Gemini API key/OAuth executor?",
           "expected": {
             "primaryPaths": [
               "internal/runtime/executor/gemini_executor.go"
@@ -294,13 +293,10 @@
         },
         {
           "id": "CLIProxyAPI-015",
-          "question": "各协议格式之间的 translator 模块是在哪里通过 blank import 统一注册进系统的？",
+          "question": "Where are the translator modules for different protocol formats registered into the system through blank imports?",
           "expected": {
             "primaryPaths": [
               "internal/translator/init.go"
-            ],
-            "acceptablePaths": [
-              "internal/translator/translator/translator.go"
             ],
             "primarySymbols": [],
             "evidence": "internal/translator/init.go blank import 了 claude、codex、gemini、openai、antigravity 等格式组合的转换实现。"
@@ -308,7 +304,7 @@
         },
         {
           "id": "CLIProxyAPI-016",
-          "question": "Claude Messages 请求转换为 Codex Responses 请求，以及 Codex 响应转换回 Claude 格式的具体实现在哪里？",
+          "question": "Where is the concrete implementation for converting Claude Messages requests into Codex Responses requests and converting Codex responses back to Claude format?",
           "expected": {
             "primaryPaths": [
               "internal/translator/codex/claude/codex_claude_request.go",
@@ -328,7 +324,7 @@
         },
         {
           "id": "CLIProxyAPI-017",
-          "question": "模型注册中心如何登记客户端可用模型、按 provider 查询模型信息、生成可用模型列表并维护缓存？",
+          "question": "How does the model registry register client-available models, query model information by provider, generate the available model list, and maintain its cache?",
           "expected": {
             "primaryPaths": [
               "internal/registry/model_registry.go"
@@ -350,7 +346,7 @@
         },
         {
           "id": "CLIProxyAPI-018",
-          "question": "统一 thinking 配置如何从模型后缀或请求体提取、校验模型能力、转换 level/budget 并应用到不同 provider？",
+          "question": "How is the unified thinking configuration extracted from model suffixes or request bodies, validated against model capabilities, converted between level and budget, and applied to different providers?",
           "expected": {
             "primaryPaths": [
               "internal/thinking/apply.go",
@@ -373,7 +369,7 @@
         },
         {
           "id": "CLIProxyAPI-019",
-          "question": "动态插件宿主如何按配置加载插件、维护 snapshot、注册插件管理路由和资源路由，并处理路由冲突？",
+          "question": "How does the dynamic plugin host load plugins from configuration, maintain snapshots, register plugin management and resource routes, and handle route conflicts?",
           "expected": {
             "primaryPaths": [
               "internal/pluginhost/host.go",
@@ -398,7 +394,7 @@
         },
         {
           "id": "CLIProxyAPI-020",
-          "question": "配置文件和 auth 目录的 fsnotify watcher、debounced config reload、auth 快照和运行时 auth update 分发在哪里实现？",
+          "question": "Where are the fsnotify watchers for the config file and auth directory, debounced config reload, auth snapshots, and runtime auth update dispatch implemented?",
           "expected": {
             "primaryPaths": [
               "internal/watcher/watcher.go",
@@ -431,7 +427,7 @@
       "cases": [
         {
           "id": "ClassNamePicker-001",
-          "question": "主窗口启动后绑定抽取按钮、重置按钮、菜单动作和配置入口的初始化流程在哪里实现？",
+          "question": "Where is the initialization flow implemented that binds the draw button, reset button, menu actions, and configuration entry after the main window starts?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -448,7 +444,7 @@
         },
         {
           "id": "ClassNamePicker-002",
-          "question": "从配置目录读取总名单、女生名单并推导男生名单的逻辑在哪里实现？",
+          "question": "Where is the logic implemented for reading the full name list and the girls list from the config directory and deriving the boys list?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -466,7 +462,7 @@
         },
         {
           "id": "ClassNamePicker-003",
-          "question": "应用启动时创建默认配置文件、名单文件和多音字配置文件的初始化逻辑在哪里？",
+          "question": "Where is the startup initialization logic that creates default config files, name list files, and polyphonic-character config files?",
           "expected": {
             "primaryPaths": [
               "PickerConfigManager.py"
@@ -484,7 +480,7 @@
         },
         {
           "id": "ClassNamePicker-004",
-          "question": "配置文件版本不匹配时迁移旧配置并补齐默认键的处理在哪里实现？",
+          "question": "Where is old configuration migrated and default keys filled in when the config file version does not match?",
           "expected": {
             "primaryPaths": [
               "PickerConfigManager.py"
@@ -500,7 +496,7 @@
         },
         {
           "id": "ClassNamePicker-005",
-          "question": "配置保存时先写临时文件再原子替换正式 config.json 的逻辑在哪里？",
+          "question": "Where is the save logic that writes to a temporary file first and then atomically replaces config.json?",
           "expected": {
             "primaryPaths": [
               "PickerConfigManager.py"
@@ -514,7 +510,7 @@
         },
         {
           "id": "ClassNamePicker-006",
-          "question": "用户点击抽取后决定播放动画还是直接显示最终姓名的主流程在哪里实现？",
+          "question": "Where is the main flow implemented that decides whether to play the animation or directly show the final name after the user clicks draw?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -530,7 +526,7 @@
         },
         {
           "id": "ClassNamePicker-007",
-          "question": "真正随机选出姓名、更新标签、移除已抽姓名并累计抽取次数的代码在哪里？",
+          "question": "Where is the code that actually picks a random name, updates the label, removes the picked name, and increments the draw count?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -544,7 +540,7 @@
         },
         {
           "id": "ClassNamePicker-008",
-          "question": "允许重复抽取这个复选框切换后如何重置可抽名单的逻辑在哪里实现？",
+          "question": "Where is the logic that resets the drawable name list after the allow-repeat-draw checkbox is toggled?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -561,7 +557,7 @@
         },
         {
           "id": "ClassNamePicker-009",
-          "question": "只抽女生和只抽男生互斥选择、清空已抽列表并切换可抽名单的逻辑在哪里？",
+          "question": "Where is the logic for mutually exclusive girls-only and boys-only selection, clearing the already-drawn list, and switching the drawable list?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -579,7 +575,7 @@
         },
         {
           "id": "ClassNamePicker-010",
-          "question": "主界面状态栏里已抽人数、可抽人数、总抽取次数和被抽概率的统计在哪里生成？",
+          "question": "Where are the main status-bar statistics generated, including drawn count, drawable count, total draw count, and draw probability?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -593,7 +589,7 @@
         },
         {
           "id": "ClassNamePicker-011",
-          "question": "语音播报放到后台线程执行，避免阻塞 PyQt 主界面的实现在哪里？",
+          "question": "Where is speech playback moved to a background thread to avoid blocking the PyQt main UI?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -609,7 +605,7 @@
         },
         {
           "id": "ClassNamePicker-012",
-          "question": "多音字替换配置在播报姓名前被读取并替换读音的逻辑在哪里？",
+          "question": "Where is the polyphonic-character replacement config read and applied before speaking a name?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -628,7 +624,7 @@
         },
         {
           "id": "ClassNamePicker-013",
-          "question": "背书计时模式中先倒计时再开始正向计时的流程在哪里实现？",
+          "question": "Where is the recitation timer flow implemented, including countdown first and then forward timing?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -647,7 +643,7 @@
         },
         {
           "id": "ClassNamePicker-014",
-          "question": "重置已抽名单、恢复按钮状态并保存配置的流程在哪里实现？",
+          "question": "Where is the flow implemented for resetting the drawn-name list, restoring button state, and saving configuration?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -662,7 +658,7 @@
         },
         {
           "id": "ClassNamePicker-015",
-          "question": "主窗口关闭后隐藏到悬浮窗、以及希沃管家拦截保护的关闭事件处理在哪里？",
+          "question": "Where is the close event handling implemented for hiding the main window to the floating window and protecting against Seewo Manager interception?",
           "expected": {
             "primaryPaths": [
               "ClassNamePicker.py"
@@ -680,7 +676,7 @@
         },
         {
           "id": "ClassNamePicker-016",
-          "question": "悬浮窗的绘制、拖动、点击恢复主窗口和边缘吸附在哪里实现？",
+          "question": "Where are floating-window drawing, dragging, click-to-restore, and edge snapping implemented?",
           "expected": {
             "primaryPaths": [
               "FloatingWindow.py"
@@ -697,7 +693,7 @@
         },
         {
           "id": "ClassNamePicker-017",
-          "question": "配置面板从配置文件加载复选框和高级设置，并把值填回界面的代码在哪里？",
+          "question": "Where does the settings panel load checkboxes and advanced settings from the config file and populate the UI?",
           "expected": {
             "primaryPaths": [
               "ConfigPage.py"
@@ -716,7 +712,7 @@
         },
         {
           "id": "ClassNamePicker-018",
-          "question": "配置面板保存自动保存进度、悬浮窗、动画、语音、自启动和高级数值的逻辑在哪里？",
+          "question": "Where does the settings panel save auto-save progress, floating-window, animation, speech, autostart, and advanced numeric options?",
           "expected": {
             "primaryPaths": [
               "ConfigPage.py"
@@ -736,7 +732,7 @@
         },
         {
           "id": "ClassNamePicker-019",
-          "question": "Windows 开机自启动通过注册表检测、启用、禁用和获取程序路径的实现在哪里？",
+          "question": "Where is Windows autostart implemented through registry detection, enabling, disabling, and program path resolution?",
           "expected": {
             "primaryPaths": [
               "AutoStartManager.py"
@@ -758,7 +754,7 @@
         },
         {
           "id": "ClassNamePicker-020",
-          "question": "设置向导的多页面切换、按钮状态更新和模拟更新检查进度条在哪里实现？",
+          "question": "Where are the setup wizard multi-page transitions, button-state updates, and simulated update-check progress bar implemented?",
           "expected": {
             "primaryPaths": [
               "guide.py"
@@ -785,7 +781,7 @@
       "cases": [
         {
           "id": "ClaudeCode-001",
-          "question": "Claude Code 的 CLI 主入口、Commander 参数注册和子命令分发在哪里实现？",
+          "question": "Where is the Claude Code CLI main entry implemented, including Commander argument registration and subcommand dispatch?",
           "expected": {
             "primaryPaths": [
               "src/main.tsx"
@@ -803,7 +799,7 @@
         },
         {
           "id": "ClaudeCode-002",
-          "question": "交互式会话启动时的 setup 流程，包括工作目录、权限上下文和命令预加载，是在哪里实现的？",
+          "question": "Where is the interactive session setup flow implemented, including working directory, permission context, and command preloading?",
           "expected": {
             "primaryPaths": [
               "src/setup.ts"
@@ -820,7 +816,7 @@
         },
         {
           "id": "ClaudeCode-003",
-          "question": "斜杠命令列表如何聚合内置命令、skills、plugin commands 和 workflow commands？",
+          "question": "How is the slash-command list aggregated from built-in commands, skills, plugin commands, and workflow commands?",
           "expected": {
             "primaryPaths": [
               "src/commands.ts"
@@ -840,7 +836,7 @@
         },
         {
           "id": "ClaudeCode-004",
-          "question": "对话查询生命周期和单轮消息提交的核心状态机在哪里实现？",
+          "question": "Where is the core state machine for the conversation query lifecycle and single-turn message submission implemented?",
           "expected": {
             "primaryPaths": [
               "src/QueryEngine.ts"
@@ -857,7 +853,7 @@
         },
         {
           "id": "ClaudeCode-005",
-          "question": "非交互 print/headless 模式如何运行模型请求、工具权限和流式输出？",
+          "question": "How does non-interactive print/headless mode run model requests, tool permissions, and streaming output?",
           "expected": {
             "primaryPaths": [
               "src/cli/print.ts"
@@ -876,7 +872,7 @@
         },
         {
           "id": "ClaudeCode-006",
-          "question": "默认工具集合如何组装，并按权限上下文过滤可用工具？",
+          "question": "How is the default tool set assembled and filtered by permission context?",
           "expected": {
             "primaryPaths": [
               "src/tools.ts"
@@ -896,7 +892,7 @@
         },
         {
           "id": "ClaudeCode-007",
-          "question": "Bash 工具的输入 schema、命令阻塞检测、权限检查和实际执行流程在哪里？",
+          "question": "Where are the Bash tool input schema, command blocking detection, permission checks, and actual execution flow implemented?",
           "expected": {
             "primaryPaths": [
               "src/tools/BashTool/BashTool.tsx"
@@ -917,7 +913,7 @@
         },
         {
           "id": "ClaudeCode-008",
-          "question": "文件读取工具如何限制 token、处理图片和注册读取监听器？",
+          "question": "How does the file read tool limit tokens, handle images, and register read listeners?",
           "expected": {
             "primaryPaths": [
               "src/tools/FileReadTool/FileReadTool.ts"
@@ -937,7 +933,7 @@
         },
         {
           "id": "ClaudeCode-009",
-          "question": "文件编辑工具的 old_string/new_string 替换、输入校验和编辑结果生成在哪里实现？",
+          "question": "Where are old_string/new_string replacement, input validation, and edit-result generation implemented for the file edit tool?",
           "expected": {
             "primaryPaths": [
               "src/tools/FileEditTool/FileEditTool.ts"
@@ -955,7 +951,7 @@
         },
         {
           "id": "ClaudeCode-010",
-          "question": "Grep 搜索工具的参数 schema、ripgrep 调用和 count/head_limit 等模式处理在哪里？",
+          "question": "Where are the Grep search tool parameter schema, ripgrep invocation, and count/head_limit mode handling implemented?",
           "expected": {
             "primaryPaths": [
               "src/tools/GrepTool/GrepTool.ts"
@@ -972,7 +968,7 @@
         },
         {
           "id": "ClaudeCode-011",
-          "question": "Glob 文件匹配工具如何接收 pattern/path 并返回匹配文件？",
+          "question": "How does the Glob file matching tool accept pattern/path input and return matching files?",
           "expected": {
             "primaryPaths": [
               "src/tools/GlobTool/GlobTool.ts"
@@ -990,7 +986,7 @@
         },
         {
           "id": "ClaudeCode-012",
-          "question": "TodoWrite 工具如何保存和更新当前会话的 todo 列表？",
+          "question": "How does the TodoWrite tool save and update the current session todo list?",
           "expected": {
             "primaryPaths": [
               "src/tools/TodoWriteTool/TodoWriteTool.ts"
@@ -1007,7 +1003,7 @@
         },
         {
           "id": "ClaudeCode-013",
-          "question": "子 Agent 工具的参数 schema、后台/前台 agent 启动和结果汇总在哪里实现？",
+          "question": "Where are the sub-agent tool parameter schema, background/foreground agent startup, and result aggregation implemented?",
           "expected": {
             "primaryPaths": [
               "src/tools/AgentTool/AgentTool.tsx"
@@ -1027,7 +1023,7 @@
         },
         {
           "id": "ClaudeCode-014",
-          "question": "Skill 工具如何列出可用 skill、校验 skill 名称并执行本地或远程 skill？",
+          "question": "How does the Skill tool list available skills, validate skill names, and execute local or remote skills?",
           "expected": {
             "primaryPaths": [
               "src/tools/SkillTool/SkillTool.ts"
@@ -1047,7 +1043,7 @@
         },
         {
           "id": "ClaudeCode-015",
-          "question": "MCP 配置如何从不同 scope 读取、解析、去重和按策略过滤？",
+          "question": "How is MCP configuration read from different scopes, parsed, deduplicated, and filtered by policy?",
           "expected": {
             "primaryPaths": [
               "src/services/mcp/config.ts"
@@ -1068,7 +1064,7 @@
         },
         {
           "id": "ClaudeCode-016",
-          "question": "MCP client 如何连接 server、拉取 tools/resources/prompts 并包装成 Claude Code 工具？",
+          "question": "How does the MCP client connect to servers, fetch tools/resources/prompts, and wrap them as Claude Code tools?",
           "expected": {
             "primaryPaths": [
               "src/services/mcp/client.ts"
@@ -1089,7 +1085,7 @@
         },
         {
           "id": "ClaudeCode-017",
-          "question": "LSP server manager 的初始化、重初始化、健康检查和关闭流程在哪里？",
+          "question": "Where are LSP server manager initialization, reinitialization, health checks, and shutdown implemented?",
           "expected": {
             "primaryPaths": [
               "src/services/lsp/manager.ts"
@@ -1110,7 +1106,7 @@
         },
         {
           "id": "ClaudeCode-018",
-          "question": "LSP 诊断通知如何缓存、去重、限量并转成待交付诊断？",
+          "question": "How are LSP diagnostic notifications cached, deduplicated, capped, and converted into deliverable diagnostics?",
           "expected": {
             "primaryPaths": [
               "src/services/lsp/LSPDiagnosticRegistry.ts"
@@ -1130,7 +1126,7 @@
         },
         {
           "id": "ClaudeCode-019",
-          "question": "自动 memory 目录路径、覆盖配置、daily log 路径和 MEMORY.md 入口在哪里定义？",
+          "question": "Where are the automatic memory directory path, override configuration, daily log path, and MEMORY.md entry defined?",
           "expected": {
             "primaryPaths": [
               "src/memdir/paths.ts"
@@ -1150,7 +1146,7 @@
         },
         {
           "id": "ClaudeCode-020",
-          "question": "Remote Control/Bridge 会话的初始化、session 创建、transport 连接和 UI 状态输出在哪里实现？",
+          "question": "Where are Remote Control/Bridge session initialization, session creation, transport connection, and UI status output implemented?",
           "expected": {
             "primaryPaths": [
               "src/bridge/initReplBridge.ts"
@@ -1176,7 +1172,7 @@
       "cases": [
         {
           "id": "HitWar-001",
-          "question": "HitWar 应用启动时加载图片、笔记、全局兼容导出、BGM 并切到主界面的初始化流程在哪里实现？",
+          "question": "Where is the HitWar startup initialization flow implemented, including image loading, notes, global compatibility exports, BGM, and switching to the main screen?",
           "expected": {
             "primaryPaths": [
               "src/app.ts"
@@ -1197,7 +1193,7 @@
         },
         {
           "id": "HitWar-002",
-          "question": "战斗模式从创建 World、处理存档、初始化控制器到启动 game loop 的入口在哪里？",
+          "question": "Where is the battle-mode entry implemented, from creating the World and handling saves to initializing controllers and starting the game loop?",
           "expected": {
             "primaryPaths": [
               "src/ui/interfaces/battle/index.ts"
@@ -1218,7 +1214,7 @@
         },
         {
           "id": "HitWar-003",
-          "question": "World 作为门面对象持有空间查询、实体管理、波次、渲染、领地、能量和战争迷雾系统的初始化逻辑在哪里？",
+          "question": "Where is the World facade initialization logic implemented for spatial queries, entity management, waves, rendering, territory, energy, and fog-of-war systems?",
           "expected": {
             "primaryPaths": [
               "src/game/world.ts"
@@ -1239,7 +1235,7 @@
         },
         {
           "id": "HitWar-004",
-          "question": "游戏实体集合的添加、移除、死亡清理以及三阶段 updateEntities 更新流程在哪里实现？",
+          "question": "Where are game entity collection add/remove, dead-entity cleanup, and the three-phase updateEntities flow implemented?",
           "expected": {
             "primaryPaths": [
               "src/game/entities/entityManager.ts"
@@ -1261,7 +1257,7 @@
         },
         {
           "id": "HitWar-005",
-          "question": "建筑用 QuadTree、怪物和子弹用 SpatialHashGrid 的空间索引与范围查询在哪里实现？",
+          "question": "Where are spatial indexes and range queries implemented, including QuadTree for buildings and SpatialHashGrid for monsters and bullets?",
           "expected": {
             "primaryPaths": [
               "src/game/spatial/spatialQuerySystem.ts"
@@ -1284,7 +1280,7 @@
         },
         {
           "id": "HitWar-006",
-          "question": "怪物波次在 flow 模式和 non-flow 模式下生成、预计算和 T800 特殊波次的逻辑在哪里？",
+          "question": "Where is monster wave generation implemented for flow and non-flow modes, including precomputation and special T800 waves?",
           "expected": {
             "primaryPaths": [
               "src/game/waves/waveManager.ts"
@@ -1307,7 +1303,7 @@
         },
         {
           "id": "HitWar-007",
-          "question": "世界渲染时静态层缓存、视野裁剪、按样式批量渲染怪物和子弹、战争迷雾叠加在哪里实现？",
+          "question": "Where is world rendering implemented, including static layer caching, viewport culling, batched monster/bullet rendering by style, and fog-of-war overlay?",
           "expected": {
             "primaryPaths": [
               "src/game/rendering/worldRenderer.ts"
@@ -1329,7 +1325,7 @@
         },
         {
           "id": "HitWar-008",
-          "question": "塔的基础攻击流程、子弹移动/碰撞分离、雷达视野旋转和出射子弹清理在哪里实现？",
+          "question": "Where are the tower basic attack flow, bullet movement/collision separation, radar vision rotation, and emitted-bullet cleanup implemented?",
           "expected": {
             "primaryPaths": [
               "src/towers/base/tower.ts"
@@ -1352,7 +1348,7 @@
         },
         {
           "id": "HitWar-009",
-          "question": "塔配置如何从 JSON-like config 映射到具体 Tower/TowerLaser/TowerRay 等实例并注册到 TowerRegistry？",
+          "question": "How are tower configurations mapped from JSON-like config to concrete Tower/TowerLaser/TowerRay instances and registered in TowerRegistry?",
           "expected": {
             "primaryPaths": [
               "src/towers/config/factory.ts"
@@ -1374,7 +1370,7 @@
         },
         {
           "id": "HitWar-010",
-          "question": "实体注册表的统一 create、has、getNames、class type lazy getter 机制在哪里实现？",
+          "question": "Where is the entity registry mechanism implemented, including unified create, has, getNames, and class-type lazy getters?",
           "expected": {
             "primaryPaths": [
               "src/core/registry/baseRegistry.ts"
@@ -1399,7 +1395,7 @@
         },
         {
           "id": "HitWar-011",
-          "question": "怪物配置如何应用移动方式、激光防御、召唤、躲避 AI、目标选择等参数并注册到 MonsterRegistry？",
+          "question": "How are monster configurations applied for movement mode, laser defense, summoning, dodge AI, target selection, and registered in MonsterRegistry?",
           "expected": {
             "primaryPaths": [
               "src/monsters/config/factory.ts"
@@ -1423,7 +1419,7 @@
         },
         {
           "id": "HitWar-012",
-          "question": "怪物子弹躲避 AI 如何判断子弹正在接近并计算综合躲避向量？",
+          "question": "How does monster bullet-dodge AI determine that bullets are approaching and compute the combined dodge vector?",
           "expected": {
             "primaryPaths": [
               "src/monsters/ai/bulletDodge.ts"
@@ -1443,7 +1439,7 @@
         },
         {
           "id": "HitWar-013",
-          "question": "怪物动态目标选择的 nearest、weakest、threat、balanced 四种策略在哪里实现？",
+          "question": "Where are the nearest, weakest, threat, and balanced strategies for dynamic monster target selection implemented?",
           "expected": {
             "primaryPaths": [
               "src/monsters/ai/targetSelection.ts"
@@ -1464,7 +1460,7 @@
         },
         {
           "id": "HitWar-014",
-          "question": "子弹追踪、扫掠碰撞、爆炸、冰冻爆炸、分裂和从 world/父塔移除的核心逻辑在哪里？",
+          "question": "Where is the core bullet logic implemented, including tracking, swept collision, explosion, freeze explosion, splitting, and removal from the world or parent tower?",
           "expected": {
             "primaryPaths": [
               "src/bullets/bullet.ts"
@@ -1488,7 +1484,7 @@
         },
         {
           "id": "HitWar-015",
-          "question": "高速子弹防穿透用的移动圆扫掠碰撞和相对速度扫掠碰撞在哪里实现？",
+          "question": "Where are moving-circle swept collision and relative-velocity swept collision implemented to prevent fast bullets from tunneling through targets?",
           "expected": {
             "primaryPaths": [
               "src/core/math/circle.ts"
@@ -1508,7 +1504,7 @@
         },
         {
           "id": "HitWar-016",
-          "question": "战争迷雾的静态视野源、雷达扫描扇区、visibility grid 缓存和可见性判断在哪里实现？",
+          "question": "Where are fog-of-war static vision sources, radar scan sectors, visibility-grid cache, and visibility checks implemented?",
           "expected": {
             "primaryPaths": [
               "src/systems/fog/fogOfWar.ts"
@@ -1531,7 +1527,7 @@
         },
         {
           "id": "HitWar-017",
-          "question": "战争迷雾用离屏 canvas 缓存静态雾层、合成雷达洞和按相机 buffer 重建的渲染逻辑在哪里？",
+          "question": "Where is fog-of-war rendering implemented with offscreen canvas caching for static fog, radar-hole compositing, and camera-buffer rebuilds?",
           "expected": {
             "primaryPaths": [
               "src/systems/fog/fogRenderer.ts"
@@ -1554,7 +1550,7 @@
         },
         {
           "id": "HitWar-018",
-          "question": "领地连通性 BFS、有效/无效建筑惩罚、增量添加删除和引用计数 grid 查询在哪里实现？",
+          "question": "Where are territory connectivity BFS, valid/invalid building penalties, incremental add/delete, and reference-count grid queries implemented?",
           "expected": {
             "primaryPaths": [
               "src/systems/territory/territory.ts"
@@ -1577,7 +1573,7 @@
         },
         {
           "id": "HitWar-019",
-          "question": "能量系统的总产出、总消耗、赤字扣钱、盈余奖励以及矿点升级成发电站的逻辑在哪里？",
+          "question": "Where is the energy system implemented, including total production, total consumption, deficit money deduction, surplus rewards, and upgrading mines into power plants?",
           "expected": {
             "primaryPaths": [
               "src/systems/energy/energy.ts",
@@ -1603,7 +1599,7 @@
         },
         {
           "id": "HitWar-020",
-          "question": "游戏存档如何序列化世界状态、从 localStorage/文件读取、校验版本并反序列化恢复实体？",
+          "question": "How does game save serialization persist world state, read from localStorage or files, validate versions, and deserialize entities for restoration?",
           "expected": {
             "primaryPaths": [
               "src/systems/save/saveManager.ts"
@@ -1634,7 +1630,7 @@
       "cases": [
         {
           "id": "caddy-001",
-          "question": "Caddy 可执行程序的 main 入口在哪里实现，它如何接入默认标准模块并启动命令系统？",
+          "question": "Where is the Caddy executable main entry implemented, and how does it include the default standard modules and start the command system?",
           "expected": {
             "primaryPaths": [
               "cmd/caddy/main.go"
@@ -1653,7 +1649,7 @@
         },
         {
           "id": "caddy-002",
-          "question": "Caddy 的 start、run、stop、reload 等 CLI 子命令在哪里注册和定义参数？",
+          "question": "Where are Caddy CLI subcommands such as start, run, stop, and reload registered, and where are their parameters defined?",
           "expected": {
             "primaryPaths": [
               "cmd/commands.go"
@@ -1674,7 +1670,7 @@
         },
         {
           "id": "caddy-003",
-          "question": "Caddy 加载新 JSON 配置、比较配置是否变化并触发 reload 的核心流程在哪里实现？",
+          "question": "Where is the core flow implemented for loading a new JSON config, comparing whether the config changed, and triggering reload?",
           "expected": {
             "primaryPaths": [
               "caddy.go"
@@ -1694,7 +1690,7 @@
         },
         {
           "id": "caddy-004",
-          "question": "Admin API 的 HTTP handler、路由注册、origin/host 校验和远程管理入口在哪里实现？",
+          "question": "Where are the Admin API HTTP handler, route registration, origin/host validation, and remote administration entry implemented?",
           "expected": {
             "primaryPaths": [
               "admin.go"
@@ -1715,7 +1711,7 @@
         },
         {
           "id": "caddy-005",
-          "question": "Caddy 模块系统的注册、按 ID 查找模块以及获取模块列表的逻辑在哪里实现？",
+          "question": "Where is the Caddy module system implemented, including registration, lookup by ID, and module-list retrieval?",
           "expected": {
             "primaryPaths": [
               "modules.go"
@@ -1736,7 +1732,7 @@
         },
         {
           "id": "caddy-006",
-          "question": "通用 Caddyfile adapter 把 Caddyfile token 解析后转换成 Caddy JSON 的入口在哪里？",
+          "question": "Where is the generic Caddyfile adapter entry that parses Caddyfile tokens and converts them into Caddy JSON?",
           "expected": {
             "primaryPaths": [
               "caddyconfig/caddyfile/adapter.go"
@@ -1757,7 +1753,7 @@
         },
         {
           "id": "caddy-007",
-          "question": "HTTP Caddyfile server type 如何把站点块、全局选项、directive 结果组合成 http/tls/pki apps？",
+          "question": "How does the HTTP Caddyfile server type combine site blocks, global options, and directive results into http/tls/pki apps?",
           "expected": {
             "primaryPaths": [
               "caddyconfig/httpcaddyfile/httptype.go"
@@ -1779,7 +1775,7 @@
         },
         {
           "id": "caddy-008",
-          "question": "HTTP Caddyfile directive 的默认执行顺序、directive 注册和 handler directive 包装逻辑在哪里定义？",
+          "question": "Where are the default execution order for HTTP Caddyfile directives, directive registration, and handler directive wrapping logic defined?",
           "expected": {
             "primaryPaths": [
               "caddyconfig/httpcaddyfile/directives.go"
@@ -1800,7 +1796,7 @@
         },
         {
           "id": "caddy-009",
-          "question": "HTTP app 的配置结构、Provision 阶段、自动 HTTPS 第一阶段和各 server 初始化在哪里实现？",
+          "question": "Where are the HTTP app config structure, Provision phase, automatic HTTPS first stage, and server initialization implemented?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/app.go"
@@ -1822,7 +1818,7 @@
         },
         {
           "id": "caddy-010",
-          "question": "HTTP Server 的 listen 地址、协议、超时、TLS connection policies 和请求路由配置在哪里定义？",
+          "question": "Where are HTTP Server listen addresses, protocols, timeouts, TLS connection policies, and request route configuration defined?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/server.go"
@@ -1844,7 +1840,7 @@
         },
         {
           "id": "caddy-011",
-          "question": "HTTP route 如何加载 matcher/handler 模块并编译成 middleware chain？",
+          "question": "How does an HTTP route load matcher/handler modules and compile them into a middleware chain?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/routes.go"
@@ -1865,7 +1861,7 @@
         },
         {
           "id": "caddy-012",
-          "question": "静态文件服务的 file_server handler 在哪里实现，包括 root、index、browse、hide、precompressed 和 canonical URI 处理？",
+          "question": "Where is the static file_server handler implemented, including root, index, browse, hide, precompressed files, and canonical URI handling?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/fileserver/staticfiles.go"
@@ -1886,7 +1882,7 @@
         },
         {
           "id": "caddy-013",
-          "question": "rewrite handler 修改请求 method、URI、path prefix/suffix、query 和 regexp 替换的逻辑在哪里？",
+          "question": "Where is the rewrite handler logic implemented for modifying request method, URI, path prefix/suffix, query, and regexp replacements?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/rewrite/rewrite.go"
@@ -1907,7 +1903,7 @@
         },
         {
           "id": "caddy-014",
-          "question": "header/request_header 指令背后的 HTTP 请求头和响应头增删改逻辑在哪里实现？",
+          "question": "Where are the HTTP request and response header add/delete/modify operations behind the header and request_header directives implemented?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/headers/headers.go"
@@ -1929,7 +1925,7 @@
         },
         {
           "id": "caddy-015",
-          "question": "reverse_proxy handler 的上游列表、动态 upstream、header 操作、buffering、streaming 和 handle_response 配置在哪里定义？",
+          "question": "Where is reverse_proxy handler configuration defined, including upstream lists, dynamic upstreams, header operations, buffering, streaming, and handle_response?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/reverseproxy/reverseproxy.go"
@@ -1952,7 +1948,7 @@
         },
         {
           "id": "caddy-016",
-          "question": "reverse_proxy 到上游的 HTTP transport 如何配置 TLS、keep-alive、HTTP/2/H2C/HTTP/3、dial timeout 和 network proxy？",
+          "question": "How does the reverse_proxy HTTP transport configure TLS, keep-alive, HTTP/2, H2C, HTTP/3, dial timeout, and network proxy?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/reverseproxy/httptransport.go"
@@ -1973,7 +1969,7 @@
         },
         {
           "id": "caddy-017",
-          "question": "reverse_proxy 的 random、least_conn、round_robin、weighted_round_robin、hash 等负载均衡选择策略在哪里实现？",
+          "question": "Where are reverse_proxy load-balancing selection policies implemented, including random, least_conn, round_robin, weighted_round_robin, and hash?",
           "expected": {
             "primaryPaths": [
               "modules/caddyhttp/reverseproxy/selectionpolicies.go"
@@ -1994,7 +1990,7 @@
         },
         {
           "id": "caddy-018",
-          "question": "TLS app 如何加载证书、配置自动证书管理、初始化 cert cache，并注册 tls app 模块？",
+          "question": "How does the TLS app load certificates, configure automatic certificate management, initialize the cert cache, and register TLS app modules?",
           "expected": {
             "primaryPaths": [
               "modules/caddytls/tls.go"
@@ -2016,7 +2012,7 @@
         },
         {
           "id": "caddy-019",
-          "question": "Caddy 内置 PKI app 如何管理本地 CA、默认 CA、安装 root trust 并启动证书维护？",
+          "question": "How does Caddy built-in PKI app manage local CAs, default CAs, root trust installation, and certificate maintenance startup?",
           "expected": {
             "primaryPaths": [
               "modules/caddypki/pki.go"
@@ -2038,7 +2034,7 @@
         },
         {
           "id": "caddy-020",
-          "question": "用户可配置的 /metrics HTTP handler 如何接入 Prometheus registry 并支持 disable_openmetrics？",
+          "question": "How does the user-configurable /metrics HTTP handler integrate with the Prometheus registry and support disable_openmetrics?",
           "expected": {
             "primaryPaths": [
               "modules/metrics/metrics.go"
@@ -2066,7 +2062,7 @@
       "cases": [
         {
           "id": "fastapi-001",
-          "question": "FastAPI 应用实例生成并缓存 OpenAPI schema 的逻辑在哪里实现？",
+          "question": "Where is the logic implemented for generating and caching the OpenAPI schema for a FastAPI app instance?",
           "expected": {
             "primaryPaths": [
               "fastapi/applications.py"
@@ -2083,7 +2079,7 @@
         },
         {
           "id": "fastapi-002",
-          "question": "自动注册 /openapi.json、Swagger UI 和 ReDoc 文档路由的流程在哪里处理？",
+          "question": "Where is the flow handled for automatically registering /openapi.json, Swagger UI, and ReDoc documentation routes?",
           "expected": {
             "primaryPaths": [
               "fastapi/applications.py"
@@ -2101,7 +2097,7 @@
         },
         {
           "id": "fastapi-003",
-          "question": "FastAPI 应用构建 middleware stack 并插入 AsyncExitStackMiddleware 的逻辑在哪里？",
+          "question": "Where is the logic that builds the FastAPI middleware stack and inserts AsyncExitStackMiddleware?",
           "expected": {
             "primaryPaths": [
               "fastapi/applications.py"
@@ -2118,7 +2114,7 @@
         },
         {
           "id": "fastapi-004",
-          "question": "HTTP path operation 的请求处理函数在哪里构造，包括读取 body、解析依赖、执行 endpoint 和序列化响应？",
+          "question": "Where is the HTTP path-operation request handler constructed, including body reading, dependency solving, endpoint execution, and response serialization?",
           "expected": {
             "primaryPaths": [
               "fastapi/routing.py"
@@ -2137,7 +2133,7 @@
         },
         {
           "id": "fastapi-005",
-          "question": "APIRoute 初始化时如何收集 endpoint 的依赖、body field、response field 和 route handler？",
+          "question": "How does APIRoute initialization collect endpoint dependencies, body fields, response fields, and the route handler?",
           "expected": {
             "primaryPaths": [
               "fastapi/routing.py"
@@ -2156,7 +2152,7 @@
         },
         {
           "id": "fastapi-006",
-          "question": "include_router 合并子路由器的 prefix、tags、dependencies、responses 和 startup/shutdown handler 的逻辑在哪里？",
+          "question": "Where is include_router logic implemented for merging child-router prefix, tags, dependencies, responses, and startup/shutdown handlers?",
           "expected": {
             "primaryPaths": [
               "fastapi/routing.py"
@@ -2174,7 +2170,7 @@
         },
         {
           "id": "fastapi-007",
-          "question": "解析 endpoint 函数签名并把参数分类为 path/query/header/cookie/body/dependency 的代码在哪里？",
+          "question": "Where is endpoint function signature parsing implemented, classifying parameters as path, query, header, cookie, body, or dependency?",
           "expected": {
             "primaryPaths": [
               "fastapi/dependencies/utils.py"
@@ -2193,7 +2189,7 @@
         },
         {
           "id": "fastapi-008",
-          "question": "运行依赖注入、处理 dependency_overrides、缓存依赖结果以及注入 Request/Response/BackgroundTasks 的逻辑在哪里？",
+          "question": "Where is dependency injection executed, including dependency_overrides handling, dependency-result caching, and Request/Response/BackgroundTasks injection?",
           "expected": {
             "primaryPaths": [
               "fastapi/dependencies/utils.py"
@@ -2211,7 +2207,7 @@
         },
         {
           "id": "fastapi-009",
-          "question": "请求 body 参数转换为函数参数、处理 FormData 和文件上传字段的实现在哪里？",
+          "question": "Where is request body parameter conversion into function arguments implemented, including FormData and file upload fields?",
           "expected": {
             "primaryPaths": [
               "fastapi/dependencies/utils.py"
@@ -2230,7 +2226,7 @@
         },
         {
           "id": "fastapi-010",
-          "question": "Path、Query、Header、Cookie、Body、Form、File、Depends 和 Security 这些参数对象的底层类在哪里定义？",
+          "question": "Where are the underlying classes defined for parameter objects such as Path, Query, Header, Cookie, Body, Form, File, Depends, and Security?",
           "expected": {
             "primaryPaths": [
               "fastapi/params.py"
@@ -2255,7 +2251,7 @@
         },
         {
           "id": "fastapi-011",
-          "question": "生成完整 OpenAPI 文档，包括 paths、components、schemas、securitySchemes 和 webhooks 的实现在哪里？",
+          "question": "Where is full OpenAPI document generation implemented, including paths, components, schemas, securitySchemes, and webhooks?",
           "expected": {
             "primaryPaths": [
               "fastapi/openapi/utils.py"
@@ -2274,7 +2270,7 @@
         },
         {
           "id": "fastapi-012",
-          "question": "生成 Swagger UI、ReDoc 和 OAuth2 redirect HTML 页面的方法在哪里？",
+          "question": "Where are the functions that generate Swagger UI, ReDoc, and OAuth2 redirect HTML pages?",
           "expected": {
             "primaryPaths": [
               "fastapi/openapi/docs.py"
@@ -2292,7 +2288,7 @@
         },
         {
           "id": "fastapi-013",
-          "question": "HTTP Basic、Bearer、Digest 认证从 Authorization header 提取凭据并生成未认证错误的逻辑在哪里？",
+          "question": "Where is the logic implemented for HTTP Basic, Bearer, and Digest auth to extract credentials from Authorization headers and generate unauthenticated errors?",
           "expected": {
             "primaryPaths": [
               "fastapi/security/http.py"
@@ -2313,7 +2309,7 @@
         },
         {
           "id": "fastapi-014",
-          "question": "OAuth2 password bearer 和 authorization code bearer 如何定义 OpenAPI flows 并校验 Bearer token？",
+          "question": "How do OAuth2 password bearer and authorization-code bearer define OpenAPI flows and validate Bearer tokens?",
           "expected": {
             "primaryPaths": [
               "fastapi/security/oauth2.py"
@@ -2333,7 +2329,7 @@
         },
         {
           "id": "fastapi-015",
-          "question": "API key 认证从 query、header 或 cookie 中读取 key 并处理 auto_error 的实现在哪里？",
+          "question": "Where is API key authentication implemented for reading keys from query, header, or cookie and handling auto_error?",
           "expected": {
             "primaryPaths": [
               "fastapi/security/api_key.py"
@@ -2353,7 +2349,7 @@
         },
         {
           "id": "fastapi-016",
-          "question": "HTTPException、RequestValidationError 和 WebSocketRequestValidationError 的默认异常响应在哪里实现？",
+          "question": "Where are the default exception responses implemented for HTTPException, RequestValidationError, and WebSocketRequestValidationError?",
           "expected": {
             "primaryPaths": [
               "fastapi/exception_handlers.py"
@@ -2371,7 +2367,7 @@
         },
         {
           "id": "fastapi-017",
-          "question": "把 Pydantic model、datetime、Decimal、Enum、set、UUID 等对象转换成 JSON 可编码对象的逻辑在哪里？",
+          "question": "Where is conversion implemented for Pydantic models, datetime, Decimal, Enum, set, UUID, and other objects into JSON-encodable values?",
           "expected": {
             "primaryPaths": [
               "fastapi/encoders.py"
@@ -2389,7 +2385,7 @@
         },
         {
           "id": "fastapi-018",
-          "question": "Server-Sent Events 的响应类、事件模型和 wire format 格式化函数在哪里实现？",
+          "question": "Where are the Server-Sent Events response class, event model, and wire-format formatting functions implemented?",
           "expected": {
             "primaryPaths": [
               "fastapi/sse.py"
@@ -2407,7 +2403,7 @@
         },
         {
           "id": "fastapi-019",
-          "question": "UploadFile 的异步 write、read、seek、close 包装以及 Pydantic schema 支持在哪里定义？",
+          "question": "Where are UploadFile async write, read, seek, and close wrappers, plus Pydantic schema support, defined?",
           "expected": {
             "primaryPaths": [
               "fastapi/datastructures.py"
@@ -2427,7 +2423,7 @@
         },
         {
           "id": "fastapi-020",
-          "question": "项目的打包元数据、Python 版本要求、依赖组和 fastapi 命令入口在哪里配置？",
+          "question": "Where are the project packaging metadata, Python version requirements, dependency groups, and fastapi command entry configured?",
           "expected": {
             "primaryPaths": [
               "pyproject.toml"
@@ -2452,7 +2448,7 @@
       "cases": [
         {
           "id": "gemini-cli-001",
-          "question": "Gemini CLI 的交互式启动主流程、会话恢复、stdin 读取和最终进入 UI 或非交互模式的分发在哪里实现？",
+          "question": "Where is the Gemini CLI interactive startup main flow implemented, including session resume, stdin reading, and dispatch into UI or non-interactive mode?",
           "expected": {
             "primaryPaths": [
               "packages/cli/src/gemini.tsx"
@@ -2473,7 +2469,7 @@
         },
         {
           "id": "gemini-cli-002",
-          "question": "命令行参数、子命令、--prompt、--model、--worktree、--approval-mode 等 CLI flag 是在哪里解析和合并进运行配置的？",
+          "question": "Where are command-line arguments, subcommands, and CLI flags such as --prompt, --model, --worktree, and --approval-mode parsed and merged into runtime config?",
           "expected": {
             "primaryPaths": [
               "packages/cli/src/config/config.ts"
@@ -2495,7 +2491,7 @@
         },
         {
           "id": "gemini-cli-003",
-          "question": "用户、workspace、system defaults 等 settings 文件的加载、注释 JSON 解析、环境变量加载和配置合并在哪里实现？",
+          "question": "Where are settings files from user, workspace, and system defaults loaded, including commented JSON parsing, environment-variable loading, and config merging?",
           "expected": {
             "primaryPaths": [
               "packages/cli/src/config/settings.ts"
@@ -2517,7 +2513,7 @@
         },
         {
           "id": "gemini-cli-004",
-          "question": "核心 Config 如何注册内置工具，例如 read_file、grep、glob、edit、shell、web_fetch、MCP resource 和 agent tool？",
+          "question": "How does the core Config register built-in tools such as read_file, grep, glob, edit, shell, web_fetch, MCP resource, and agent tools?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/config/config.ts"
@@ -2539,7 +2535,7 @@
         },
         {
           "id": "gemini-cli-005",
-          "question": "工具注册表如何保存工具、处理 discovered tool、legacy alias，并按名称创建工具 invocation？",
+          "question": "How does the tool registry store tools, handle discovered tools and legacy aliases, and create tool invocations by name?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/tools/tool-registry.ts"
@@ -2560,7 +2556,7 @@
         },
         {
           "id": "gemini-cli-006",
-          "question": "LLM 对话客户端如何构建请求、维护对话状态、处理 hooks、上下文压缩、IDE context 和 fallback？",
+          "question": "How does the LLM conversation client build requests, maintain conversation state, handle hooks, compress context, include IDE context, and fall back?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/core/client.ts"
@@ -2581,7 +2577,7 @@
         },
         {
           "id": "gemini-cli-007",
-          "question": "Gemini API、Vertex AI、OAuth/API key 等 content generator 的创建和认证类型选择在哪里实现？",
+          "question": "Where is content-generator creation implemented for Gemini API, Vertex AI, OAuth/API key, and authentication type selection?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/core/contentGenerator.ts"
@@ -2601,7 +2597,7 @@
         },
         {
           "id": "gemini-cli-008",
-          "question": "系统提示词、工具说明、环境上下文和模型提示的组装在哪里实现？",
+          "question": "Where are the system prompt, tool descriptions, environment context, and model prompt assembled?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/core/prompts.ts"
@@ -2619,7 +2615,7 @@
         },
         {
           "id": "gemini-cli-009",
-          "question": "工具调用调度器如何排队、并发执行、处理确认请求、policy 检查、hook 检查和 MCP progress 更新？",
+          "question": "How does the tool-call scheduler queue and run tools concurrently, handle confirmation requests, policy checks, hook checks, and MCP progress updates?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/scheduler/scheduler.ts"
@@ -2641,7 +2637,7 @@
         },
         {
           "id": "gemini-cli-010",
-          "question": "shell 工具如何解析命令、处理后台执行、输出缓冲、sandbox 权限、目录参数和命令确认描述？",
+          "question": "How does the shell tool parse commands, handle background execution, buffer output, sandbox permissions, directory arguments, and command confirmation descriptions?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/tools/shell.ts"
@@ -2662,7 +2658,7 @@
         },
         {
           "id": "gemini-cli-011",
-          "question": "read_many_files 工具如何展开 glob、应用默认排除规则、尊重 ignore 配置并拼接多文件内容？",
+          "question": "How does the read_many_files tool expand globs, apply default exclusions, honor ignore configuration, and concatenate multi-file content?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/tools/read-many-files.ts"
@@ -2682,7 +2678,7 @@
         },
         {
           "id": "gemini-cli-012",
-          "question": "文件编辑工具如何生成 patch、处理 diff、确认修改并写回文件？",
+          "question": "How does the file edit tool generate patches, handle diffs, confirm changes, and write files back?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/tools/edit.ts"
@@ -2701,7 +2697,7 @@
         },
         {
           "id": "gemini-cli-013",
-          "question": "MCP 单个 server 的连接、transport 选择、工具/资源/prompt 发现、OAuth 和 progress token 路由在哪里实现？",
+          "question": "Where is connection handling for a single MCP server implemented, including transport selection, tool/resource/prompt discovery, OAuth, and progress token routing?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/tools/mcp-client.ts"
@@ -2724,7 +2720,7 @@
         },
         {
           "id": "gemini-cli-014",
-          "question": "多个 MCP server 的生命周期、诊断去重、extension MCP 卸载和主 registry 维护在哪里实现？",
+          "question": "Where are multiple MCP server lifecycle management, diagnostic deduplication, extension MCP unloading, and main registry maintenance implemented?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/tools/mcp-client-manager.ts"
@@ -2745,7 +2741,7 @@
         },
         {
           "id": "gemini-cli-015",
-          "question": "tool policy 规则如何匹配工具名、MCP 名称、argsPattern、approval mode、subagent、annotations，并给出 allow/deny/ask_user 决策？",
+          "question": "How do tool policy rules match tool names, MCP names, argsPattern, approval mode, subagent, and annotations, and return allow/deny/ask_user decisions?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/policy/policy-engine.ts"
@@ -2766,7 +2762,7 @@
         },
         {
           "id": "gemini-cli-016",
-          "question": "安全 checker 如何运行 in-process 或 external checker、构建上下文、处理超时并校验 checker 返回结果？",
+          "question": "How does the security checker run in-process or external checkers, build context, handle timeouts, and validate checker results?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/safety/checker-runner.ts"
@@ -2788,7 +2784,7 @@
         },
         {
           "id": "gemini-cli-017",
-          "question": "上下文管理器如何把 chat history 同步成 graph、执行 pipeline、触发压缩/裁剪、渲染最终发给 LLM 的 history？",
+          "question": "How does the context manager synchronize chat history into a graph, run the pipeline, trigger compaction or trimming, and render the final history sent to the LLM?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/context/contextManager.ts"
@@ -2809,7 +2805,7 @@
         },
         {
           "id": "gemini-cli-018",
-          "question": "CLI 侧 extension 的安装、更新、启用状态、安全限制、integrity、consent、settings prompt 和 skills/agents 加载在哪里实现？",
+          "question": "Where are CLI extension install, update, enabled state, security limits, integrity, consent, settings prompts, and skills/agents loading implemented?",
           "expected": {
             "primaryPaths": [
               "packages/cli/src/config/extension-manager.ts"
@@ -2831,7 +2827,7 @@
         },
         {
           "id": "gemini-cli-019",
-          "question": "CLI 如何连接 IDE companion extension、验证 workspace、选择 HTTP 或 stdio transport、打开 IDE diff 并监听状态变化？",
+          "question": "How does the CLI connect to the IDE companion extension, verify the workspace, choose HTTP or stdio transport, open IDE diffs, and listen for status changes?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/ide/ide-client.ts"
@@ -2853,7 +2849,7 @@
         },
         {
           "id": "gemini-cli-020",
-          "question": "OpenTelemetry 遥测 SDK 初始化、OTLP/gcp/file/console exporter 选择、CLI auth 延迟初始化和 telemetry buffer 刷新在哪里实现？",
+          "question": "Where are OpenTelemetry SDK initialization, OTLP/GCP/file/console exporter selection, deferred CLI auth initialization, and telemetry buffer flushing implemented?",
           "expected": {
             "primaryPaths": [
               "packages/core/src/telemetry/sdk.ts"
@@ -2881,7 +2877,7 @@
       "cases": [
         {
           "id": "new-api-001",
-          "question": "服务启动时 Gin server、session、中间件和总路由挂载流程在哪里实现？",
+          "question": "Where is the service startup flow implemented, including the Gin server, session setup, middleware, and main route mounting?",
           "expected": {
             "primaryPaths": [
               "main.go"
@@ -2898,7 +2894,7 @@
         },
         {
           "id": "new-api-002",
-          "question": "根据 FRONTEND_BASE_URL 决定本地静态前端还是重定向外部前端的逻辑在哪里？",
+          "question": "Where is the logic that decides between local static frontend serving and redirecting to an external frontend based on FRONTEND_BASE_URL?",
           "expected": {
             "primaryPaths": [
               "router/main.go"
@@ -2916,7 +2912,7 @@
         },
         {
           "id": "new-api-003",
-          "question": "/api 下用户、订阅、渠道、配置等管理接口的路由分组在哪里集中声明？",
+          "question": "Where are the /api route groups for user, subscription, channel, config, and other management endpoints centrally declared?",
           "expected": {
             "primaryPaths": [
               "router/api-router.go"
@@ -2934,7 +2930,7 @@
         },
         {
           "id": "new-api-004",
-          "question": "OpenAI 兼容的 /v1/chat/completions、/v1/responses、/v1/embeddings 等 relay 路由在哪里注册？",
+          "question": "Where are OpenAI-compatible relay routes such as /v1/chat/completions, /v1/responses, and /v1/embeddings registered?",
           "expected": {
             "primaryPaths": [
               "router/relay-router.go"
@@ -2952,7 +2948,7 @@
         },
         {
           "id": "new-api-005",
-          "question": "relay 请求从校验请求、生成 RelayInfo、敏感词检查、预扣费到重试渠道调用的主流程在哪里？",
+          "question": "Where is the main relay flow implemented, from request validation, RelayInfo generation, sensitive-word checks, and pre-charge to retrying channel calls?",
           "expected": {
             "primaryPaths": [
               "controller/relay.go"
@@ -2972,7 +2968,7 @@
         },
         {
           "id": "new-api-006",
-          "question": "根据请求 model、token 限制、auto 分组和渠道亲和性选择渠道的中间件在哪里？",
+          "question": "Where is the middleware that selects channels based on request model, token limits, auto groups, and channel affinity?",
           "expected": {
             "primaryPaths": [
               "middleware/distributor.go"
@@ -2991,7 +2987,7 @@
         },
         {
           "id": "new-api-007",
-          "question": "auto 分组下跨分组重试和按优先级选择满足模型的渠道在哪里实现？",
+          "question": "Where are cross-group retries under auto groups and priority-based selection of channels that satisfy a model implemented?",
           "expected": {
             "primaryPaths": [
               "service/channel_select.go"
@@ -3009,7 +3005,7 @@
         },
         {
           "id": "new-api-008",
-          "question": "根据 APIType 返回不同 provider adaptor 的总映射表在哪里？",
+          "question": "Where is the central mapping table that returns different provider adaptors based on APIType?",
           "expected": {
             "primaryPaths": [
               "relay/relay_adaptor.go"
@@ -3028,7 +3024,7 @@
         },
         {
           "id": "new-api-009",
-          "question": "用户 session 鉴权、Authorization access token 兜底、New-Api-User 头校验和角色权限检查在哪里实现？",
+          "question": "Where are user session authentication, fallback Authorization access tokens, New-Api-User header validation, and role permission checks implemented?",
           "expected": {
             "primaryPaths": [
               "middleware/auth.go"
@@ -3048,7 +3044,7 @@
         },
         {
           "id": "new-api-010",
-          "question": "API token 的数据结构、key 掩码、模糊搜索限制和 token 有效性校验在哪里？",
+          "question": "Where are API token data structures, key masking, fuzzy-search limits, and token validity checks implemented?",
           "expected": {
             "primaryPaths": [
               "model/token.go"
@@ -3068,7 +3064,7 @@
         },
         {
           "id": "new-api-011",
-          "question": "用户创建 token 时校验名称长度、额度范围、最大 token 数量并生成 key 的接口在哪里？",
+          "question": "Where is the endpoint implemented for validating token name length, quota range, and maximum token count before generating a key for a user-created token?",
           "expected": {
             "primaryPaths": [
               "controller/token.go"
@@ -3085,7 +3081,7 @@
         },
         {
           "id": "new-api-012",
-          "question": "模型价格、倍率、分组倍率、缓存/音频/图片倍率和预扣额度计算在哪里？",
+          "question": "Where are model pricing, multipliers, group multipliers, cache/audio/image multipliers, and pre-charge quota calculations implemented?",
           "expected": {
             "primaryPaths": [
               "relay/helper/price.go"
@@ -3104,7 +3100,7 @@
         },
         {
           "id": "new-api-013",
-          "question": "预扣用户额度、信任额度跳过预扣、失败返还预扣额度的逻辑在哪里？",
+          "question": "Where is the logic implemented for pre-charging user quota, skipping pre-charge for trusted quota, and returning pre-charged quota on failure?",
           "expected": {
             "primaryPaths": [
               "service/pre_consume_quota.go"
@@ -3122,7 +3118,7 @@
         },
         {
           "id": "new-api-014",
-          "question": "通用配置模块的注册、从数据库加载、保存到数据库以及反射字段更新在哪里？",
+          "question": "Where is the generic option module implemented, including registration, loading from database, saving to database, and reflection-based field updates?",
           "expected": {
             "primaryPaths": [
               "setting/config/config.go"
@@ -3143,15 +3139,10 @@
         },
         {
           "id": "new-api-015",
-          "question": "2FA 或 Passkey 的通用安全验证接口在哪里写入 secure verification session？",
+          "question": "Where does the common 2FA or Passkey security verification endpoint write secure verification sessions?",
           "expected": {
             "primaryPaths": [
               "controller/secure_verification.go"
-            ],
-            "acceptablePaths": [
-              "middleware/secure_verification.go",
-              "controller/passkey.go",
-              "model/twofa.go"
             ],
             "primarySymbols": [
               "UniversalVerify",
@@ -3163,7 +3154,7 @@
         },
         {
           "id": "new-api-016",
-          "question": "要求敏感管理操作必须在 5 分钟内完成安全验证的中间件在哪里？",
+          "question": "Where is the middleware that requires sensitive admin operations to complete security verification within five minutes?",
           "expected": {
             "primaryPaths": [
               "middleware/secure_verification.go"
@@ -3182,7 +3173,7 @@
         },
         {
           "id": "new-api-017",
-          "question": "渠道模型里多 key 模式、key 列表解析、轮询选择下一个启用 key 的代码在哪里？",
+          "question": "Where is multi-key mode implemented in the channel model, including key-list parsing and round-robin selection of the next enabled key?",
           "expected": {
             "primaryPaths": [
               "model/channel.go"
@@ -3202,14 +3193,10 @@
         },
         {
           "id": "new-api-018",
-          "question": "异步视频/Suno 等任务的任务模型、公开 task_id、私有上游 task id 和轮询计费上下文在哪里定义？",
+          "question": "Where are async video/Suno task models defined, including public task_id, private upstream task ID, and polling billing context?",
           "expected": {
             "primaryPaths": [
               "model/task.go"
-            ],
-            "acceptablePaths": [
-              "service/task_polling.go",
-              "relay/channel/task/taskcommon/helpers.go"
             ],
             "primarySymbols": [
               "Task",
@@ -3223,7 +3210,7 @@
         },
         {
           "id": "new-api-019",
-          "question": "后台轮询未完成任务、按平台分发更新、处理超时任务和调用任务 adaptor 的逻辑在哪里？",
+          "question": "Where is background polling implemented for unfinished tasks, platform-specific updates, timeout handling, and task adaptor calls?",
           "expected": {
             "primaryPaths": [
               "service/task_polling.go"
@@ -3244,7 +3231,7 @@
         },
         {
           "id": "new-api-020",
-          "question": "新版前端统一 axios 实例、New-Api-User 请求头、GET 去重和 401 全局处理在哪里？",
+          "question": "Where are the new frontend shared axios instance, New-Api-User request header, GET deduplication, and global 401 handling implemented?",
           "expected": {
             "primaryPaths": [
               "web/default/src/lib/api.ts"
@@ -3270,7 +3257,7 @@
       "cases": [
         {
           "id": "notepad-plus-plus-001",
-          "question": "Notepad++ 启动时解析命令行参数并处理单实例传参的入口在哪里实现？",
+          "question": "Where is the Notepad++ startup entry implemented for parsing command-line arguments and handling single-instance argument forwarding?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/winmain.cpp"
@@ -3288,7 +3275,7 @@
         },
         {
           "id": "notepad-plus-plus-002",
-          "question": "主窗口初始化、插件加载、菜单和工具栏初始化流程在哪里实现？",
+          "question": "Where are main-window initialization, plugin loading, menu initialization, and toolbar initialization implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/Notepad_plus.cpp"
@@ -3308,7 +3295,7 @@
         },
         {
           "id": "notepad-plus-plus-003",
-          "question": "文件打开、保存、另存为、关闭和会话文件载入这些 I/O 流程主要在哪里实现？",
+          "question": "Where are the main I/O flows implemented for opening, saving, saving as, closing files, and loading session files?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/NppIO.cpp"
@@ -3328,7 +3315,7 @@
         },
         {
           "id": "notepad-plus-plus-004",
-          "question": "Find/Replace 对话框的搜索、替换、Find All、Replace All 和搜索历史 UI 逻辑在哪里实现？",
+          "question": "Where is the Find/Replace dialog UI logic implemented, including search, replace, Find All, Replace All, and search history?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/ScintillaComponent/FindReplaceDlg.cpp"
@@ -3349,7 +3336,7 @@
         },
         {
           "id": "notepad-plus-plus-005",
-          "question": "自动补全、API 补全、路径补全、函数提示和成对字符插入逻辑在哪里实现？",
+          "question": "Where are autocomplete, API completion, path completion, function hints, and paired-character insertion implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/ScintillaComponent/AutoCompletion.cpp"
@@ -3369,7 +3356,7 @@
         },
         {
           "id": "notepad-plus-plus-006",
-          "question": "单个打开文档的 dirty 状态、编码、语言类型、文件名和外部文件状态检查在哪里维护？",
+          "question": "Where is per-document state maintained, including dirty state, encoding, language type, file name, and external file status checks?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/ScintillaComponent/Buffer.cpp"
@@ -3390,7 +3377,7 @@
         },
         {
           "id": "notepad-plus-plus-007",
-          "question": "文档标签页和 BufferID 的对应关系、激活标签、关闭标签、标签颜色更新在哪里实现？",
+          "question": "Where are document tab to BufferID mappings, active tab changes, tab closing, and tab color updates implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/ScintillaComponent/DocTabView.cpp"
@@ -3411,7 +3398,7 @@
         },
         {
           "id": "notepad-plus-plus-008",
-          "question": "配置文件加载、XML 更新、用户参数、语言和样式配置读取在哪里实现？",
+          "question": "Where are config file loading, XML updates, user parameters, language config, and style config reading implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/Parameters.cpp"
@@ -3431,7 +3418,7 @@
         },
         {
           "id": "notepad-plus-plus-009",
-          "question": "查找历史 FindHistory 从 XML 读取和写回配置文件的逻辑在哪里实现？",
+          "question": "Where is FindHistory read from XML and written back to the config file?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/Parameters.cpp"
@@ -3450,7 +3437,7 @@
         },
         {
           "id": "notepad-plus-plus-010",
-          "question": "快捷键映射器的分类页、过滤、网格填充和按键冲突检查在哪里实现？",
+          "question": "Where are shortcut mapper category pages, filtering, grid population, and key-conflict checks implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/WinControls/Grid/ShortcutMapper.cpp"
@@ -3471,7 +3458,7 @@
         },
         {
           "id": "notepad-plus-plus-011",
-          "question": "停靠面板的创建、显示隐藏、浮动容器切换和停靠容器大小管理在哪里实现？",
+          "question": "Where are docking panel creation, show/hide, floating container switching, and dock container size management implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/WinControls/DockingWnd/DockingManager.cpp"
@@ -3492,7 +3479,7 @@
         },
         {
           "id": "notepad-plus-plus-012",
-          "question": "插件 DLL 加载、插件菜单注册、插件命令执行和通知广播在哪里实现？",
+          "question": "Where are plugin DLL loading, plugin menu registration, plugin command execution, and notification broadcasting implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/MISC/PluginsManager/PluginsManager.cpp"
@@ -3514,7 +3501,7 @@
         },
         {
           "id": "notepad-plus-plus-013",
-          "question": "Plugins Admin 从 JSON 初始化插件列表、安装更新卸载插件和搜索插件列表在哪里实现？",
+          "question": "Where does Plugins Admin initialize the plugin list from JSON, install/update/uninstall plugins, and search the plugin list?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/WinControls/PluginsAdmin/pluginsAdmin.cpp"
@@ -3536,7 +3523,7 @@
         },
         {
           "id": "notepad-plus-plus-014",
-          "question": "内置文件浏览器的目录树构建、根目录管理、选中文件定位和文件变化同步在哪里实现？",
+          "question": "Where is the built-in file browser implemented, including directory tree construction, root directory management, selected-file location, and file-change synchronization?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/WinControls/FileBrowser/fileBrowser.cpp"
@@ -3558,7 +3545,7 @@
         },
         {
           "id": "notepad-plus-plus-015",
-          "question": "Project Panel 的 workspace 打开、保存、XML 构建、相对路径处理和递归添加文件在哪里实现？",
+          "question": "Where are Project Panel workspace open/save, XML construction, relative path handling, and recursive file addition implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/WinControls/ProjectPanel/ProjectPanel.cpp"
@@ -3580,7 +3567,7 @@
         },
         {
           "id": "notepad-plus-plus-016",
-          "question": "Function List 如何解析当前文档中的函数、注释区域和子级结构，核心解析逻辑在哪里？",
+          "question": "How does Function List parse functions, comment regions, and child structures in the current document, and where is the core parser logic?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/WinControls/FunctionList/functionParser.cpp"
@@ -3601,7 +3588,7 @@
         },
         {
           "id": "notepad-plus-plus-017",
-          "question": "Document Map 的缩略视图刷新、滚动同步、折叠同步和临时显示其他 Buffer 在哪里实现？",
+          "question": "Where are Document Map thumbnail refresh, scroll synchronization, fold synchronization, and temporary display of another Buffer implemented?",
           "expected": {
             "primaryPaths": [
               "PowerEditor/src/WinControls/DocumentMap/documentMap.cpp"
@@ -3623,7 +3610,7 @@
         },
         {
           "id": "notepad-plus-plus-018",
-          "question": "Scintilla 文本缓冲区的插入、删除、行索引、只读状态和 undo/redo 栈在哪里实现？",
+          "question": "Where are Scintilla text buffer insertion, deletion, line indexing, read-only state, and undo/redo stack implemented?",
           "expected": {
             "primaryPaths": [
               "scintilla/src/CellBuffer.cxx"
@@ -3647,7 +3634,7 @@
         },
         {
           "id": "notepad-plus-plus-019",
-          "question": "Lexilla 的 lexer 模块如何封装语言词法分析、折叠函数和 WordList 描述，通用模块代码在哪里？",
+          "question": "How do Lexilla lexer modules wrap language lexing, folding functions, and WordList descriptions, and where is the common module code?",
           "expected": {
             "primaryPaths": [
               "lexilla/lexlib/LexerModule.cxx"
@@ -3669,7 +3656,7 @@
         },
         {
           "id": "notepad-plus-plus-020",
-          "question": "基于 Boost 的正则搜索如何在 UTF-8/ANSI 文档上执行前向、后向搜索和替换文本生成？",
+          "question": "How does Boost-based regex search perform forward and backward searches and replacement-text generation on UTF-8 and ANSI documents?",
           "expected": {
             "primaryPaths": [
               "boostregex/BoostRegExSearch.cxx"
@@ -3698,7 +3685,7 @@
       "cases": [
         {
           "id": "ripgrep-001",
-          "question": "ripgrep 的主入口如何根据解析后的参数选择搜索、列文件、列类型或生成补全等运行模式？",
+          "question": "How does the ripgrep main entry choose run modes such as searching, listing files, listing types, or generating completions from parsed arguments?",
           "expected": {
             "primaryPaths": [
               "crates/core/main.rs"
@@ -3717,7 +3704,7 @@
         },
         {
           "id": "ripgrep-002",
-          "question": "单线程搜索和多线程搜索的顶层流程分别在哪里实现，如何遍历 haystack 并调用 search worker？",
+          "question": "Where are the top-level flows for single-threaded and multi-threaded search implemented, and how do they traverse haystacks and call search workers?",
           "expected": {
             "primaryPaths": [
               "crates/core/main.rs"
@@ -3736,7 +3723,7 @@
         },
         {
           "id": "ripgrep-003",
-          "question": "命令行参数是在哪里解析成 LowArgs，并在什么地方处理 --help、--version 这类短路模式？",
+          "question": "Where are command-line arguments parsed into LowArgs, and where are short-circuit modes such as --help and --version handled?",
           "expected": {
             "primaryPaths": [
               "crates/core/flags/parse.rs"
@@ -3756,7 +3743,7 @@
         },
         {
           "id": "ripgrep-004",
-          "question": "RIPGREP_CONFIG_PATH 配置文件是在哪里读取并转换成附加命令行参数的？",
+          "question": "Where is the RIPGREP_CONFIG_PATH config file read and converted into additional command-line arguments?",
           "expected": {
             "primaryPaths": [
               "crates/core/flags/config.rs"
@@ -3774,7 +3761,7 @@
         },
         {
           "id": "ripgrep-005",
-          "question": "LowArgs 转换为 HiArgs 时，线程数、默认行号、heading、mmap 策略等高层行为在哪里决定？",
+          "question": "When LowArgs are converted to HiArgs, where are high-level behaviors such as thread count, default line numbers, heading, and mmap strategy decided?",
           "expected": {
             "primaryPaths": [
               "crates/core/flags/hiargs.rs"
@@ -3791,7 +3778,7 @@
         },
         {
           "id": "ripgrep-006",
-          "question": "根据 --engine default、--engine pcre2 或 auto 选择 Rust regex 或 PCRE2 matcher 的逻辑在哪里？",
+          "question": "Where is matcher selection implemented for --engine default, --engine pcre2, or auto between Rust regex and PCRE2?",
           "expected": {
             "primaryPaths": [
               "crates/core/flags/hiargs.rs"
@@ -3812,7 +3799,7 @@
         },
         {
           "id": "ripgrep-007",
-          "question": "搜索时如何把 matcher、searcher 和 printer 组合成一个可复用的搜索执行单元？",
+          "question": "How are matcher, searcher, and printer combined into a reusable search execution unit?",
           "expected": {
             "primaryPaths": [
               "crates/core/search.rs"
@@ -3832,7 +3819,7 @@
         },
         {
           "id": "ripgrep-008",
-          "question": "搜索文件前如何决定走 stdin、preprocessor、decompression 还是直接搜索路径？",
+          "question": "Before searching a file, how does ripgrep decide whether to use stdin, a preprocessor, decompression, or direct path search?",
           "expected": {
             "primaryPaths": [
               "crates/core/search.rs"
@@ -3854,7 +3841,7 @@
         },
         {
           "id": "ripgrep-009",
-          "question": "Haystack 如何判断一个目录遍历项是否应该成为实际搜索对象，以及显式路径为何会被保留？",
+          "question": "How does Haystack decide whether a directory traversal entry should become an actual search target, and why are explicit paths preserved?",
           "expected": {
             "primaryPaths": [
               "crates/core/haystack.rs"
@@ -3874,7 +3861,7 @@
         },
         {
           "id": "ripgrep-010",
-          "question": "递归目录遍历和并行遍历的 builder、Walk 与 WalkParallel 在哪里实现？",
+          "question": "Where are recursive directory traversal and parallel traversal builders, Walk, and WalkParallel implemented?",
           "expected": {
             "primaryPaths": [
               "crates/ignore/src/walk.rs"
@@ -3895,7 +3882,7 @@
         },
         {
           "id": "ripgrep-011",
-          "question": ".gitignore、全局 git ignore 和父目录 ignore 规则的解析与匹配在哪里实现？",
+          "question": "Where are .gitignore, global git ignore, and parent-directory ignore rules parsed and matched?",
           "expected": {
             "primaryPaths": [
               "crates/ignore/src/gitignore.rs"
@@ -3915,7 +3902,7 @@
         },
         {
           "id": "ripgrep-012",
-          "question": "-g/--glob 这类 override glob 如何被构建并影响路径包含或排除？",
+          "question": "How are override globs such as -g/--glob built and applied to include or exclude paths?",
           "expected": {
             "primaryPaths": [
               "crates/ignore/src/overrides.rs"
@@ -3935,7 +3922,7 @@
         },
         {
           "id": "ripgrep-013",
-          "question": "--type、--type-not、--type-add 和默认文件类型定义的匹配逻辑在哪里？",
+          "question": "Where is matching logic implemented for --type, --type-not, --type-add, and default file type definitions?",
           "expected": {
             "primaryPaths": [
               "crates/ignore/src/types.rs"
@@ -3957,7 +3944,7 @@
         },
         {
           "id": "ripgrep-014",
-          "question": "glob 模式如何被解析、转换成正则，并选择 literal、extension、prefix 等快速匹配策略？",
+          "question": "How are glob patterns parsed, converted into regex, and optimized using literal, extension, prefix, and other fast matching strategies?",
           "expected": {
             "primaryPaths": [
               "crates/globset/src/glob.rs"
@@ -3976,7 +3963,7 @@
         },
         {
           "id": "ripgrep-015",
-          "question": "普通 grep 风格输出的路径、行号、列号、颜色、替换、only-matching 等行为在哪里配置？",
+          "question": "Where is normal grep-style output configured, including path, line number, column, color, replacement, and only-matching behavior?",
           "expected": {
             "primaryPaths": [
               "crates/printer/src/standard.rs"
@@ -3996,7 +3983,7 @@
         },
         {
           "id": "ripgrep-016",
-          "question": "--json 输出的 begin、match、context、end 消息和 text/bytes 编码规则在哪里实现？",
+          "question": "Where are --json output begin, match, context, and end messages implemented, including text/bytes encoding rules?",
           "expected": {
             "primaryPaths": [
               "crates/printer/src/json.rs"
@@ -4015,7 +4002,7 @@
         },
         {
           "id": "ripgrep-017",
-          "question": "--count、--count-matches、--files-with-matches、--quiet 等摘要类输出在哪里实现？",
+          "question": "Where are summary output modes such as --count, --count-matches, --files-with-matches, and --quiet implemented?",
           "expected": {
             "primaryPaths": [
               "crates/printer/src/summary.rs"
@@ -4035,7 +4022,7 @@
         },
         {
           "id": "ripgrep-018",
-          "question": "搜索统计项如 searches、bytes_searched、matched_lines、matches 是在哪里定义和累加的？",
+          "question": "Where are search statistics such as searches, bytes_searched, matched_lines, and matches defined and accumulated?",
           "expected": {
             "primaryPaths": [
               "crates/printer/src/stats.rs"
@@ -4057,7 +4044,7 @@
         },
         {
           "id": "ripgrep-019",
-          "question": "Rust regex matcher 的配置如何把 fixed strings、smart case、whole-line、word、line terminator 和 size limit 应用到 HIR？",
+          "question": "How does Rust regex matcher configuration apply fixed strings, smart case, whole-line, word, line terminator, and size limit to HIR?",
           "expected": {
             "primaryPaths": [
               "crates/regex/src/config.rs"
@@ -4080,7 +4067,7 @@
         },
         {
           "id": "ripgrep-020",
-          "question": "--search-zip 的压缩文件识别、解压命令匹配和 streaming reader 构建在哪里实现？",
+          "question": "Where are --search-zip compressed-file detection, decompression-command matching, and streaming reader construction implemented?",
           "expected": {
             "primaryPaths": [
               "crates/cli/src/decompress.rs"
@@ -4107,7 +4094,7 @@
       "cases": [
         {
           "id": "uv-001",
-          "question": "uv 顶层 CLI 参数、全局选项和子命令枚举在哪里定义？",
+          "question": "Where are uv top-level CLI arguments, global options, and subcommand enums defined?",
           "expected": {
             "primaryPaths": [
               "crates/uv-cli/src/lib.rs"
@@ -4127,7 +4114,7 @@
         },
         {
           "id": "uv-002",
-          "question": "uv 启动后如何解析全局状态并分发到具体命令的主流程在哪里实现？",
+          "question": "After uv starts, where is global state parsed and dispatched to concrete commands?",
           "expected": {
             "primaryPaths": [
               "crates/uv/src/lib.rs"
@@ -4146,7 +4133,7 @@
         },
         {
           "id": "uv-003",
-          "question": "全局 settings 如何从 CLI、环境变量和配置文件合并解析？",
+          "question": "How are global settings merged and parsed from CLI arguments, environment variables, and config files?",
           "expected": {
             "primaryPaths": [
               "crates/uv/src/settings.rs"
@@ -4166,7 +4153,7 @@
         },
         {
           "id": "uv-004",
-          "question": "uv sync 如何发现项目或脚本目标、创建环境并执行同步安装？",
+          "question": "How does uv sync discover project or script targets, create environments, and perform synchronized installation?",
           "expected": {
             "primaryPaths": [
               "crates/uv/src/commands/project/sync.rs"
@@ -4186,7 +4173,7 @@
         },
         {
           "id": "uv-005",
-          "question": "uv run 对 PEP 723 脚本、额外 requirements、env-file 和递归限制的处理在哪里？",
+          "question": "Where does uv run handle PEP 723 scripts, extra requirements, env-file input, and recursion limits?",
           "expected": {
             "primaryPaths": [
               "crates/uv/src/commands/project/run.rs"
@@ -4207,7 +4194,7 @@
         },
         {
           "id": "uv-006",
-          "question": "uv pip install 读取 requirements、constraints、选择解释器并安装包的流程在哪里？",
+          "question": "Where is the uv pip install flow implemented, including reading requirements and constraints, selecting an interpreter, and installing packages?",
           "expected": {
             "primaryPaths": [
               "crates/uv/src/commands/pip/install.rs"
@@ -4225,7 +4212,7 @@
         },
         {
           "id": "uv-007",
-          "question": "uvx ��� uv tool run 如何解析目标工具、处理 --from、临时环境并运行入口？",
+          "question": "How do uvx and uv tool run parse target tools, handle --from, create temporary environments, and run entry points?",
           "expected": {
             "primaryPaths": [
               "crates/uv/src/commands/tool/run.rs"
@@ -4246,7 +4233,7 @@
         },
         {
           "id": "uv-008",
-          "question": "依赖解析器的 PubGrub 主求解状态、fork 和 resolution 初始化在哪里实现？",
+          "question": "Where are the dependency resolver PubGrub main solving state, forks, and resolution initialization implemented?",
           "expected": {
             "primaryPaths": [
               "crates/uv-resolver/src/resolver/mod.rs"
@@ -4267,7 +4254,7 @@
         },
         {
           "id": "uv-009",
-          "question": "解析依赖时如何在 lockfile preference、已安装包和远程版本之间选择候选版本？",
+          "question": "When resolving dependencies, how are candidate versions chosen between lockfile preferences, installed packages, and remote versions?",
           "expected": {
             "primaryPaths": [
               "crates/uv-resolver/src/candidate_selector.rs"
@@ -4288,7 +4275,7 @@
         },
         {
           "id": "uv-010",
-          "question": "resolver 如何通过网络或缓存读取 package versions 与 wheel metadata？",
+          "question": "How does the resolver read package versions and wheel metadata from the network or cache?",
           "expected": {
             "primaryPaths": [
               "crates/uv-resolver/src/resolver/provider.rs"
@@ -4308,7 +4295,7 @@
         },
         {
           "id": "uv-011",
-          "question": "从 registry、URL、path 或 Git distribution 获取 wheel、构建 sdist 并管理缓存锁的高层接口在哪里？",
+          "question": "Where is the high-level interface for fetching wheels, building sdists, and managing cache locks from registry, URL, path, or Git distributions?",
           "expected": {
             "primaryPaths": [
               "crates/uv-distribution/src/distribution_database.rs"
@@ -4329,7 +4316,7 @@
         },
         {
           "id": "uv-012",
-          "question": "安装已解压 wheel 时如何校验 dist-info、写 entry points、处理 .data 并更新 RECORD？",
+          "question": "When installing an unpacked wheel, how are dist-info validated, entry points written, .data handled, and RECORD updated?",
           "expected": {
             "primaryPaths": [
               "crates/uv-install-wheel/src/install.rs"
@@ -4350,7 +4337,7 @@
         },
         {
           "id": "uv-013",
-          "question": "Python 解释器请求如何解析，并按 managed/system/virtualenv 策略发现可用解释器？",
+          "question": "How are Python interpreter requests parsed, and how are available interpreters discovered according to managed, system, or virtualenv policy?",
           "expected": {
             "primaryPaths": [
               "crates/uv-python/src/discovery.rs"
@@ -4372,7 +4359,7 @@
         },
         {
           "id": "uv-014",
-          "question": "managed Python 下载列表、镜像 URL、hash 校验和下载重试在哪里实现？",
+          "question": "Where are managed Python download lists, mirror URLs, hash verification, and download retries implemented?",
           "expected": {
             "primaryPaths": [
               "crates/uv-python/src/downloads.rs"
@@ -4393,7 +4380,7 @@
         },
         {
           "id": "uv-015",
-          "question": "uv venv 创建虚拟环境、写 pyvenv.cfg 和生成激活脚本的底层实现在哪里？",
+          "question": "Where is the low-level implementation of uv venv for creating virtual environments, writing pyvenv.cfg, and generating activation scripts?",
           "expected": {
             "primaryPaths": [
               "crates/uv-virtualenv/src/virtualenv.rs"
@@ -4414,7 +4401,7 @@
         },
         {
           "id": "uv-016",
-          "question": "workspace 如何发现成员、缓存 discovery 结果并处理重复包名或嵌套 workspace 错误？",
+          "question": "How does workspace discovery find members, cache discovery results, and handle duplicate package names or nested workspace errors?",
           "expected": {
             "primaryPaths": [
               "crates/uv-workspace/src/workspace.rs"
@@ -4436,7 +4423,7 @@
         },
         {
           "id": "uv-017",
-          "question": "pyproject.toml 中 project、tool.uv.sources、tool.uv.workspace 和 dependency-groups 如何解析？",
+          "question": "How are project, tool.uv.sources, tool.uv.workspace, and dependency-groups parsed from pyproject.toml?",
           "expected": {
             "primaryPaths": [
               "crates/uv-workspace/src/pyproject.rs"
@@ -4457,7 +4444,7 @@
         },
         {
           "id": "uv-018",
-          "question": "requirements.txt 文件如何解析 include、constraints、editable、hash 和 unsupported options？",
+          "question": "How are requirements.txt files parsed, including include directives, constraints, editable requirements, hashes, and unsupported options?",
           "expected": {
             "primaryPaths": [
               "crates/uv-requirements-txt/src/lib.rs"
@@ -4479,7 +4466,7 @@
         },
         {
           "id": "uv-019",
-          "question": "HTTP 请求认证如何从 netrc、credential file、keyring、pyx token 和云端 provider 中补充 credentials？",
+          "question": "How does HTTP request authentication supplement credentials from netrc, credential files, keyring, pyx tokens, and cloud providers?",
           "expected": {
             "primaryPaths": [
               "crates/uv-auth/src/middleware.rs"
@@ -4502,7 +4489,7 @@
         },
         {
           "id": "uv-020",
-          "question": "uv 的 build backend 如何构建 wheel 和 source distribution，并生成 metadata/RECORD？",
+          "question": "How does the uv build backend build wheels and source distributions and generate metadata/RECORD?",
           "expected": {
             "primaryPaths": [
               "crates/uv-build-backend/src/wheel.rs",
@@ -4531,7 +4518,7 @@
       "cases": [
         {
           "id": "valkey-001",
-          "question": "Valkey 服务器启动时初始化全局 server 状态、事件循环和后台任务的入口在哪里实现？",
+          "question": "Where is the Valkey server startup entry implemented, including global server state initialization, event loop setup, and background tasks?",
           "expected": {
             "primaryPaths": [
               "src/server.c"
@@ -4549,7 +4536,7 @@
         },
         {
           "id": "valkey-002",
-          "question": "配置文件 valkey.conf 的解析、CONFIG GET/SET/REWRITE 命令以及配置项注册在哪里实现？",
+          "question": "Where are valkey.conf parsing, CONFIG GET/SET/REWRITE commands, and configuration item registration implemented?",
           "expected": {
             "primaryPaths": [
               "src/config.c"
@@ -4571,7 +4558,7 @@
         },
         {
           "id": "valkey-003",
-          "question": "客户端连接的读写缓冲、RESP 回复拼装、AUTH 状态和 CLIENT 命令处理主要在哪里实现？",
+          "question": "Where are client connection read/write buffers, RESP reply assembly, AUTH state, and CLIENT command handling mainly implemented?",
           "expected": {
             "primaryPaths": [
               "src/networking.c"
@@ -4594,7 +4581,7 @@
         },
         {
           "id": "valkey-004",
-          "question": "数据库 key 的查找、写入、删除、SCAN、SELECT、RENAME、COPY 和过期元数据访问在哪里实现？",
+          "question": "Where are database key lookup, write, delete, SCAN, SELECT, RENAME, COPY, and expiration metadata access implemented?",
           "expected": {
             "primaryPaths": [
               "src/db.c"
@@ -4621,7 +4608,7 @@
         },
         {
           "id": "valkey-005",
-          "question": "EXPIRE、PEXPIRE、TTL、PERSIST 命令和主动过期扫描流程在哪里实现？",
+          "question": "Where are EXPIRE, PEXPIRE, TTL, PERSIST commands and the active expiration scan flow implemented?",
           "expected": {
             "primaryPaths": [
               "src/expire.c"
@@ -4644,7 +4631,7 @@
         },
         {
           "id": "valkey-006",
-          "question": "maxmemory 策略、LRU/LFU/TTL 采样和内存淘汰循环在哪里实现？",
+          "question": "Where are maxmemory policies, LRU/LFU/TTL sampling, and the memory eviction loop implemented?",
           "expected": {
             "primaryPaths": [
               "src/evict.c"
@@ -4665,7 +4652,7 @@
         },
         {
           "id": "valkey-007",
-          "question": "AOF manifest、增量 AOF 写入、AOF 加载和 BGREWRITEAOF 重写流程在哪里实现？",
+          "question": "Where are AOF manifest handling, incremental AOF writing, AOF loading, and BGREWRITEAOF rewrite flow implemented?",
           "expected": {
             "primaryPaths": [
               "src/aof.c"
@@ -4688,7 +4675,7 @@
         },
         {
           "id": "valkey-008",
-          "question": "RDB 文件保存、加载、对象序列化、BGSAVE 和 SAVE 命令在哪里实现？",
+          "question": "Where are RDB file save/load, object serialization, BGSAVE, and SAVE commands implemented?",
           "expected": {
             "primaryPaths": [
               "src/rdb.c"
@@ -4712,7 +4699,7 @@
         },
         {
           "id": "valkey-009",
-          "question": "主从复制、PSYNC/SYNC、REPLCONF、复制 backlog 和 WAIT 命令在哪里处理？",
+          "question": "Where are primary-replica replication, PSYNC/SYNC, REPLCONF, replication backlog, and WAIT command handling implemented?",
           "expected": {
             "primaryPaths": [
               "src/replication.c"
@@ -4736,7 +4723,7 @@
         },
         {
           "id": "valkey-010",
-          "question": "Cluster 命令分发、hash slot 计算、MIGRATE/DUMP/RESTORE 和集群节点命令在哪里实现？",
+          "question": "Where are Cluster command dispatch, hash slot calculation, MIGRATE/DUMP/RESTORE, and cluster node commands implemented?",
           "expected": {
             "primaryPaths": [
               "src/cluster.c"
@@ -4760,7 +4747,7 @@
         },
         {
           "id": "valkey-011",
-          "question": "Sentinel 模式的 SENTINEL 命令、监控 primary、故障转移和 sentinel.conf 配置处理在哪里实现？",
+          "question": "Where are Sentinel mode SENTINEL commands, primary monitoring, failover, and sentinel.conf configuration handling implemented?",
           "expected": {
             "primaryPaths": [
               "src/sentinel.c"
@@ -4781,7 +4768,7 @@
         },
         {
           "id": "valkey-012",
-          "question": "ACL 用户规则解析、AUTH、ACL SETUSER/GETUSER/LOG 和权限检查在哪里实现？",
+          "question": "Where are ACL user rule parsing, AUTH, ACL SETUSER/GETUSER/LOG, and permission checks implemented?",
           "expected": {
             "primaryPaths": [
               "src/acl.c"
@@ -4804,7 +4791,7 @@
         },
         {
           "id": "valkey-013",
-          "question": "模块系统的 MODULE LOAD/UNLOAD/LIST、module API 注册、模块命令和模块数据类型在哪里实现？",
+          "question": "Where are MODULE LOAD/UNLOAD/LIST, module API registration, module commands, and module data types implemented?",
           "expected": {
             "primaryPaths": [
               "src/module.c"
@@ -4827,7 +4814,7 @@
         },
         {
           "id": "valkey-014",
-          "question": "SET、GET、MSET、INCR、APPEND、GETRANGE 等 string 类型命令在哪里实现？",
+          "question": "Where are string commands such as SET, GET, MSET, INCR, APPEND, and GETRANGE implemented?",
           "expected": {
             "primaryPaths": [
               "src/t_string.c"
@@ -4850,7 +4837,7 @@
         },
         {
           "id": "valkey-015",
-          "question": "Hash 类型的 HSET/HGET/HDEL/HSCAN 以及 field-level expire 命令在哪里实现？",
+          "question": "Where are hash commands such as HSET, HGET, HDEL, HSCAN, and field-level expire commands implemented?",
           "expected": {
             "primaryPaths": [
               "src/t_hash.c"
@@ -4874,7 +4861,7 @@
         },
         {
           "id": "valkey-016",
-          "question": "List 类型的 LPUSH/RPOP/LRANGE/BLPOP/LMPOP，以及 quicklist 编码相关命令逻辑在哪里实现？",
+          "question": "Where are list commands such as LPUSH, RPOP, LRANGE, BLPOP, and LMPOP, plus quicklist encoding command logic, implemented?",
           "expected": {
             "primaryPaths": [
               "src/t_list.c"
@@ -4897,7 +4884,7 @@
         },
         {
           "id": "valkey-017",
-          "question": "Set 类型的 SADD/SREM/SINTER/SUNION/SDIFF/SRANDMEMBER 和 intset 转换在哪里实现？",
+          "question": "Where are set commands such as SADD, SREM, SINTER, SUNION, SDIFF, and SRANDMEMBER, plus intset conversion, implemented?",
           "expected": {
             "primaryPaths": [
               "src/t_set.c"
@@ -4921,7 +4908,7 @@
         },
         {
           "id": "valkey-018",
-          "question": "Sorted Set 的 ZADD/ZRANGE/ZINTER/ZPOPMIN、skiplist/listpack 编码和范围查询在哪里实现？",
+          "question": "Where are sorted set commands such as ZADD, ZRANGE, ZINTER, and ZPOPMIN implemented, including skiplist/listpack encoding and range queries?",
           "expected": {
             "primaryPaths": [
               "src/t_zset.c"
@@ -4944,7 +4931,7 @@
         },
         {
           "id": "valkey-019",
-          "question": "Stream 类型的 XADD/XREAD/XGROUP/XACK/XPENDING 和 consumer group 逻辑在哪里实现？",
+          "question": "Where are stream commands such as XADD, XREAD, XGROUP, XACK, and XPENDING, plus consumer group logic, implemented?",
           "expected": {
             "primaryPaths": [
               "src/t_stream.c"
@@ -4968,7 +4955,7 @@
         },
         {
           "id": "valkey-020",
-          "question": "CMake 构建 valkey-server、valkey-cli、Lua/TLS/RDMA 模块和源文件清单在哪里配置？",
+          "question": "Where is the CMake build configuration for valkey-server, valkey-cli, Lua/TLS/RDMA modules, and source file lists?",
           "expected": {
             "primaryPaths": [
               "src/CMakeLists.txt",

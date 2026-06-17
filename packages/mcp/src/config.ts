@@ -1,5 +1,7 @@
-import { configManager } from "@hitmux/hitmux-context-engine-core";
+import corePackage from "@hitmux/hitmux-context-engine-core";
 import type { CodebaseIdentityMode } from "@hitmux/hitmux-context-engine-core";
+
+const { configManager } = corePackage;
 
 export interface ContextMcpConfig {
     name: string;
@@ -405,9 +407,11 @@ Safety override environment variable:
 Common config.conf fields:
  mcpServerName Server name
  mcpServerVersion Server version
-  Embedding Provider Configuration:
+ Embedding Provider Configuration:
  embeddingProvider Embedding provider: OpenAI, VoyageAI, Gemini, Ollama, OpenRouter (default: OpenRouter)
  embeddingModel Embedding model name (works for all providers)
+ embeddingBatchSize Embedding batch size for index operations (default: provider/model-specific)
+ embeddingConcurrency Embedding request concurrency for index operations (default: provider/model-specific)
   Provider-specific API Keys:
  openaiApiKey OpenAI API key (required for OpenAI provider)
  openaiBaseUrl OpenAI-compatible API base URL (optional, for custom endpoints)
@@ -475,6 +479,8 @@ Common config.conf fields:
 Example config.conf:
  embeddingProvider = OpenRouter
  embeddingModel = qwen/qwen3-embedding-4b
+ # embeddingBatchSize = 32
+ # embeddingConcurrency = 4
  openrouterApiKey = sk-or-xxx
  milvusAddress = localhost:19530
  milvusToken = your-token

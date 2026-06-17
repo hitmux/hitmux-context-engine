@@ -31,6 +31,15 @@ class TestEmbedding extends Embedding {
     }
 }
 
+class RecordingEmbedding extends TestEmbedding {
+    public batchInputs: string[][] = [];
+
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        this.batchInputs.push(texts);
+        return super.embedBatch(texts);
+    }
+}
+
 class RecordingSplitter implements Splitter {
     public calls: Array<{ code: string; language: string; filePath?: string }> = [];
 
@@ -69,7 +78,7 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     query: jest.fn().mockResolvedValue([]),
     getCollectionDescription: jest.fn().mockResolvedValue(''),
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
-    getCollectionRowCount: jest.fn().mockResolvedValue(-1),
+    getCollectionRowCount: jest.fn().mockResolvedValue(999),
 });
 
 describe('Context request-scoped splitters', () => {
@@ -204,6 +213,205 @@ describe('Context request-scoped splitters', () => {
             .flatMap(([, documents]) => documents);
         expect(insertedDocuments).toHaveLength(1);
         expect(insertedDocuments[0].relativePath).toBe('Token.sol');
+    });
+
+    it('indexes Jupyter notebooks from markdown and code cell source only', async () => {
+        const project = path.join(tempRoot, 'project-notebook');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'analysis.ipynb'), JSON.stringify({
+            metadata: {
+                privateNotebookMetadata: 'should not be indexed',
+            },
+            cells: [
+                {
+                    cell_type: 'markdown',
+                    metadata: { hidden: true },
+                    source: ['# Forecast Notes\n', 'important markdown'],
+                },
+                {
+                    cell_type: 'code',
+                    execution_count: 7,
+                    metadata: { trusted: true },
+                    source: 'print("indexed source")\n',
+                    outputs: [{
+                        output_type: 'display_data',
+                        data: {
+                            'image/png': 'base64-output-should-not-appear',
+                            'text/plain': 'output text should not appear',
+                        },
+                    }],
+                },
+                {
+                    cell_type: 'raw',
+                    source: 'raw cell should not appear',
+                },
+            ],
+        }));
+
+        const vectorDatabase = createVectorDatabase();
+        const splitter = new RecordingSplitter('context');
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: splitter,
+        });
+
+        await context.indexCodebase(project);
+
+        expect(splitter.calls).toHaveLength(1);
+        expect(splitter.calls[0]).toMatchObject({
+            language: 'jupyter',
+            filePath: path.join(project, 'analysis.ipynb'),
+        });
+        expect(splitter.calls[0].code).toContain('# Forecast Notes\nimportant markdown');
+        expect(splitter.calls[0].code).toContain('print("indexed source")');
+        expect(splitter.calls[0].code).not.toContain('base64-output-should-not-appear');
+        expect(splitter.calls[0].code).not.toContain('output text should not appear');
+        expect(splitter.calls[0].code).not.toContain('privateNotebookMetadata');
+        expect(splitter.calls[0].code).not.toContain('execution_count');
+        expect(splitter.calls[0].code).not.toContain('raw cell should not appear');
+    });
+
+    it('skips invalid Jupyter notebooks instead of indexing raw JSON text', async () => {
+        const project = path.join(tempRoot, 'project-invalid-notebook');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'broken.ipynb'), '{invalid json');
+
+        const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const vectorDatabase = createVectorDatabase();
+        const splitter = new RecordingSplitter('context');
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: splitter,
+        });
+
+        try {
+            await context.indexCodebase(project);
+            expect(splitter.calls).toHaveLength(0);
+            expect(vectorDatabase.insert).not.toHaveBeenCalled();
+            expect(warn).toHaveBeenCalledWith(expect.stringContaining('Skipping file'));
+        } finally {
+            warn.mockRestore();
+        }
+    });
+
+    it('deduplicates exact normalized duplicate chunks from the same file before embedding', async () => {
+        const project = path.join(tempRoot, 'project-dedupe');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'registry.ts'), 'ignored by fixed splitter');
+
+        const splitter: Splitter = {
+            async split(_code: string, language: string, filePath?: string): Promise<CodeChunk[]> {
+                return [
+                    {
+                        content: 'export const value = 1;\n',
+                        metadata: { startLine: 1, endLine: 1, language, filePath },
+                    },
+                    {
+                        content: '\n  export   const value = 1;  \n',
+                        metadata: { startLine: 10, endLine: 10, language, filePath, chunkRole: 'reference' },
+                    },
+                    {
+                        content: 'export const otherValue = 2;',
+                        metadata: { startLine: 20, endLine: 20, language, filePath },
+                    },
+                ];
+            },
+            setChunkSize(): void { },
+            setChunkOverlap(): void { },
+        };
+        const embedding = new RecordingEmbedding();
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding,
+            vectorDatabase,
+            codeSplitter: splitter,
+        });
+
+        await context.indexCodebase(project);
+
+        const embeddedTexts = embedding.batchInputs.flat();
+        expect(embeddedTexts).toEqual([
+            'export const value = 1;\n',
+            'export const otherValue = 2;',
+        ]);
+
+        const insertedDocuments = vectorDatabase.insert.mock.calls
+            .flatMap(([, documents]) => documents);
+        expect(insertedDocuments).toHaveLength(2);
+        expect(insertedDocuments.map(document => document.startLine)).toEqual([1, 20]);
+    });
+
+    it('keeps identical chunks from different files', async () => {
+        const project = path.join(tempRoot, 'project-cross-file-dedupe');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'first.ts'), 'ignored');
+        await fs.writeFile(path.join(project, 'second.ts'), 'ignored');
+
+        const splitter: Splitter = {
+            async split(_code: string, language: string, filePath?: string): Promise<CodeChunk[]> {
+                return [{
+                    content: 'export const shared = 1;',
+                    metadata: { startLine: 1, endLine: 1, language, filePath },
+                }];
+            },
+            setChunkSize(): void { },
+            setChunkOverlap(): void { },
+        };
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: splitter,
+        });
+
+        await context.indexCodebase(project);
+
+        const insertedDocuments = vectorDatabase.insert.mock.calls
+            .flatMap(([, documents]) => documents);
+        expect(insertedDocuments).toHaveLength(2);
+        expect(insertedDocuments.map(document => document.relativePath).sort()).toEqual(['first.ts', 'second.ts']);
+    });
+
+    it('keeps same-file chunks when normalized content hashes differ', async () => {
+        const project = path.join(tempRoot, 'project-similar-chunks');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'values.ts'), 'ignored by fixed splitter');
+
+        const splitter: Splitter = {
+            async split(_code: string, language: string, filePath?: string): Promise<CodeChunk[]> {
+                return [
+                    {
+                        content: 'export const value = 1;',
+                        metadata: { startLine: 1, endLine: 1, language, filePath },
+                    },
+                    {
+                        content: 'export const value = 2;',
+                        metadata: { startLine: 2, endLine: 2, language, filePath },
+                    },
+                ];
+            },
+            setChunkSize(): void { },
+            setChunkOverlap(): void { },
+        };
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: splitter,
+        });
+
+        await context.indexCodebase(project);
+
+        const insertedDocuments = vectorDatabase.insert.mock.calls
+            .flatMap(([, documents]) => documents);
+        expect(insertedDocuments).toHaveLength(2);
     });
 
     it('adds splitter definition symbols to definitionIdentifiers', async () => {

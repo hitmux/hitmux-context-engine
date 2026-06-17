@@ -96,12 +96,12 @@ export class ToolHandlers {
     > = new Map();
     private indexingStateLocks: Map<string, Promise<void>> = new Map();
     private vectorDatabaseSyncTimeoutMs: number;
-    private syncManager?: Pick<SyncManager, "getSyncStatus">;
+    private syncManager?: Pick<SyncManager, "getSyncStatus" | "syncCodebaseForSearch" | "trackCodebase">;
 
     constructor(
         context: Context,
         snapshotManager: SnapshotManager,
-        syncManager?: Pick<SyncManager, "getSyncStatus">,
+        syncManager?: Pick<SyncManager, "getSyncStatus" | "syncCodebaseForSearch" | "trackCodebase">,
     ) {
         this.context = context;
         this.snapshotManager = snapshotManager;
@@ -130,9 +130,13 @@ export class ToolHandlers {
     }
 
     public setSyncManager(
-        syncManager: Pick<SyncManager, "getSyncStatus">,
+        syncManager: Pick<SyncManager, "getSyncStatus" | "syncCodebaseForSearch" | "trackCodebase">,
     ): void {
         this.syncManager = syncManager;
+    }
+
+    private trackIndexedCodebase(codebasePath: string): void {
+        this.syncManager?.trackCodebase?.(codebasePath);
     }
 
     private formatElapsedMs(elapsedMs: number): string {
@@ -1079,18 +1083,9 @@ export class ToolHandlers {
                 }
 
                 try {
-                    const splitterType = resolveRequestSplitterType(
-                        info.requestSplitter,
-                    );
-                    const stats = await this.context.reindexByChange(
-                        codebasePath,
-                        undefined,
-                        info.requestIgnorePatterns || [],
-                        info.requestCustomExtensions || [],
-                        createRequestSplitter(splitterType),
-                        info.requestIgnoreFiles || [],
-                        info.requestMaxDepth,
-                    );
+                    const stats = this.syncManager?.syncCodebaseForSearch
+                        ? await this.syncManager.syncCodebaseForSearch(codebasePath)
+                        : await this.refreshCodebaseIndexBeforeSearchWithoutSyncManager(codebasePath, info);
 
                     if (
                         stats.added > 0 ||
@@ -1143,6 +1138,22 @@ export class ToolHandlers {
         } finally {
             writerLock.release();
         }
+    }
+
+    private async refreshCodebaseIndexBeforeSearchWithoutSyncManager(
+        codebasePath: string,
+        info: NonNullable<ReturnType<SnapshotManager["getCodebaseInfo"]>>,
+    ): Promise<{ added: number; removed: number; modified: number }> {
+        const splitterType = resolveRequestSplitterType(info.requestSplitter);
+        return this.context.reindexByChange(
+            codebasePath,
+            undefined,
+            info.requestIgnorePatterns || [],
+            info.requestCustomExtensions || [],
+            createRequestSplitter(splitterType),
+            info.requestIgnoreFiles || [],
+            info.requestMaxDepth,
+        );
     }
 
     private getMerkleTrackedFileCount(
@@ -2049,12 +2060,10 @@ export class ToolHandlers {
                                 absolutePath,
                             );
                             this.snapshotManager.saveCodebaseSnapshot();
-                            if (await this.context.hasIndex(absolutePath)) {
-                                console.log(
-                                    `[FORCE-REINDEX] Clearing index for '${absolutePath}'`,
-                                );
-                                await this.context.clearIndex(absolutePath);
-                            }
+                            console.log(
+                                `[FORCE-REINDEX] Clearing index for '${absolutePath}'`,
+                            );
+                            await this.context.clearIndex(absolutePath);
                         }
 
                         // CRITICAL: Pre-index collection creation validation
@@ -2283,6 +2292,7 @@ export class ToolHandlers {
             this.snapshotManager.clearCodebaseSyncWarning(absolutePath);
         }
         this.snapshotManager.saveCodebaseSnapshot();
+        this.trackIndexedCodebase(absolutePath);
 
         const pathInfo =
             originalPath !== absolutePath
@@ -2455,6 +2465,7 @@ export class ToolHandlers {
 
             // Save snapshot after updating codebase lists
             this.snapshotManager.saveCodebaseSnapshot();
+            this.trackIndexedCodebase(absolutePath);
 
             let message = `Background indexing completed for '${absolutePath}' using ${splitterType.toUpperCase()} splitter.\nIndexed ${stats.indexedFiles} files, ${stats.totalChunks} chunks.`;
             if (stats.status === "limit_reached") {

@@ -1,6 +1,6 @@
 {
     "name": "@hitmux/hitmux-context-engine-mcp",
-    "version": "0.1.21",
+    "version": "0.1.22",
     "description": "Model Context Protocol integration for Hitmux Context Engine",
     "type": "module",
     "main": "dist/index.js",
@@ -13,7 +13,7 @@
         "lint": "eslint src --ext .ts",
         "lint:fix": "eslint src --ext .ts --fix",
         "typecheck": "tsc --noEmit",
-        "test": "node --import tsx --test \"src/**/*.test.ts\"",
+        "test": "node --no-deprecation --import tsx --import ./src/test-silence.ts --test --test-reporter=dot \"src/**/*.test.ts\"",
         "start": "tsx src/index.ts",
         "start:with-config": "tsx src/index.ts",
         "prepublishOnly": "pnpm -w build:mcp"
@@ -21,6 +21,7 @@
     "dependencies": {
         "@hitmux/hitmux-context-engine-core": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.12.1",
+        "chokidar": "^4.0.3",
         "zod": "^3.25.55"
     },
     "devDependencies": {

@@ -810,6 +810,55 @@ test("search_code does not return stale results when pre-search sync exceeds the
     });
 });
 
+test("search_code does not return stale results when SyncManager pre-search sync exceeds the automatic limit", async () => {
+    await withTempDir(async (tempRoot) => {
+        const project = path.join(tempRoot, "repo");
+        await mkdir(project, { recursive: true });
+
+        let searchCalls = 0;
+        const context = {
+            getVectorDatabase: () => ({
+                listCollections: async () => []
+            }),
+            getEmbedding: () => ({
+                getProvider: () => "test"
+            }),
+            reindexByChange: async () => ({ added: 0, removed: 0, modified: 0 }),
+            semanticSearch: async () => {
+                searchCalls += 1;
+                return [];
+            }
+        } as any;
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(project, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+        const syncManager = {
+            getSyncStatus: () => undefined,
+            syncCodebaseForSearch: async () => {
+                throw new IncrementalIndexTooLargeError(5_001, 5_000, 1);
+            },
+            trackCodebase: () => undefined
+        };
+        const handlers = new ToolHandlers(context, snapshotManager, syncManager);
+
+        const result = await handlers.handleSearchCode({
+            path: project,
+            query: "runSearch"
+        });
+
+        assert.equal(result.isError, true);
+        assert.equal(searchCalls, 0);
+        assert.match(result.content[0].text, /requires a fresh index/);
+        assert.match(result.content[0].text, /index_codebase with incremental=true/);
+        const info = snapshotManager.getCodebaseInfo(project) as any;
+        assert.match(info.syncWarning, /5001 effective lines/);
+    });
+});
+
 test("search_code can skip the pre-search consistency check", async () => {
     await withTempDir(async (tempRoot) => {
         const project = path.join(tempRoot, "repo");

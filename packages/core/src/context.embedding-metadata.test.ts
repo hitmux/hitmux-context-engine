@@ -56,7 +56,7 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     query: jest.fn().mockResolvedValue([]),
     getCollectionDescription: jest.fn().mockResolvedValue(''),
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
-    getCollectionRowCount: jest.fn().mockResolvedValue(-1),
+    getCollectionRowCount: jest.fn().mockResolvedValue(999),
 });
 
 describe('Context embedding collection metadata', () => {
@@ -188,6 +188,7 @@ describe('Context embedding collection metadata', () => {
         const project = path.join(tempRoot, 'project');
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.hasCollection.mockResolvedValue(true);
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(1);
         vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project, 'model-a', 3));
 
         const context = new Context({

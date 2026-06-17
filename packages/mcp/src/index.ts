@@ -260,6 +260,7 @@ Search the indexed codebase with code-search style queries within a specified ab
 - You MUST provide an absolute path.
 - Do NOT pass a broad natural-language sentence as the only query when the user is asking where behavior is implemented.
 - Rewrite natural-language requests into focused code-search terms before calling this tool.
+- Strongly prefer English queries, even when the user's request is in another language.
 
 **When to Use**:
 This tool is versatile and can be used before completing various tasks to retrieve relevant context:
@@ -275,7 +276,7 @@ This tool is versatile and can be used before completing various tasks to retrie
 - If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first and recommending a project ignore file such as .hceignore.
 - You can then use the index_codebase tool to index the codebase before searching again.
 - For natural-language discovery tasks, generate one focused query per likely implementation angle instead of one broad sentence.
-- Include likely identifiers, class/function names, file names, path segments, and English code/domain terms.
+- Include likely identifiers, class/function names, file names, path segments, and English code/domain terms. Strongly prefer English for query terms.
 - Include scope hints such as client, server, shared, UI, network, rendering, storage, validation, worker, or route when relevant.
 - Prefer several short searches and compare their results by path, symbol, and content evidence.
 
@@ -378,7 +379,7 @@ This tool is versatile and can be used before completing various tasks to retrie
                                 query: {
                                     type: "string",
                                     description:
-                                        "Focused code-search query. Rewrite natural-language requests into likely identifiers, filenames, path words, English domain terms, and scope hints. Prefer multiple short searches over one broad sentence.",
+                                        "Focused code-search query. Strongly prefer English query terms. Rewrite natural-language requests into likely identifiers, filenames, path words, English domain terms, and scope hints. Prefer multiple short searches over one broad sentence.",
                                 },
                                 limit: {
                                     type: "number",

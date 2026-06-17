@@ -46,6 +46,7 @@ test("parallel index_codebase calls for the same path start only one background 
         };
         const context = {
             hasIndex: async () => false,
+            clearIndex: async () => undefined,
             getVectorDatabase: () => vectorDb
         } as any;
         const handlers = new ToolHandlers(context, snapshotManager);
@@ -70,6 +71,40 @@ test("parallel index_codebase calls for the same path start only one background 
     });
 });
 
+test("forced index_codebase clears existing collection state even when hasIndex is false", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        const vectorDb = {
+            checkCollectionLimit: async () => true
+        };
+        let clearCalls = 0;
+        const context = {
+            hasIndex: async () => false,
+            clearIndex: async (targetPath: string) => {
+                assert.equal(targetPath, codebasePath);
+                clearCalls += 1;
+            },
+            getVectorDatabase: () => vectorDb
+        } as any;
+        const handlers = new ToolHandlers(context, snapshotManager);
+
+        let backgroundStarts = 0;
+        (handlers as any).syncIndexedCodebasesFromCloud = async () => undefined;
+        (handlers as any).startBackgroundIndexing = async () => {
+            backgroundStarts += 1;
+        };
+
+        const result = await handlers.handleIndexCodebase({ path: codebasePath, force: true });
+
+        assert.equal(result.isError, undefined);
+        assert.equal(clearCalls, 1);
+        assert.equal(backgroundStarts, 1);
+    });
+});
+
 test("parallel forced index_codebase calls do not replace an active background job", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
@@ -81,6 +116,7 @@ test("parallel forced index_codebase calls do not replace an active background j
         };
         const context = {
             hasIndex: async () => false,
+            clearIndex: async () => undefined,
             getVectorDatabase: () => vectorDb
         } as any;
         const handlers = new ToolHandlers(context, snapshotManager);

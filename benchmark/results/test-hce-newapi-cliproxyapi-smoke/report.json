@@ -1,0 +1,79 @@
+{
+  "generatedAt": "2026-06-17T11:52:37.485Z",
+  "resultsPath": "/opt/hitmux-context-engine/benchmark/results/test-hce-newapi-cliproxyapi-smoke/results.jsonl",
+  "scoreVersion": "file-rank-v4",
+  "projects": [
+    {
+      "project": "CLIProxyAPI",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 72,
+      "primaryTop5": 11,
+      "primaryTop8": 12,
+      "primarySymbolTop5": 9,
+      "primarySymbolTop8": 10,
+      "expectedTop10": 14,
+      "expectedTop20": 18,
+      "manualReview": 9,
+      "failureTaxonomy": {
+        "expected_hit": 18,
+        "search_miss": 2,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 0,
+        "anchor_not_recalled": 5,
+        "anchor_recalled_but_reranked": 4
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "missingExpectedPaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100
+    },
+    {
+      "project": "new-api",
+      "total": 20,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 49,
+      "primaryTop5": 4,
+      "primaryTop8": 5,
+      "primarySymbolTop5": 3,
+      "primarySymbolTop8": 4,
+      "expectedTop10": 10,
+      "expectedTop20": 13,
+      "manualReview": 15,
+      "failureTaxonomy": {
+        "expected_hit": 13,
+        "search_miss": 7,
+        "empty_result": 0,
+        "search_error": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 0,
+        "anchor_not_recalled": 13,
+        "anchor_recalled_but_reranked": 3
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "missingExpectedPaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100
+    }
+  ]
+}
