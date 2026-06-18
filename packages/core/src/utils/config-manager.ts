@@ -49,6 +49,7 @@ export interface HitmuxConfig {
     projectWatcherDebounceMs?: number;
     projectWatcherUsePolling?: boolean;
     projectWatcherFallbackScanIntervalMs?: number;
+    projectWatcherIgnoredDirs?: string[];
     splitterType?: string;
     searchTopK?: number;
     searchThreshold?: number;
@@ -512,7 +513,7 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     },
     {
         key: 'backgroundSync',
-        description: 'Enable startup and periodic background sync.',
+        description: 'Enable startup and periodic background sync; project watcher event sync remains available when false.',
         example: 'true'
     },
     {
@@ -554,6 +555,11 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
         key: 'projectWatcherFallbackScanIntervalMs',
         description: 'Maximum time between full fallback scans while project watcher fast path is active.',
         example: '600000'
+    },
+    {
+        key: 'projectWatcherIgnoredDirs',
+        description: 'Directory names ignored by the project watcher; repeat the field for multiple values.',
+        example: 'node_modules'
     },
     {
         key: 'splitterType',

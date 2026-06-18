@@ -1,6 +1,6 @@
 {
     "name": "@hitmux/hitmux-context-engine-core",
-    "version": "0.1.22",
+    "version": "0.1.23",
     "description": "Core indexing engine for Hitmux Context Engine",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",

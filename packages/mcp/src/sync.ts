@@ -107,6 +107,10 @@ function isProjectWatcherPollingEnabled(): boolean {
     return configManager.getBoolean("projectWatcherUsePolling") ?? false;
 }
 
+function getProjectWatcherIgnoredDirectories(): string[] {
+    return configManager.getStringArray("projectWatcherIgnoredDirs");
+}
+
 function getProjectWatcherFallbackScanIntervalMs(): number {
     const value = configManager.getNumber("projectWatcherFallbackScanIntervalMs");
     if (value === undefined) {
@@ -146,6 +150,9 @@ export class SyncManager {
     private syncStatuses: Map<string, CodebaseSyncStatus> = new Map();
     private projectChangeTracker: ProjectChangeTracker | null = null;
     private lastFullScanMs: Map<string, number> = new Map();
+    private projectWatcherSyncTimers: Map<string, NodeJS.Timeout> = new Map();
+    private projectWatcherSyncActive: Set<string> = new Set();
+    private projectWatcherSyncQueued: Set<string> = new Set();
 
     constructor(context: Context, snapshotManager: SnapshotManager) {
         this.context = context;
@@ -154,7 +161,8 @@ export class SyncManager {
 
     private acquireGlobalSyncLock(): boolean {
         if (this.syncLock) {
-            return true;
+            console.log("[SYNC-DEBUG] Sync writer lock is already held by this manager. Skipping overlapping sync.");
+            return false;
         }
 
         this.syncLock = acquireMcpWriterLock("automatic sync");
@@ -365,9 +373,9 @@ export class SyncManager {
 
             if (!pathExists) {
                 console.warn(
-                    `[SYNC-DEBUG] Codebase path '${codebasePath}' no longer exists. Skipping sync.`,
+                    `[SYNC-DEBUG] Codebase path '${codebasePath}' no longer exists. Removing it from automatic sync tracking.`,
                 );
-                this.syncStatuses.delete(codebasePath);
+                this.removeMissingCodebaseFromTracking(codebasePath);
                 return { added: 0, removed: 0, modified: 0 };
             }
         } catch (pathError: any) {
@@ -492,6 +500,22 @@ export class SyncManager {
         }
     }
 
+    private removeMissingCodebaseFromTracking(codebasePath: string): void {
+        const timer = this.projectWatcherSyncTimers.get(codebasePath);
+        if (timer) {
+            clearTimeout(timer);
+            this.projectWatcherSyncTimers.delete(codebasePath);
+        }
+
+        this.projectWatcherSyncQueued.delete(codebasePath);
+        this.projectWatcherSyncActive.delete(codebasePath);
+        this.lastFullScanMs.delete(codebasePath);
+        this.syncStatuses.delete(codebasePath);
+        this.projectChangeTracker?.unwatch(codebasePath);
+        this.snapshotManager.removeCodebaseCompletely(codebasePath);
+        this.snapshotManager.saveCodebaseSnapshot();
+    }
+
     public startBackgroundSync(): void {
         console.log("[SYNC-DEBUG] startBackgroundSync() called");
 
@@ -598,6 +622,7 @@ export class SyncManager {
     }
 
     public async stopProjectWatcher(): Promise<void> {
+        this.clearProjectWatcherSyncTimers();
         if (this.projectChangeTracker) {
             await this.projectChangeTracker.close();
             this.projectChangeTracker = null;
@@ -613,10 +638,104 @@ export class SyncManager {
             this.projectChangeTracker = new ProjectChangeTracker({
                 debounceMs: getProjectWatcherDebounceMs(),
                 usePolling: isProjectWatcherPollingEnabled(),
+                ignoredDirectories: getProjectWatcherIgnoredDirectories(),
+                onChange: (changedCodebasePath) => {
+                    this.scheduleProjectWatcherSync(changedCodebasePath);
+                },
             });
         }
 
         this.projectChangeTracker.watch(codebasePath, requestIgnoreFiles);
+    }
+
+    private clearProjectWatcherSyncTimers(): void {
+        for (const timer of this.projectWatcherSyncTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.projectWatcherSyncTimers.clear();
+        this.projectWatcherSyncQueued.clear();
+    }
+
+    private scheduleProjectWatcherSync(codebasePath: string, delayMs: number = 0): void {
+        if (!isAutoIndexingEnabled() || !isProjectWatcherEnabled()) {
+            return;
+        }
+
+        const info = this.snapshotManager.getCodebaseInfo(codebasePath);
+        if (!info || info.status !== "indexed") {
+            return;
+        }
+        if (!fs.existsSync(codebasePath)) {
+            return;
+        }
+
+        const existingTimer = this.projectWatcherSyncTimers.get(codebasePath);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+
+        const timer = setTimeout(() => {
+            this.projectWatcherSyncTimers.delete(codebasePath);
+            void this.runProjectWatcherSync(codebasePath).catch((error) => {
+                console.error(
+                    `[SYNC-DEBUG] Project watcher sync failed for '${codebasePath}':`,
+                    error,
+                );
+            });
+        }, Math.max(0, Math.floor(delayMs)));
+        timer.unref?.();
+        this.projectWatcherSyncTimers.set(codebasePath, timer);
+    }
+
+    private async runProjectWatcherSync(codebasePath: string): Promise<void> {
+        if (this.projectWatcherSyncActive.size > 0) {
+            this.projectWatcherSyncQueued.add(codebasePath);
+            return;
+        }
+
+        if (this.isSyncing) {
+            this.scheduleProjectWatcherSync(codebasePath, Math.max(1, getProjectWatcherDebounceMs()));
+            return;
+        }
+
+        if (!this.acquireGlobalSyncLock()) {
+            this.scheduleProjectWatcherSync(codebasePath, Math.max(1_000, getProjectWatcherDebounceMs()));
+            return;
+        }
+
+        this.isSyncing = true;
+        this.projectWatcherSyncActive.add(codebasePath);
+        try {
+            const info = this.snapshotManager.getCodebaseInfo(codebasePath);
+            if (!info || info.status !== "indexed") {
+                return;
+            }
+
+            await this.syncCodebase(codebasePath, 0, 1);
+
+            if (!fs.existsSync(codebasePath)) {
+                return;
+            }
+
+            const state = this.projectChangeTracker?.getState(codebasePath);
+            if (state?.kind === "dirty" || state?.kind === "unknown") {
+                this.projectWatcherSyncQueued.add(codebasePath);
+            }
+        } finally {
+            this.projectWatcherSyncActive.delete(codebasePath);
+            this.isSyncing = false;
+            this.releaseGlobalSyncLock();
+            if (this.projectWatcherSyncQueued.delete(codebasePath)) {
+                this.scheduleProjectWatcherSync(codebasePath);
+            }
+            if (this.projectWatcherSyncActive.size === 0) {
+                const queuedCodebases = Array.from(this.projectWatcherSyncQueued);
+                this.projectWatcherSyncQueued.clear();
+                for (const queuedCodebasePath of queuedCodebases) {
+                    this.scheduleProjectWatcherSync(queuedCodebasePath);
+                }
+            }
+        }
     }
 
     private getProjectChangeStateForSync(codebasePath: string, requestIgnoreFiles: string[] = []): ProjectChangeState | null {

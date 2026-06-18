@@ -410,6 +410,37 @@ test("successful automatic sync clears previous large-increment warning", async 
     });
 });
 
+test("automatic sync removes missing codebases from tracking", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+        await rm(codebasePath, { recursive: true, force: true });
+
+        let reindexCalls = 0;
+        const context = {
+            reindexByChange: async () => {
+                reindexCalls += 1;
+                return { added: 0, removed: 0, modified: 0 };
+            }
+        } as any;
+        const syncManager = new SyncManager(context, snapshotManager);
+
+        await syncManager.handleSyncIndex();
+
+        assert.equal(reindexCalls, 0);
+        assert.equal(snapshotManager.getCodebaseStatus(codebasePath), "not_found");
+        assert.deepEqual(snapshotManager.getIndexedCodebases(), []);
+    });
+});
+
 test("successful automatic sync refreshes snapshot statistics when files changed", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
@@ -705,6 +736,189 @@ test("project watcher debounces queued file events", async () => {
         assert.deepEqual(state.kind === "dirty" ? state.paths : [], ["src/a.ts"]);
 
         await tracker.close();
+    });
+});
+
+test("project watcher ignored directories can be customized", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const defaultTracker = new ProjectChangeTracker({
+            debounceMs: 1000,
+            usePolling: false
+        });
+        const customTracker = new ProjectChangeTracker({
+            debounceMs: 1000,
+            usePolling: false,
+            ignoredDirectories: [".git", "node_modules"]
+        });
+
+        assert.equal(
+            (defaultTracker as any).isWatcherIgnored(codebasePath, path.join(codebasePath, "dist", "bundle.js")),
+            true,
+        );
+        assert.equal(
+            (customTracker as any).isWatcherIgnored(codebasePath, path.join(codebasePath, "dist", "bundle.js")),
+            false,
+        );
+
+        await defaultTracker.close();
+        await customTracker.close();
+    });
+});
+
+test("project watcher file events trigger sync without periodic background polling", async () => {
+    await withTempHome(async (tempRoot) => {
+        await writeProjectConfig(tempRoot, {
+            backgroundSync: false,
+            projectWatcherDebounceMs: 1
+        });
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(path.join(codebasePath, "src"), { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        let targetedCalls = 0;
+        const context = {
+            reindexChangedPaths: async (
+                pathArg: string,
+                paths: string[],
+            ) => {
+                targetedCalls += 1;
+                assert.equal(pathArg, codebasePath);
+                assert.deepEqual(paths, ["src/a.ts"]);
+                return { added: 0, removed: 0, modified: 0 };
+            },
+            reindexByChange: async () => {
+                throw new Error("full scan should not run for a dirty file event");
+            }
+        } as any;
+        const syncManager = new SyncManager(context, snapshotManager);
+        (syncManager as any).lastFullScanMs.set(codebasePath, Date.now());
+
+        syncManager.startBackgroundSync();
+        const tracker = (syncManager as any).projectChangeTracker as ProjectChangeTracker;
+        (tracker as any).recordFileEvent(codebasePath, path.join(codebasePath, "src", "a.ts"));
+
+        await waitFor(() => targetedCalls === 1, 500);
+        syncManager.stopBackgroundSync();
+    });
+});
+
+test("project watcher schedules a follow-up sync for events observed during an active sync", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(path.join(codebasePath, "src"), { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        let targetedCalls = 0;
+        const context = {
+            reindexChangedPaths: async () => {
+                targetedCalls += 1;
+                if (targetedCalls === 1) {
+                    const tracker = (syncManager as any).projectChangeTracker as ProjectChangeTracker;
+                    (tracker as any).recordFileEvent(codebasePath, path.join(codebasePath, "src", "a.ts"));
+                    await sleep(20);
+                }
+                return { added: 0, removed: 0, modified: 0 };
+            },
+            reindexByChange: async () => {
+                throw new Error("full scan should not run for dirty file events");
+            }
+        } as any;
+        const syncManager = new SyncManager(context, snapshotManager);
+        (syncManager as any).lastFullScanMs.set(codebasePath, Date.now());
+
+        syncManager.trackCodebase(codebasePath);
+        const tracker = (syncManager as any).projectChangeTracker as ProjectChangeTracker;
+        (tracker as any).recordFileEvent(codebasePath, path.join(codebasePath, "src", "a.ts"));
+
+        await waitFor(() => targetedCalls >= 2, 500);
+        await syncManager.stopProjectWatcher();
+    });
+});
+
+test("global sync does not overlap an active project watcher sync in the same manager", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(path.join(codebasePath, "src"), { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        let activeSyncs = 0;
+        let maxActiveSyncs = 0;
+        let reindexCalls = 0;
+        let releaseWatcherSync!: () => void;
+        const watcherSyncGate = new Promise<void>((resolve) => {
+            releaseWatcherSync = resolve;
+        });
+
+        const context = {
+            reindexChangedPaths: async () => {
+                activeSyncs += 1;
+                maxActiveSyncs = Math.max(maxActiveSyncs, activeSyncs);
+                reindexCalls += 1;
+                try {
+                    await watcherSyncGate;
+                    return { added: 0, removed: 0, modified: 0 };
+                } finally {
+                    activeSyncs -= 1;
+                }
+            },
+            reindexByChange: async () => {
+                activeSyncs += 1;
+                maxActiveSyncs = Math.max(maxActiveSyncs, activeSyncs);
+                reindexCalls += 1;
+                activeSyncs -= 1;
+                return { added: 0, removed: 0, modified: 0 };
+            }
+        } as any;
+        const syncManager = new SyncManager(context, snapshotManager);
+        (syncManager as any).lastFullScanMs.set(codebasePath, Date.now());
+        let dirty = true;
+        (syncManager as any).projectChangeTracker = {
+            watch: () => undefined,
+            getState: () => dirty
+                ? ({ kind: "dirty", paths: ["src/a.ts"], version: 1 })
+                : ({ kind: "clean", version: 1 }),
+            markPathsClean: () => {
+                dirty = false;
+            },
+            markClean: () => undefined,
+            unwatch: () => undefined,
+            close: async () => undefined
+        };
+
+        const watcherSyncPromise = (syncManager as any).runProjectWatcherSync(codebasePath);
+        await waitFor(() => activeSyncs === 1, 500);
+
+        await syncManager.handleSyncIndex();
+        assert.equal(reindexCalls, 1);
+        assert.equal(maxActiveSyncs, 1);
+
+        releaseWatcherSync();
+        await watcherSyncPromise;
+        await syncManager.stopProjectWatcher();
     });
 });
 

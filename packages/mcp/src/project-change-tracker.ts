@@ -10,6 +10,8 @@ export type ProjectChangeState =
 export interface ProjectChangeTrackerOptions {
     debounceMs: number;
     usePolling: boolean;
+    ignoredDirectories?: string[];
+    onChange?: (codebasePath: string, state: ProjectChangeState) => void;
 }
 
 interface UnknownReason {
@@ -47,9 +49,18 @@ export class ProjectChangeTracker {
     private pendingEvents: Map<string, PendingProjectEvents> = new Map();
     private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
     private readonly options: ProjectChangeTrackerOptions;
+    private readonly ignoredDirectories: Set<string>;
 
     constructor(options: ProjectChangeTrackerOptions) {
         this.options = options;
+        const configuredIgnoredDirs = options.ignoredDirectories && options.ignoredDirectories.length > 0
+            ? options.ignoredDirectories
+            : Array.from(WATCHER_IGNORED_DIRS);
+        this.ignoredDirectories = new Set(
+            configuredIgnoredDirs
+                .map(directory => directory.trim())
+                .filter(directory => directory.length > 0),
+        );
     }
 
     public watch(codebasePath: string, ignoreFiles: string[] = []): void {
@@ -151,9 +162,24 @@ export class ProjectChangeTracker {
         const version = this.bumpVersion(codebasePath);
         this.unknownReasons.set(codebasePath, { reason, version });
         this.dirtyPaths.delete(codebasePath);
+        this.emitChange(codebasePath);
         if (options.closeWatcher === false) {
             return;
         }
+        const watcher = this.watchers.get(codebasePath);
+        if (watcher) {
+            this.watchers.delete(codebasePath);
+            void watcher.close().catch(() => undefined);
+        }
+    }
+
+    public unwatch(codebasePath: string): void {
+        this.clearPendingEvents(codebasePath);
+        this.dirtyPaths.delete(codebasePath);
+        this.unknownReasons.delete(codebasePath);
+        this.versions.delete(codebasePath);
+        this.requestIgnoreFiles.delete(codebasePath);
+
         const watcher = this.watchers.get(codebasePath);
         if (watcher) {
             this.watchers.delete(codebasePath);
@@ -251,6 +277,7 @@ export class ProjectChangeTracker {
         }
 
         this.dirtyPaths.get(codebasePath)?.set(relativePath, this.bumpVersion(codebasePath));
+        this.emitChange(codebasePath);
     }
 
     private recordDirectoryEvent(codebasePath: string, eventPath: string, reason: string): void {
@@ -274,7 +301,7 @@ export class ProjectChangeTracker {
 
         return relativePath
             .split("/")
-            .some((segment) => WATCHER_IGNORED_DIRS.has(segment));
+            .some((segment) => this.ignoredDirectories.has(segment));
     }
 
     private getVersion(codebasePath: string): number {
@@ -285,6 +312,10 @@ export class ProjectChangeTracker {
         const nextVersion = this.getVersion(codebasePath) + 1;
         this.versions.set(codebasePath, nextVersion);
         return nextVersion;
+    }
+
+    private emitChange(codebasePath: string): void {
+        this.options.onChange?.(codebasePath, this.getState(codebasePath));
     }
 
     private deleteUnknownSeenAtOrBefore(codebasePath: string, observedVersion: number | undefined): void {

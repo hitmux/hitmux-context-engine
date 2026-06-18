@@ -39,6 +39,7 @@ import {
     createEmbeddingInstance,
     logEmbeddingProviderInfo,
 } from "./embedding.js";
+import { runCliManageCommand } from "./cli-manage.js";
 import { runCliTestCommand } from "./cli-test.js";
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
@@ -632,6 +633,11 @@ async function main() {
 
     if (args[0] === "test") {
         const exitCode = await runCliTestCommand(args.slice(1));
+        process.exit(exitCode);
+    }
+
+    if (args[0] === "list" || args[0] === "rm" || args[0] === "index") {
+        const exitCode = await runCliManageCommand(args);
         process.exit(exitCode);
     }
 

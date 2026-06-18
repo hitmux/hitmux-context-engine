@@ -391,6 +391,14 @@ Test commands:
  hce test embedding       Test the configured embedding provider
  hce test vectordb        Test the configured Milvus/Zilliz connection
 
+Index management commands:
+ hce list                 List collections in the configured database
+ hce list <name|path>     Show details for one collection or repo path
+ hce rm <name|path>       Delete one collection by collection name or repo path
+ hce index                Sync or create the index for the current directory
+ hce index <name|path>    Sync or create by collection name or repo path
+ hce index --all          Force rebuild all known repo indexes
+
 Configuration:
  Runtime configuration is read from both files, with project config overriding
  global config for matching fields:
@@ -461,7 +469,8 @@ Common config.conf fields:
  backgroundSync
  Enable/disable startup + periodic background sync
  for indexed codebases (default: true). Set to false
- to disable polling while keeping trigger-based sync.
+ to disable polling while keeping trigger-based and
+ project-watcher event sync.
  syncIntervalMs
  Background sync interval in milliseconds when enabled
  (default: 120000).
@@ -488,6 +497,12 @@ Example config.conf:
  databaseUseSystemProxy = false
  backgroundSync = true
  syncIntervalMs = 120000
+ projectWatcher = true
+ projectWatcherDebounceMs = 1000
+ projectWatcherFallbackScanIntervalMs = 600000
+ # projectWatcherIgnoredDirs = node_modules
+ # projectWatcherIgnoredDirs = dist
+ # projectWatcherIgnoredDirs = build
 
 Start:
  npx @hitmux/hce@latest
