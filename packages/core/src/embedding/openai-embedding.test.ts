@@ -14,8 +14,30 @@ jest.mock('openai', () => ({
 
 describe('OpenAIEmbedding', () => {
     beforeEach(() => {
+        jest.useRealTimers();
         mockCreate.mockReset();
         (OpenAI as unknown as jest.Mock).mockClear();
+    });
+
+    it('passes default headers to the OpenAI-compatible client', () => {
+        new OpenAIEmbedding({
+            apiKey: 'test-api-key',
+            model: 'text-embedding-3-small',
+            baseURL: 'https://provider.example/v1',
+            defaultHeaders: {
+                'HTTP-Referer': 'https://github.com/hitmux/hitmux-context-engine',
+                'X-OpenRouter-Title': 'Hitmux Context Engine',
+            },
+        });
+
+        expect(OpenAI).toHaveBeenCalledWith({
+            apiKey: 'test-api-key',
+            baseURL: 'https://provider.example/v1',
+            defaultHeaders: {
+                'HTTP-Referer': 'https://github.com/hitmux/hitmux-context-engine',
+                'X-OpenRouter-Title': 'Hitmux Context Engine',
+            },
+        });
     });
 
     it('caches detected dimensions per baseURL and model', async () => {
@@ -56,5 +78,86 @@ describe('OpenAIEmbedding', () => {
         await expect(first.detectDimension()).resolves.toBe(4);
         await expect(second.detectDimension()).resolves.toBe(4);
         expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not probe dimension before embedding a custom model batch', async () => {
+        mockCreate.mockResolvedValueOnce({
+            data: [
+                { embedding: [1, 2, 3, 4, 5] },
+                { embedding: [6, 7, 8, 9, 10] },
+            ],
+        });
+
+        const embedding = new OpenAIEmbedding({
+            apiKey: 'test-api-key',
+            model: 'custom-batch-model',
+            baseURL: 'https://provider.example/v1',
+        });
+
+        await expect(embedding.embedBatch(['first chunk', 'second chunk'])).resolves.toEqual([
+            { vector: [1, 2, 3, 4, 5], dimension: 5 },
+            { vector: [6, 7, 8, 9, 10], dimension: 5 },
+        ]);
+        expect(mockCreate).toHaveBeenCalledTimes(1);
+        expect(mockCreate).toHaveBeenCalledWith({
+            model: 'custom-batch-model',
+            input: ['first chunk', 'second chunk'],
+            encoding_format: 'float',
+        });
+    });
+
+    it('reports malformed embedding responses with provider details', async () => {
+        mockCreate.mockResolvedValueOnce({
+            error: {
+                message: 'upstream provider returned no embeddings',
+                code: 502,
+            },
+        });
+
+        const embedding = new OpenAIEmbedding({
+            apiKey: 'test-api-key',
+            model: 'text-embedding-3-small',
+            baseURL: 'https://provider.example/v1',
+        });
+
+        await expect(embedding.embedBatch(['first chunk', 'second chunk']))
+            .rejects
+            .toThrow(/Embedding response missing data array; provider error: message=upstream provider returned no embeddings, code=502; response keys: error/);
+    });
+
+    it('retries retryable OpenAI-compatible embedding provider errors after a delay', async () => {
+        jest.useFakeTimers();
+        mockCreate
+            .mockResolvedValueOnce({
+                error: {
+                    message: 'HTTP 429: {"error":{"code":"engine_overloaded","message":"Model busy, retry later"}}',
+                    code: 429,
+                },
+            })
+            .mockResolvedValueOnce({
+                data: [
+                    { embedding: [1, 2, 3] },
+                    { embedding: [4, 5, 6] },
+                ],
+            });
+
+        const embedding = new OpenAIEmbedding({
+            apiKey: 'test-api-key',
+            model: 'text-embedding-3-small',
+            baseURL: 'https://provider.example/v1',
+        });
+
+        const resultPromise = embedding.embedBatch(['first chunk', 'second chunk']);
+
+        await Promise.resolve();
+        expect(mockCreate).toHaveBeenCalledTimes(1);
+
+        await jest.advanceTimersByTimeAsync(3000);
+
+        await expect(resultPromise).resolves.toEqual([
+            { vector: [1, 2, 3], dimension: 3 },
+            { vector: [4, 5, 6], dimension: 3 },
+        ]);
+        expect(mockCreate).toHaveBeenCalledTimes(2);
     });
 });

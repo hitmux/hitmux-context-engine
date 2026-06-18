@@ -1,5 +1,7 @@
-import { configManager } from "@hitmux/hitmux-context-engine-core";
+import corePackage from "@hitmux/hitmux-context-engine-core";
 import type { CodebaseIdentityMode } from "@hitmux/hitmux-context-engine-core";
+
+const { configManager } = corePackage;
 
 export interface ContextMcpConfig {
     name: string;
@@ -389,6 +391,14 @@ Test commands:
  hce test embedding       Test the configured embedding provider
  hce test vectordb        Test the configured Milvus/Zilliz connection
 
+Index management commands:
+ hce list                 List collections in the configured database
+ hce list <name|path>     Show details for one collection or repo path
+ hce rm <name|path>       Delete one collection by collection name or repo path
+ hce index                Sync or create the index for the current directory
+ hce index <name|path>    Sync or create by collection name or repo path
+ hce index --all          Force rebuild all known repo indexes
+
 Configuration:
  Runtime configuration is read from both files, with project config overriding
  global config for matching fields:
@@ -405,9 +415,11 @@ Safety override environment variable:
 Common config.conf fields:
  mcpServerName Server name
  mcpServerVersion Server version
-  Embedding Provider Configuration:
+ Embedding Provider Configuration:
  embeddingProvider Embedding provider: OpenAI, VoyageAI, Gemini, Ollama, OpenRouter (default: OpenRouter)
  embeddingModel Embedding model name (works for all providers)
+ embeddingBatchSize Embedding batch size for index operations (default: provider/model-specific)
+ embeddingConcurrency Embedding request concurrency for index operations (default: provider/model-specific)
   Provider-specific API Keys:
  openaiApiKey OpenAI API key (required for OpenAI provider)
  openaiBaseUrl OpenAI-compatible API base URL (optional, for custom endpoints)
@@ -457,10 +469,11 @@ Common config.conf fields:
  backgroundSync
  Enable/disable startup + periodic background sync
  for indexed codebases (default: true). Set to false
- to disable polling while keeping trigger-based sync.
+ to disable polling while keeping trigger-based and
+ project-watcher event sync.
  syncIntervalMs
  Background sync interval in milliseconds when enabled
- (default: 300000).
+ (default: 120000).
 
  Sync Trigger Watcher:
  triggerWatcher
@@ -475,13 +488,21 @@ Common config.conf fields:
 Example config.conf:
  embeddingProvider = OpenRouter
  embeddingModel = qwen/qwen3-embedding-4b
+ # embeddingBatchSize = 32
+ # embeddingConcurrency = 4
  openrouterApiKey = sk-or-xxx
  milvusAddress = localhost:19530
  milvusToken = your-token
  embeddingUseSystemProxy = false
  databaseUseSystemProxy = false
  backgroundSync = true
- syncIntervalMs = 60000
+ syncIntervalMs = 120000
+ projectWatcher = true
+ projectWatcherDebounceMs = 1000
+ projectWatcherFallbackScanIntervalMs = 600000
+ # projectWatcherIgnoredDirs = node_modules
+ # projectWatcherIgnoredDirs = dist
+ # projectWatcherIgnoredDirs = build
 
 Start:
  npx @hitmux/hce@latest

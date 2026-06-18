@@ -37,7 +37,12 @@ import {
     trackCodebasePath,
 } from "./utils.js";
 import { queryCollectionStats } from "./collection-stats.js";
-import type { CodebaseSyncStatus, SyncManager } from "./sync.js";
+import type {
+    CodebaseSyncStats,
+    CodebaseSyncStatus,
+    SearchConsistencyMode,
+    SyncManager,
+} from "./sync.js";
 import {
     acquireMcpWriterLock,
     formatMcpWriterLockBusyMessage,
@@ -54,8 +59,11 @@ const SEARCH_TRACE_EVIDENCE_SYMBOL_LIMIT = 1;
 const SEARCH_TRACE_EVIDENCE_MAX_FILES = 500;
 const SEARCH_TRACE_EVIDENCE_MAX_REFERENCES = 8;
 const DEFAULT_VECTOR_DATABASE_SYNC_TIMEOUT_MS = 5_000;
+const MAX_SNAPSHOT_RECOVERY_ANCESTOR_PROBES = 32;
 const NOT_INDEXED_INDEXING_HINT =
     "Please index it first using the index_codebase tool. Before first indexing, create a project ignore file such as .hceignore when you need to exclude generated, large, or private paths. The indexer automatically loads .*ignore files it finds in the project tree, so files like .hceignore, .gitignore, and .cursorignore are applied without passing ignoreFiles.";
+
+type SourceFileCache = Map<string, string | Error>;
 
 function getVectorDatabaseSyncTimeoutMs(): number {
     const configuredTimeoutMs = configManager.getNumber(
@@ -96,12 +104,18 @@ export class ToolHandlers {
     > = new Map();
     private indexingStateLocks: Map<string, Promise<void>> = new Map();
     private vectorDatabaseSyncTimeoutMs: number;
-    private syncManager?: Pick<SyncManager, "getSyncStatus">;
+    private syncManager?: Pick<
+        SyncManager,
+        "getSyncStatus" | "syncCodebaseForSearch" | "trackCodebase"
+    >;
 
     constructor(
         context: Context,
         snapshotManager: SnapshotManager,
-        syncManager?: Pick<SyncManager, "getSyncStatus">,
+        syncManager?: Pick<
+            SyncManager,
+            "getSyncStatus" | "syncCodebaseForSearch" | "trackCodebase"
+        >,
     ) {
         this.context = context;
         this.snapshotManager = snapshotManager;
@@ -130,9 +144,16 @@ export class ToolHandlers {
     }
 
     public setSyncManager(
-        syncManager: Pick<SyncManager, "getSyncStatus">,
+        syncManager: Pick<
+            SyncManager,
+            "getSyncStatus" | "syncCodebaseForSearch" | "trackCodebase"
+        >,
     ): void {
         this.syncManager = syncManager;
+    }
+
+    private trackIndexedCodebase(codebasePath: string): void {
+        this.syncManager?.trackCodebase?.(codebasePath);
     }
 
     private formatElapsedMs(elapsedMs: number): string {
@@ -345,6 +366,25 @@ export class ToolHandlers {
         return {
             error: this.errorResponse(
                 "Error: search_code argument 'skipConsistencyCheck' must be a boolean when provided.",
+            ),
+        };
+    }
+
+    private normalizeOptionalSearchConsistency(value: unknown): {
+        consistencyMode?: SearchConsistencyMode;
+        error?: ReturnType<ToolHandlers["errorResponse"]>;
+    } {
+        if (value === undefined || value === null) {
+            return {};
+        }
+
+        if (value === "low_latency" || value === "strong") {
+            return { consistencyMode: value };
+        }
+
+        return {
+            error: this.errorResponse(
+                "Error: search_code argument 'consistency' must be one of: low_latency, strong.",
             ),
         };
     }
@@ -872,6 +912,7 @@ export class ToolHandlers {
     private formatSearchResultContext(
         result: any,
         codebasePath: string,
+        sourceFileCache: SourceFileCache,
     ): { context: string; source: string; warning?: string } {
         const fallbackContent = truncateContent(
             String(result?.content ?? ""),
@@ -898,7 +939,10 @@ export class ToolHandlers {
         }
 
         try {
-            const source = fs.readFileSync(resolvedPath, "utf-8");
+            const source = this.readSourceFileForSearchContext(
+                resolvedPath,
+                sourceFileCache,
+            );
             const lines = source.split(/\r?\n/);
             const contextStartLine = Math.max(
                 1,
@@ -934,6 +978,30 @@ export class ToolHandlers {
                 warning:
                     "source rehydrate failed; using indexed chunk fallback.",
             };
+        }
+    }
+
+    private readSourceFileForSearchContext(
+        resolvedPath: string,
+        sourceFileCache: SourceFileCache,
+    ): string {
+        const cached = sourceFileCache.get(resolvedPath);
+        if (typeof cached === "string") {
+            return cached;
+        }
+        if (cached instanceof Error) {
+            throw cached;
+        }
+
+        try {
+            const source = fs.readFileSync(resolvedPath, "utf-8");
+            sourceFileCache.set(resolvedPath, source);
+            return source;
+        } catch (error) {
+            const readError =
+                error instanceof Error ? error : new Error(String(error));
+            sourceFileCache.set(resolvedPath, readError);
+            throw readError;
         }
     }
 
@@ -1051,6 +1119,110 @@ export class ToolHandlers {
         return queryCollectionStats(this.context, codebasePath);
     }
 
+    private getSnapshotRecoveryCandidates(absolutePath: string): string[] {
+        const candidates: string[] = [];
+        let candidate = path.resolve(absolutePath);
+
+        for (
+            let probes = 0;
+            probes < MAX_SNAPSHOT_RECOVERY_ANCESTOR_PROBES;
+            probes++
+        ) {
+            candidates.push(candidate);
+            const parent = path.dirname(candidate);
+            if (parent === candidate) {
+                break;
+            }
+            candidate = parent;
+        }
+
+        return candidates;
+    }
+
+    private parseCollectionDescriptionCodebasePath(
+        description: string | undefined,
+    ): string | null {
+        if (!description || !description.startsWith("codebasePath:")) {
+            return null;
+        }
+
+        const codebasePath = description
+            .split(/\r?\n/, 1)[0]
+            .substring("codebasePath:".length);
+        return codebasePath.length > 0 ? codebasePath : null;
+    }
+
+    private async resolveSnapshotRecoveryCodebasePath(
+        candidatePath: string,
+    ): Promise<string> {
+        try {
+            const vectorDatabase = this.context.getVectorDatabase();
+            if (
+                !vectorDatabase ||
+                typeof vectorDatabase.getCollectionDescription !== "function"
+            ) {
+                return candidatePath;
+            }
+
+            const collectionName = this.context.getCollectionName(candidatePath);
+            const description = await this.withVectorDatabaseSyncTimeout(
+                `Milvus getCollectionDescription(${collectionName}) during search snapshot recovery`,
+                vectorDatabase.getCollectionDescription(collectionName),
+            );
+            const recoveredCodebasePath =
+                this.parseCollectionDescriptionCodebasePath(description);
+            if (recoveredCodebasePath && fs.existsSync(recoveredCodebasePath)) {
+                return path.resolve(recoveredCodebasePath);
+            }
+        } catch (error) {
+            console.warn(
+                `[SEARCH] Failed to resolve recovery codebase path for '${candidatePath}' from collection description:`,
+                error,
+            );
+        }
+
+        return candidatePath;
+    }
+
+    private async recoverIndexedCodebaseFromVectorDatabase(
+        absolutePath: string,
+    ): Promise<string | null> {
+        if (typeof this.context.hasIndex !== "function") {
+            return null;
+        }
+
+        for (const candidatePath of this.getSnapshotRecoveryCandidates(
+            absolutePath,
+        )) {
+            const hasVectorIndex = await this.context.hasIndex(candidatePath);
+            if (!hasVectorIndex) {
+                continue;
+            }
+
+            const recoveryCodebasePath =
+                await this.resolveSnapshotRecoveryCodebasePath(candidatePath);
+            const stats = await this.queryCollectionStats(recoveryCodebasePath);
+            if (!stats) {
+                console.warn(
+                    `[SEARCH] Snapshot missing but VectorDB stats are unavailable for '${recoveryCodebasePath}', skipping recovery`,
+                );
+                return null;
+            }
+
+            console.warn(
+                `[SEARCH] Snapshot missing but VectorDB has index for '${recoveryCodebasePath}', recovering snapshot (rows=${stats.totalChunks})`,
+            );
+            this.snapshotManager.setCodebaseIndexed(recoveryCodebasePath, {
+                ...stats,
+                status: "completed" as const,
+            });
+            this.snapshotManager.saveCodebaseSnapshot();
+            return recoveryCodebasePath;
+        }
+
+        return null;
+    }
+
     private formatIncrementalTooLargeWarning(
         error: IncrementalIndexTooLargeError,
     ): string {
@@ -1059,8 +1231,12 @@ export class ToolHandlers {
 
     private async refreshCodebaseIndexBeforeSearch(
         codebasePath: string,
-    ): Promise<any | null> {
+        consistencyMode: SearchConsistencyMode,
+    ): Promise<{ error?: any; warning?: string } | null> {
         if (typeof this.context.reindexByChange !== "function") {
+            if (consistencyMode === "low_latency") {
+                return null;
+            }
             return null;
         }
 
@@ -1068,29 +1244,33 @@ export class ToolHandlers {
             `search_code sync for '${codebasePath}'`,
         );
         if (!(writerLock instanceof McpWriterLock)) {
-            return writerLock;
+            if (consistencyMode === "low_latency") {
+                return {
+                    warning:
+                        "Search used the current index because a writer lock is active. Results may be stale until the active indexing or sync operation finishes.",
+                };
+            }
+            return { error: writerLock };
         }
 
         try {
             return await this.withIndexingStateLock(codebasePath, async () => {
                 const info = this.snapshotManager.getCodebaseInfo(codebasePath);
                 if (!info || info.status !== "indexed") {
-                    return this.notIndexedResponse(codebasePath);
+                    return { error: this.notIndexedResponse(codebasePath) };
                 }
 
                 try {
-                    const splitterType = resolveRequestSplitterType(
-                        info.requestSplitter,
-                    );
-                    const stats = await this.context.reindexByChange(
-                        codebasePath,
-                        undefined,
-                        info.requestIgnorePatterns || [],
-                        info.requestCustomExtensions || [],
-                        createRequestSplitter(splitterType),
-                        info.requestIgnoreFiles || [],
-                        info.requestMaxDepth,
-                    );
+                    const stats = this.syncManager?.syncCodebaseForSearch
+                        ? await this.syncManager.syncCodebaseForSearch(
+                              codebasePath,
+                              { consistencyMode },
+                          )
+                        : await this.refreshCodebaseIndexBeforeSearchWithoutSyncManager(
+                              codebasePath,
+                              info,
+                              consistencyMode,
+                          );
 
                     if (
                         stats.added > 0 ||
@@ -1118,7 +1298,7 @@ export class ToolHandlers {
                         );
                     }
                     this.snapshotManager.saveCodebaseSnapshot();
-                    return null;
+                    return stats.warning ? { warning: stats.warning } : null;
                 } catch (error) {
                     if (error instanceof IncrementalIndexTooLargeError) {
                         const warning =
@@ -1128,21 +1308,60 @@ export class ToolHandlers {
                             warning,
                         );
                         this.snapshotManager.saveCodebaseSnapshot();
-                        return this.errorResponse(
-                            `Error: search_code requires a fresh index for '${codebasePath}', but ${warning}`,
-                        );
+                        if (consistencyMode === "low_latency") {
+                            return { warning };
+                        }
+                        return {
+                            error: this.errorResponse(
+                                `Error: search_code requires a fresh index for '${codebasePath}', but ${warning}`,
+                            ),
+                        };
                     }
 
                     const message =
                         error instanceof Error ? error.message : String(error);
-                    return this.errorResponse(
-                        `Error: search_code could not refresh index for '${codebasePath}' before searching: ${message}`,
-                    );
+                    if (consistencyMode === "low_latency") {
+                        return {
+                            warning: `Search used the current index because pre-search incremental sync failed: ${message}`,
+                        };
+                    }
+                    return {
+                        error: this.errorResponse(
+                            `Error: search_code could not refresh index for '${codebasePath}' before searching: ${message}`,
+                        ),
+                    };
                 }
             });
         } finally {
             writerLock.release();
         }
+    }
+
+    private async refreshCodebaseIndexBeforeSearchWithoutSyncManager(
+        codebasePath: string,
+        info: NonNullable<ReturnType<SnapshotManager["getCodebaseInfo"]>>,
+        consistencyMode: SearchConsistencyMode,
+    ): Promise<CodebaseSyncStats> {
+        if (consistencyMode === "low_latency") {
+            return {
+                added: 0,
+                removed: 0,
+                modified: 0,
+                warning:
+                    "Search used the current index without a pre-search consistency scan because SyncManager is unavailable. Results may be stale.",
+            };
+        }
+
+        const splitterType = resolveRequestSplitterType(info.requestSplitter);
+        return this.context.reindexByChange(
+            codebasePath,
+            undefined,
+            info.requestIgnorePatterns || [],
+            info.requestCustomExtensions || [],
+            createRequestSplitter(splitterType),
+            info.requestIgnoreFiles || [],
+            info.requestMaxDepth,
+        );
     }
 
     private getMerkleTrackedFileCount(
@@ -2049,12 +2268,10 @@ export class ToolHandlers {
                                 absolutePath,
                             );
                             this.snapshotManager.saveCodebaseSnapshot();
-                            if (await this.context.hasIndex(absolutePath)) {
-                                console.log(
-                                    `[FORCE-REINDEX] Clearing index for '${absolutePath}'`,
-                                );
-                                await this.context.clearIndex(absolutePath);
-                            }
+                            console.log(
+                                `[FORCE-REINDEX] Clearing index for '${absolutePath}'`,
+                            );
+                            await this.context.clearIndex(absolutePath);
                         }
 
                         // CRITICAL: Pre-index collection creation validation
@@ -2283,6 +2500,7 @@ export class ToolHandlers {
             this.snapshotManager.clearCodebaseSyncWarning(absolutePath);
         }
         this.snapshotManager.saveCodebaseSnapshot();
+        this.trackIndexedCodebase(absolutePath);
 
         const pathInfo =
             originalPath !== absolutePath
@@ -2455,6 +2673,7 @@ export class ToolHandlers {
 
             // Save snapshot after updating codebase lists
             this.snapshotManager.saveCodebaseSnapshot();
+            this.trackIndexedCodebase(absolutePath);
 
             let message = `Background indexing completed for '${absolutePath}' using ${splitterType.toUpperCase()} splitter.\nIndexed ${stats.indexedFiles} files, ${stats.totalChunks} chunks.`;
             if (stats.status === "limit_reached") {
@@ -2669,6 +2888,7 @@ export class ToolHandlers {
             includeRelated,
             includeTraceEvidence,
             skipConsistencyCheck,
+            consistency,
         } = args;
         const normalizedLimit = this.normalizeOptionalSearchLimit(limit);
         if (normalizedLimit.error) {
@@ -2694,15 +2914,22 @@ export class ToolHandlers {
         if (normalizedSkipConsistencyCheck.error) {
             return normalizedSkipConsistencyCheck.error;
         }
+        const normalizedConsistency =
+            this.normalizeOptionalSearchConsistency(consistency);
+        if (normalizedConsistency.error) {
+            return normalizedConsistency.error;
+        }
         const normalizedExtensionFilter =
             this.normalizeOptionalExtensionFilter(extensionFilter);
         if (normalizedExtensionFilter.error) {
             return normalizedExtensionFilter.error;
         }
+        const consistencyMode: SearchConsistencyMode =
+            (normalizedSkipConsistencyCheck.skipConsistencyCheck === true
+                ? "low_latency"
+                : normalizedConsistency.consistencyMode ?? "low_latency");
 
         try {
-            // Sync indexed codebases from the vector database first.
-            await this.syncIndexedCodebasesFromVectorDatabase();
             this.snapshotManager.refreshFromDiskForRead();
 
             // Force absolute path resolution - warn if relative path provided
@@ -2756,25 +2983,14 @@ export class ToolHandlers {
                 // Only recover the snapshot when we can confirm a real row count —
                 // writing 0/0+completed for an unverifiable collection poisons the
                 // client into a force-reindex loop (Issue #295).
-                const hasVectorIndex =
-                    await this.context.hasIndex(absolutePath);
-                if (hasVectorIndex) {
-                    const stats = await this.queryCollectionStats(absolutePath);
-                    if (stats) {
-                        console.warn(
-                            `[SEARCH] Snapshot missing but VectorDB has index for '${absolutePath}', recovering snapshot (rows=${stats.totalChunks})`,
-                        );
-                        this.snapshotManager.setCodebaseIndexed(absolutePath, {
-                            ...stats,
-                            status: "completed" as const,
-                        });
-                        this.snapshotManager.saveCodebaseSnapshot();
-                        searchCodebasePath = absolutePath;
-                        isIndexed = true;
-                        // Continue with search (don't return error)
-                    } else {
-                        return this.notIndexedResponse(absolutePath);
-                    }
+                const recoveredCodebasePath =
+                    await this.recoverIndexedCodebaseFromVectorDatabase(
+                        absolutePath,
+                    );
+                if (recoveredCodebasePath) {
+                    searchCodebasePath = recoveredCodebasePath;
+                    isIndexed = true;
+                    // Continue with search (don't return error)
                 } else {
                     return this.notIndexedResponse(absolutePath);
                 }
@@ -2782,7 +2998,7 @@ export class ToolHandlers {
 
             if (
                 isIndexing &&
-                normalizedSkipConsistencyCheck.skipConsistencyCheck !== true
+                consistencyMode === "strong"
             ) {
                 return this.errorResponse(
                     `Error: Codebase '${searchCodebasePath}' is currently being indexed in the background. search_code requires a completed, fresh index; retry after indexing completes.`,
@@ -2793,22 +3009,30 @@ export class ToolHandlers {
                 this.getSyncStatusMessage(searchCodebasePath);
             if (
                 activeSyncStatusMessage.length > 0 &&
-                normalizedSkipConsistencyCheck.skipConsistencyCheck !== true
+                consistencyMode === "strong"
             ) {
                 return this.errorResponse(
                     `Error: search_code requires a fresh index for '${searchCodebasePath}', but automatic sync is already in progress.\n${activeSyncStatusMessage}`,
                 );
             }
 
-            if (normalizedSkipConsistencyCheck.skipConsistencyCheck !== true) {
-                const refreshError =
-                    await this.refreshCodebaseIndexBeforeSearch(
-                        searchCodebasePath,
-                    );
-                if (refreshError) {
-                    return refreshError;
+            let searchConsistencyWarning = "";
+            if (
+                consistencyMode === "strong" ||
+                activeSyncStatusMessage.length === 0
+            ) {
+                const refreshResult = await this.refreshCodebaseIndexBeforeSearch(
+                    searchCodebasePath,
+                    consistencyMode,
+                );
+                if (refreshResult?.error) {
+                    return refreshResult.error;
                 }
+                searchConsistencyWarning = refreshResult?.warning ?? "";
                 this.snapshotManager.refreshFromDiskForRead();
+            } else {
+                searchConsistencyWarning =
+                    "Search used the current index while automatic sync is in progress. Results may be stale until sync finishes.";
             }
 
             let indexingStatusMessage = "";
@@ -2816,9 +3040,11 @@ export class ToolHandlers {
                 indexingStatusMessage = `\n **Indexing in Progress**: This codebase is currently being indexed in the background. Search results may be incomplete until indexing completes.`;
             }
             const syncSearchPrefix =
-                activeSyncStatusMessage.length > 0
-                    ? `${activeSyncStatusMessage}\n\n`
-                    : "";
+                [activeSyncStatusMessage, searchConsistencyWarning]
+                    .filter((message) => message.length > 0)
+                    .join("\n");
+            const syncSearchPrefixBlock =
+                syncSearchPrefix.length > 0 ? `${syncSearchPrefix}\n\n` : "";
 
             console.log(
                 `[SEARCH] Searching in codebase: ${searchCodebasePath}`,
@@ -2873,6 +3099,9 @@ export class ToolHandlers {
                 {
                     targetRole: normalizedTargetRole.targetRole,
                     includeRelated: normalizedIncludeRelated.includeRelated,
+                    ...(filenameQueryStatus
+                        ? { filenameLikeQuery: filenameQueryStatus.query }
+                        : {}),
                 },
             );
 
@@ -2915,8 +3144,8 @@ export class ToolHandlers {
                 if (isIndexing) {
                     noResultsMessage += `\n\nNote: This codebase is still being indexed. Try searching again after indexing completes, or the query may not match any indexed content.`;
                 }
-                if (syncSearchPrefix.length > 0) {
-                    noResultsMessage = `${syncSearchPrefix}${noResultsMessage}`;
+                if (syncSearchPrefixBlock.length > 0) {
+                    noResultsMessage = `${syncSearchPrefixBlock}${noResultsMessage}`;
                 }
                 return {
                     content: [
@@ -2932,6 +3161,7 @@ export class ToolHandlers {
             const useFallbackMatchLabel =
                 searchResultsAreFallbackMatches(filenameQueryStatus);
             const formattedResultsByGroup = new Map<string, string[]>();
+            const sourceFileCache: SourceFileCache = new Map();
             for (let index = 0; index < searchResults.length; index++) {
                 const result: any = searchResults[index];
                 const { location, warning } =
@@ -2940,6 +3170,7 @@ export class ToolHandlers {
                 const sourceContext = this.formatSearchResultContext(
                     result,
                     searchCodebasePath,
+                    sourceFileCache,
                 );
                 const codebaseInfo = path.basename(searchCodebasePath);
                 const resultLabel = useFallbackMatchLabel
@@ -3001,8 +3232,8 @@ export class ToolHandlers {
             if (searchCodebasePath !== absolutePath) {
                 resultMessage += `\nRequested path '${absolutePath}' is covered by indexed codebase '${searchCodebasePath}'.`;
             }
-            if (syncSearchPrefix.length > 0) {
-                resultMessage = `${syncSearchPrefix}${resultMessage}`;
+            if (syncSearchPrefixBlock.length > 0) {
+                resultMessage = `${syncSearchPrefixBlock}${resultMessage}`;
             }
             resultMessage += `\n\n${formattedResults}`;
 

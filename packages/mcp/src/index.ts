@@ -14,6 +14,9 @@ console.warn = (...args: any[]) => {
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
     ListToolsRequestSchema,
     CallToolRequestSchema,
@@ -36,10 +39,12 @@ import {
     createEmbeddingInstance,
     logEmbeddingProviderInfo,
 } from "./embedding.js";
+import { runCliManageCommand } from "./cli-manage.js";
 import { runCliTestCommand } from "./cli-test.js";
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 import { ToolHandlers } from "./handlers.js";
+import { UpdateChecker } from "./update-checker.js";
 
 applySystemProxyPolicy(false);
 
@@ -47,9 +52,24 @@ process.on("unhandledRejection", (reason) => {
     console.error("[MCP] Unhandled async error (kept server alive):", reason);
 });
 
+const MCP_PACKAGE_NAME = "@hitmux/hitmux-context-engine-mcp";
+
+function readCurrentPackageVersion(): string {
+    const packageJsonPath = join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "package.json",
+    );
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+        version?: string;
+    };
+    return packageJson.version ?? "0.0.0";
+}
+
 class ContextMcpServer {
     private server: Server;
     private snapshotManager: SnapshotManager;
+    private updateChecker: UpdateChecker;
     private runtime: {
         context: Context;
         syncManager: SyncManager;
@@ -77,6 +97,11 @@ class ContextMcpServer {
 
         this.snapshotManager = new SnapshotManager();
         this.snapshotManager.loadCodebaseSnapshot();
+        this.updateChecker = new UpdateChecker({
+            packageName: MCP_PACKAGE_NAME,
+            currentVersion: readCurrentPackageVersion(),
+        });
+        this.updateChecker.start();
 
         this.setupTools();
     }
@@ -99,6 +124,24 @@ class ContextMcpServer {
             "Error initializing Hitmux Context Engine runtime",
             error,
         );
+    }
+
+    private withUpdateNotice(result: any): any {
+        const notice = this.updateChecker.consumeNotice();
+        if (!notice || !Array.isArray(result?.content)) {
+            return result;
+        }
+
+        const firstTextContent = result.content.find(
+            (item: any) => item?.type === "text" && typeof item.text === "string",
+        );
+
+        if (!firstTextContent) {
+            return result;
+        }
+
+        firstTextContent.text = `${notice}\n\n${firstTextContent.text}`;
+        return result;
     }
 
     private getConfigReadError(): Error | null {
@@ -218,6 +261,7 @@ Search the indexed codebase with code-search style queries within a specified ab
 - You MUST provide an absolute path.
 - Do NOT pass a broad natural-language sentence as the only query when the user is asking where behavior is implemented.
 - Rewrite natural-language requests into focused code-search terms before calling this tool.
+- Strongly prefer English queries, even when the user's request is in another language.
 
 **When to Use**:
 This tool is versatile and can be used before completing various tasks to retrieve relevant context:
@@ -233,7 +277,7 @@ This tool is versatile and can be used before completing various tasks to retrie
 - If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first and recommending a project ignore file such as .hceignore.
 - You can then use the index_codebase tool to index the codebase before searching again.
 - For natural-language discovery tasks, generate one focused query per likely implementation angle instead of one broad sentence.
-- Include likely identifiers, class/function names, file names, path segments, and English code/domain terms.
+- Include likely identifiers, class/function names, file names, path segments, and English code/domain terms. Strongly prefer English for query terms.
 - Include scope hints such as client, server, shared, UI, network, rendering, storage, validation, worker, or route when relevant.
 - Prefer several short searches and compare their results by path, symbol, and content evidence.
 
@@ -336,7 +380,7 @@ This tool is versatile and can be used before completing various tasks to retrie
                                 query: {
                                     type: "string",
                                     description:
-                                        "Focused code-search query. Rewrite natural-language requests into likely identifiers, filenames, path words, English domain terms, and scope hints. Prefer multiple short searches over one broad sentence.",
+                                        "Focused code-search query. Strongly prefer English query terms. Rewrite natural-language requests into likely identifiers, filenames, path words, English domain terms, and scope hints. Prefer multiple short searches over one broad sentence.",
                                 },
                                 limit: {
                                     type: "number",
@@ -367,10 +411,17 @@ This tool is versatile and can be used before completing various tasks to retrie
                                         "Optional: attach compact trace_symbol evidence for a small number of top implementation or entry results. Defaults to false.",
                                     default: false,
                                 },
+                                consistency: {
+                                    type: "string",
+                                    enum: ["low_latency", "strong"],
+                                    description:
+                                        "Optional search consistency mode. Defaults to low_latency, which uses watcher dirty paths when available and never blocks on full-scan reconciliation. Use strong only when the search must refresh the index before returning.",
+                                    default: "low_latency",
+                                },
                                 skipConsistencyCheck: {
                                     type: "boolean",
                                     description:
-                                        "Optional: skip the pre-search incremental sync and allow searching the current index even if it may be stale or an automatic sync is in progress. Defaults to false.",
+                                        "Deprecated compatibility option. When true, forces low_latency behavior. Prefer consistency='low_latency' or consistency='strong'.",
                                     default: false,
                                 },
                                 extensionFilter: {
@@ -495,40 +546,52 @@ This tool is versatile and can be used before completing various tasks to retrie
                         runtime.backgroundSyncStarted = true;
                     }
                 } catch (error) {
-                    return this.formatRuntimeInitializationError(error);
+                    return this.withUpdateNotice(
+                        this.formatRuntimeInitializationError(error),
+                    );
                 }
 
                 try {
+                    let result: any;
                     switch (name) {
                         case "index_codebase":
-                            return await runtime.toolHandlers.handleIndexCodebase(
+                            result = await runtime.toolHandlers.handleIndexCodebase(
                                 args,
                             );
+                            return this.withUpdateNotice(result);
                         case "search_code":
-                            return await runtime.toolHandlers.handleSearchCode(
+                            result = await runtime.toolHandlers.handleSearchCode(
                                 args,
                             );
+                            return this.withUpdateNotice(result);
                         case "trace_symbol":
-                            return await runtime.toolHandlers.handleTraceSymbol(
+                            result = await runtime.toolHandlers.handleTraceSymbol(
                                 args,
                             );
+                            return this.withUpdateNotice(result);
                         case "clear_index":
-                            return await runtime.toolHandlers.handleClearIndex(
+                            result = await runtime.toolHandlers.handleClearIndex(
                                 args,
                             );
+                            return this.withUpdateNotice(result);
                         case "get_indexing_status":
-                            return await runtime.toolHandlers.handleGetIndexingStatus(
+                            result = await runtime.toolHandlers.handleGetIndexingStatus(
                                 args,
                             );
+                            return this.withUpdateNotice(result);
 
                         default:
-                            return this.formatToolError("Unknown tool", name);
+                            return this.withUpdateNotice(
+                                this.formatToolError("Unknown tool", name),
+                            );
                     }
                 } catch (error) {
                     console.error(`[MCP] Tool '${name}' failed:`, error);
-                    return this.formatToolError(
-                        `Error running tool '${name}'`,
-                        error,
+                    return this.withUpdateNotice(
+                        this.formatToolError(
+                            `Error running tool '${name}'`,
+                            error,
+                        ),
                     );
                 }
             },
@@ -577,6 +640,11 @@ async function main() {
 
     if (args[0] === "test") {
         const exitCode = await runCliTestCommand(args.slice(1));
+        process.exit(exitCode);
+    }
+
+    if (args[0] === "list" || args[0] === "rm" || args[0] === "index") {
+        const exitCode = await runCliManageCommand(args);
         process.exit(exitCode);
     }
 

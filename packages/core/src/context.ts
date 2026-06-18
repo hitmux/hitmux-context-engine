@@ -6,7 +6,8 @@ import {
 import {
     Embedding,
     EmbeddingVector,
-    OpenAIEmbedding
+    OpenAIEmbedding,
+    getEmbeddingIndexingDefaults
 } from './embedding';
 import {
     VectorDatabase,
@@ -14,6 +15,7 @@ import {
     VectorSearchResult,
     HybridSearchRequest,
     HybridSearchResult,
+    InsertOptions,
     DEFAULT_SEARCH_OUTPUT_FIELDS,
     STRUCTURED_METADATA_FIELDS
 } from './vectordb';
@@ -21,6 +23,7 @@ import {
     SearchResultGroup,
     SearchScoreReason,
     SearchTargetRole,
+    SemanticSearchFilenameLikeQuery,
     SemanticSearchOptions,
     SemanticSearchResult,
     SymbolTraceOptions,
@@ -41,9 +44,12 @@ import {
     isFileRoleExplicitlyRequested
 } from './search/file-role';
 import { normalizeLineRange } from './search/line-range';
+import { diversifySemanticSearchResultsByFile } from './search/result-diversify';
 import { deduplicateSemanticSearchResults, getNormalizedContentHash } from './search/result-dedupe';
 import { traceSymbolInFiles } from './search/symbol-trace';
 import { countEffectiveLinesInContent } from './utils/effective-lines';
+
+const FILE_TOKEN_PATTERN = /(?:^|[\s"'`(<{\[])([A-Za-z0-9_.@+~-]+(?:[\\/][A-Za-z0-9_.@+~-]+)*\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})(?=$|[\s"'`),}\]>:;!?])/g;
 
 /**
  * Thrown by indexCodebase / processFileList when an AbortSignal fires
@@ -74,6 +80,12 @@ interface ReindexByChangeOptions {
     skipEffectiveLineLimit?: boolean;
 }
 
+interface IncrementalChanges {
+    added: string[];
+    removed: string[];
+    modified: string[];
+}
+
 interface FileProcessingProgress {
     filePath: string;
     fileIndex: number;
@@ -81,6 +93,56 @@ interface FileProcessingProgress {
     processedChunks: number;
     totalChunks: number;
     fileProgress: number;
+}
+
+interface IndexingTimingMetrics {
+    totalIndexingMs: number;
+    prepareCollectionMs: number;
+    loadIgnorePatternsMs: number;
+    scanFilesMs: number;
+    fileWeightStatMs: number;
+    readAndSplitMs: number;
+    embeddingMs: number;
+    vectorInsertMs: number;
+    flushLoadMs: number;
+    verifyMs: number;
+}
+
+interface CodeFileDiscoveryMetrics {
+    fileSizes: Map<string, number>;
+    fileStatMs: number;
+}
+
+interface VectorDatabasePerformanceMetrics {
+    flushLoadMs?: number;
+}
+
+interface InstrumentedVectorDatabase extends VectorDatabase {
+    drainPerformanceMetrics?: () => VectorDatabasePerformanceMetrics;
+}
+
+interface ProcessFileListOptions {
+    deferVectorFlushLoad?: boolean;
+    ensureCollectionBeforeInsert?: (dimension: number) => Promise<void>;
+    knownFileSizes?: Map<string, number>;
+}
+
+interface ChunkBatchInsertOptions extends InsertOptions {
+    ensureCollectionBeforeInsert?: (dimension: number) => Promise<void>;
+}
+
+interface PrepareCollectionOptions {
+    rejectExistingFullIndex?: boolean;
+    createIfMissing?: boolean;
+    dimension?: number;
+    abortSignal?: AbortSignal;
+}
+
+interface PrepareCollectionResult {
+    collectionName: string;
+    collectionExists: boolean;
+    created: boolean;
+    creationDeferred: boolean;
 }
 
 /**
@@ -101,6 +163,7 @@ export class EmbeddingError extends Error {
 }
 
 const DEFAULT_AUTOMATIC_INCREMENTAL_EFFECTIVE_LINE_LIMIT = 5_000;
+const MAX_INDEX_FILE_BYTES = 128 * 1024 * 1024;
 
 export class IndexingVerificationError extends Error {
     constructor(message: string) {
@@ -191,6 +254,12 @@ interface GroupedSearchResult extends SemanticSearchResult {
     originalOrder: number;
 }
 
+interface NormalizedSemanticSearchOptions {
+    targetRole: SearchTargetRole;
+    includeRelated: boolean;
+    filenameLikeQuery?: SemanticSearchFilenameLikeQuery;
+}
+
 interface StructuralSearchTerms {
     terms: string[];
     variants: string[];
@@ -209,6 +278,7 @@ interface LexicalSearchTerms {
     weakDescriptors: string[];
     roleHints: string[];
     pathHints: string[];
+    literalAnchors: string[];
     recallTerms: string[];
     scoringTerms: string[];
 }
@@ -336,6 +406,8 @@ export class Context {
     private searchTimeoutMs: number;
     private maxDepth?: number;
     private hybridMode?: boolean;
+    private activeIndexingBatchCount: number = 0;
+    private indexingBatchWaiters: Array<() => void> = [];
 
     constructor(config: ContextConfig = {}) {
         // Initialize services
@@ -506,7 +578,7 @@ export class Context {
      * Public wrapper for prepareCollection private method
      */
     async getPreparedCollection(codebasePath: string): Promise<void> {
-        return this.prepareCollection(codebasePath);
+        await this.prepareCollection(codebasePath);
     }
 
     private getIsHybrid(): boolean {
@@ -631,37 +703,96 @@ export class Context {
         signal?: AbortSignal,
         requestOptions: IndexingRequestOptions = {}
     ): Promise<{ indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
+        this.throwIfIndexAborted(signal);
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
         console.log(`[Context] 🚀 Starting to index codebase with ${searchType}: ${codebasePath}`);
         const splitter = requestSplitter || this.codeSplitter;
+        const timingMetrics = this.createIndexingTimingMetrics();
+        const indexingStartedAt = this.getMonotonicMs();
+        const fileDiscoveryMetrics: CodeFileDiscoveryMetrics = {
+            fileSizes: new Map<string, number>(),
+            fileStatMs: 0
+        };
+        this.drainVectorDatabasePerformanceMetrics();
 
         // 1. Compute ignore patterns for this codebase/request without
         // retaining file-based patterns from previous codebases.
-        const ignorePatterns = await this.loadIgnorePatterns(
-            codebasePath,
-            additionalIgnorePatterns,
-            requestOptions.additionalIgnoreFiles || []
+        const ignorePatterns = await this.measureIndexingStage(
+            timingMetrics,
+            'loadIgnorePatternsMs',
+            () => this.loadIgnorePatterns(
+                codebasePath,
+                additionalIgnorePatterns,
+                requestOptions.additionalIgnoreFiles || []
+            )
         );
+        this.throwIfIndexAborted(signal);
 
         // 2. Check and prepare vector collection
         progressCallback?.({ phase: 'Preparing collection...', current: 0, total: 100, percentage: 0 });
         console.log(`Debug2: Preparing vector collection for codebase${forceReindex ? ' (FORCE REINDEX)' : ''}`);
-        await this.prepareCollection(codebasePath, forceReindex, splitter, { rejectExistingFullIndex: true });
+        const prepareResult = await this.measureIndexingStage(
+            timingMetrics,
+            'prepareCollectionMs',
+            () => this.prepareCollection(codebasePath, forceReindex, splitter, {
+                rejectExistingFullIndex: true,
+                createIfMissing: false,
+                abortSignal: signal
+            })
+        );
+        this.throwIfIndexAborted(signal);
+        let deferredCollectionCreation: Promise<void> | undefined;
+        let deferredCollectionDimension: number | undefined;
+        const ensureCollectionBeforeInsert = prepareResult.creationDeferred
+            ? async (dimension: number): Promise<void> => {
+                if (deferredCollectionDimension !== undefined && deferredCollectionDimension !== dimension) {
+                    throw new EmbeddingError(
+                        `Embedding API returned inconsistent vector dimensions during indexing: first batch=${deferredCollectionDimension}, current batch=${dimension}`
+                    );
+                }
+
+                deferredCollectionDimension = dimension;
+                if (!deferredCollectionCreation) {
+                    deferredCollectionCreation = this.measureIndexingStage(
+                        timingMetrics,
+                        'prepareCollectionMs',
+                        () => this.createCollectionWithDimension(codebasePath, splitter, dimension)
+                    ).then(() => undefined);
+                }
+
+                await deferredCollectionCreation;
+            }
+            : undefined;
 
         // 3. Recursively traverse codebase to get all supported files
         progressCallback?.({ phase: 'Scanning files...', current: 5, total: 100, percentage: 5 });
         const supportedExtensions = this.getEffectiveSupportedExtensions(additionalSupportedExtensions, codebasePath);
-        const codeFiles = await this.getCodeFiles(
-            codebasePath,
-            ignorePatterns,
-            supportedExtensions,
-            requestOptions.maxDepth
+        const codeFiles = await this.measureIndexingStage(
+            timingMetrics,
+            'scanFilesMs',
+            () => this.getCodeFiles(
+                codebasePath,
+                ignorePatterns,
+                supportedExtensions,
+                requestOptions.maxDepth,
+                fileDiscoveryMetrics
+            )
         );
+        timingMetrics.scanFilesMs = Math.max(0, timingMetrics.scanFilesMs - fileDiscoveryMetrics.fileStatMs);
+        timingMetrics.fileWeightStatMs += fileDiscoveryMetrics.fileStatMs;
         console.log(`[Context] 📁 Found ${codeFiles.length} code files`);
 
         if (codeFiles.length === 0) {
             progressCallback?.({ phase: 'No files to index', current: 100, total: 100, percentage: 100 });
+            timingMetrics.totalIndexingMs = this.getMonotonicMs() - indexingStartedAt;
+            this.logIndexingTimingSummary(codebasePath, {
+                indexedFiles: 0,
+                totalChunks: 0,
+                embeddingBatchSize: this.getEmbeddingBatchSize(codebasePath),
+                embeddingConcurrency: this.getEmbeddingConcurrency(codebasePath),
+                fileProcessingConcurrency: this.getFileProcessingConcurrency(codebasePath)
+            }, timingMetrics);
             return { indexedFiles: 0, totalChunks: 0, status: 'completed' };
         }
 
@@ -669,11 +800,16 @@ export class Context {
         // Reserve 10% for preparation/scanning and 5% for final verification.
         const indexingStartPercentage = 10;
         const indexingEndPercentage = 95;
-        const progressTracker = await this.createWeightedFileProgressTracker(
-            codeFiles,
-            indexingStartPercentage,
-            indexingEndPercentage,
-            progressCallback
+        const progressTracker = await this.measureIndexingStage(
+            timingMetrics,
+            'fileWeightStatMs',
+            () => this.createWeightedFileProgressTracker(
+                codeFiles,
+                indexingStartPercentage,
+                indexingEndPercentage,
+                progressCallback,
+                fileDiscoveryMetrics.fileSizes
+            )
         );
 
         const result = await this.processFileList(
@@ -691,12 +827,31 @@ export class Context {
                     progress.fileProgress,
                     `Processing ${path.relative(codebasePath, progress.filePath)} (${progress.processedChunks}/${progress.totalChunks} chunks)...`
                 );
+            },
+            timingMetrics,
+            {
+                deferVectorFlushLoad: true,
+                ensureCollectionBeforeInsert,
+                knownFileSizes: fileDiscoveryMetrics.fileSizes
             }
         );
 
-        await this.verifyIndexedCollection(codebasePath, result.totalChunks);
+        await this.measureIndexingStage(
+            timingMetrics,
+            'verifyMs',
+            () => this.verifyIndexedCollection(codebasePath, result.totalChunks)
+        );
+        this.drainVectorDatabasePerformanceMetrics(timingMetrics);
 
         console.log(`[Context] ✅ Codebase indexing completed! Processed ${result.processedFiles} files in total, generated ${result.totalChunks} code chunks`);
+        timingMetrics.totalIndexingMs = this.getMonotonicMs() - indexingStartedAt;
+        this.logIndexingTimingSummary(codebasePath, {
+            indexedFiles: result.processedFiles,
+            totalChunks: result.totalChunks,
+            embeddingBatchSize: result.embeddingBatchSize,
+            embeddingConcurrency: result.embeddingConcurrency,
+            fileProcessingConcurrency: result.fileProcessingConcurrency
+        }, timingMetrics);
 
         progressCallback?.({
             phase: 'Indexing complete!',
@@ -736,9 +891,64 @@ export class Context {
 
         progressCallback?.({ phase: 'Checking for file changes...', current: 0, total: 100, percentage: 0 });
         const { added, removed, modified } = await currentSynchronizer.checkForChanges({ deferSnapshotUpdate: true });
+        return this.applyIncrementalChanges(
+            codebasePath,
+            collectionName,
+            currentSynchronizer,
+            { added, removed, modified },
+            splitter,
+            progressCallback,
+            options
+        );
+    }
+
+    async reindexChangedPaths(
+        codebasePath: string,
+        relativePaths: string[],
+        progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number }) => void,
+        additionalIgnorePatterns: string[] = [],
+        additionalSupportedExtensions: string[] = [],
+        requestSplitter?: Splitter,
+        additionalIgnoreFiles: string[] = [],
+        maxDepth?: number,
+        options: ReindexByChangeOptions = {}
+    ): Promise<{ added: number, removed: number, modified: number }> {
+        const collectionName = this.getCollectionName(codebasePath);
+        const splitter = requestSplitter || this.codeSplitter;
+
+        const ignorePatterns = await this.loadIgnorePatterns(codebasePath, additionalIgnorePatterns, additionalIgnoreFiles);
+        const supportedExtensions = this.getEffectiveSupportedExtensions(additionalSupportedExtensions, codebasePath);
+        const currentSynchronizer = new FileSynchronizer(codebasePath, ignorePatterns, supportedExtensions, { maxDepth });
+        await currentSynchronizer.initialize();
+        this.synchronizers.set(collectionName, currentSynchronizer);
+
+        progressCallback?.({ phase: 'Checking targeted file changes...', current: 0, total: 100, percentage: 0 });
+        const changes = await currentSynchronizer.checkChangedPaths(relativePaths, { deferSnapshotUpdate: true });
+        return this.applyIncrementalChanges(
+            codebasePath,
+            collectionName,
+            currentSynchronizer,
+            changes,
+            splitter,
+            progressCallback,
+            options
+        );
+    }
+
+    private async applyIncrementalChanges(
+        codebasePath: string,
+        collectionName: string,
+        currentSynchronizer: FileSynchronizer,
+        changes: IncrementalChanges,
+        splitter: Splitter,
+        progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number }) => void,
+        options: ReindexByChangeOptions = {}
+    ): Promise<{ added: number, removed: number, modified: number }> {
+        const { added, removed, modified } = changes;
         const totalChanges = added.length + removed.length + modified.length;
 
         if (totalChanges === 0) {
+            await currentSynchronizer.commitPendingChanges();
             progressCallback?.({ phase: 'No changes detected', current: 100, total: 100, percentage: 100 });
             console.log('[Context] ✅ No file changes detected.');
             return { added: 0, removed: 0, modified: 0 };
@@ -768,7 +978,8 @@ export class Context {
         let lastProgressPercentage = -1;
         const completedIndexFiles = new Set<string>();
         const emitProgress = (phase: string, currentWorkWeight: number) => {
-            const percentage = Math.max(0, Math.min(100, Math.round((currentWorkWeight / totalWorkWeight) * 100)));
+            const computedPercentage = Math.max(0, Math.min(100, Math.round((currentWorkWeight / totalWorkWeight) * 100)));
+            const percentage = Math.max(lastProgressPercentage, computedPercentage);
             if (percentage === lastProgressPercentage && percentage !== 100) {
                 return;
             }
@@ -796,13 +1007,11 @@ export class Context {
             emitProgress(phase, completedWorkWeight);
         };
 
-        // Handle removed files
         for (const file of removed) {
             await this.deleteFileChunks(collectionName, file);
             completeDeletionWork(`Removed ${file}`);
         }
 
-        // Handle modified files
         for (const file of modified) {
             await this.deleteFileChunks(collectionName, file);
             completeDeletionWork(`Deleted old chunks for ${file}`);
@@ -925,7 +1134,7 @@ export class Context {
     ): Promise<SemanticSearchResult[]> {
         const outputLimit = this.normalizeSearchOutputLimit(topK);
         const candidateLimit = this.getSearchCandidateLimit(outputLimit);
-        const searchOptions = this.normalizeSemanticSearchOptions(options);
+        const searchOptions = this.normalizeSemanticSearchOptions(query, options);
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
         console.log(`[Context] 🔍 Executing ${searchType}: "${query}" in ${codebasePath}`);
@@ -944,8 +1153,21 @@ export class Context {
         if (isHybrid === true) {
             try {
                 // Check collection stats to see if it has data
-                await this.vectorDatabase.query(collectionName, '', ['id'], 1);
-                console.log(`[Context] 🔍 Collection '${collectionName}' exists and appears to have data`);
+                const rowCount = await this.vectorDatabase.getCollectionRowCount(collectionName);
+                if (rowCount === 0) {
+                    console.log(`[Context] ⚠️  Collection '${collectionName}' exists but has 0 searchable rows. Please re-index the codebase.`);
+                    return [];
+                }
+                if (rowCount > 0) {
+                    console.log(`[Context] 🔍 Collection '${collectionName}' exists and has ${rowCount} searchable rows`);
+                } else {
+                    const sampleRows = await this.vectorDatabase.query(collectionName, '', ['id'], 1);
+                    if (sampleRows.length === 0) {
+                        console.log(`[Context] ⚠️  Collection '${collectionName}' exists but returned no sample rows. Please re-index the codebase.`);
+                        return [];
+                    }
+                    console.log(`[Context] 🔍 Collection '${collectionName}' exists and appears to have data`);
+                }
             } catch (error) {
                 console.log(`[Context] ⚠️  Collection '${collectionName}' exists but may be empty or not properly indexed:`, error);
             }
@@ -1046,11 +1268,98 @@ export class Context {
         );
     }
 
-    private normalizeSemanticSearchOptions(options: SemanticSearchOptions): Required<SemanticSearchOptions> {
+    private normalizeSemanticSearchOptions(query: string, options: SemanticSearchOptions): NormalizedSemanticSearchOptions {
+        const explicitFilenameLikeQuery = this.isSemanticSearchFilenameLikeQuery(options.filenameLikeQuery)
+            ? options.filenameLikeQuery
+            : undefined;
+        const inferredFilenameLikeQuery = explicitFilenameLikeQuery
+            ? undefined
+            : this.extractFilenameLikeQuery(query);
+
         return {
             targetRole: this.isSearchTargetRole(options.targetRole) ? options.targetRole : 'implementation',
-            includeRelated: options.includeRelated !== false
+            includeRelated: options.includeRelated !== false,
+            ...(explicitFilenameLikeQuery ?? inferredFilenameLikeQuery
+                ? { filenameLikeQuery: explicitFilenameLikeQuery ?? inferredFilenameLikeQuery }
+                : {})
         };
+    }
+
+    private extractFilenameLikeQuery(query: string): SemanticSearchFilenameLikeQuery | undefined {
+        const matches: SemanticSearchFilenameLikeQuery[] = [];
+        let match: RegExpExecArray | null;
+
+        FILE_TOKEN_PATTERN.lastIndex = 0;
+        while ((match = FILE_TOKEN_PATTERN.exec(query)) !== null) {
+            const raw = match[1];
+            if (!raw) {
+                continue;
+            }
+
+            const normalizedPath = this.normalizeQueryPath(raw);
+            if (!this.isLikelyFileToken(normalizedPath)) {
+                continue;
+            }
+
+            const candidate: SemanticSearchFilenameLikeQuery = {
+                normalizedPath,
+                basename: path.posix.basename(normalizedPath),
+                isPathLike: normalizedPath.includes('/')
+            };
+
+            if (!matches.some(existing => existing.normalizedPath === candidate.normalizedPath)) {
+                matches.push(candidate);
+            }
+        }
+
+        if (matches.length !== 1) {
+            return undefined;
+        }
+
+        return this.isStandaloneFilenameLikeQuery(query, matches[0].normalizedPath) ? matches[0] : undefined;
+    }
+
+    private normalizeQueryPath(value: string): string {
+        return value
+            .trim()
+            .replace(/\\/g, '/')
+            .replace(/^\.\/+/, '')
+            .replace(/\/+/g, '/');
+    }
+
+    private isLikelyFileToken(normalizedPath: string): boolean {
+        const basename = path.posix.basename(normalizedPath);
+        if (basename.length === 0 || basename === '.' || basename === '..') {
+            return false;
+        }
+
+        if (/^\.[A-Za-z0-9_-]+$/.test(basename)) {
+            return true;
+        }
+
+        const extension = path.posix.extname(basename);
+        return extension.length >= 2 && extension.length <= 17 && /[A-Za-z0-9]/.test(extension.slice(1));
+    }
+
+    private isStandaloneFilenameLikeQuery(query: string, normalizedPath: string): boolean {
+        const trimmedQuery = query
+            .trim()
+            .replace(/^[\s"'`(<{\[]+/, '')
+            .replace(/[\s"'`),}\]>:;!?]+$/, '');
+        return this.normalizeQueryPath(trimmedQuery) === normalizedPath;
+    }
+
+    private isSemanticSearchFilenameLikeQuery(value: unknown): value is SemanticSearchFilenameLikeQuery {
+        if (!value || typeof value !== 'object') {
+            return false;
+        }
+
+        const candidate = value as Partial<SemanticSearchFilenameLikeQuery>;
+        return typeof candidate.normalizedPath === 'string'
+            && candidate.normalizedPath.length > 0
+            && typeof candidate.basename === 'string'
+            && candidate.basename.length > 0
+            && typeof candidate.isPathLike === 'boolean';
     }
 
     private isSearchTargetRole(value: unknown): value is SearchTargetRole {
@@ -1080,7 +1389,7 @@ export class Context {
 
     private applySearchResultGrouping(
         results: SemanticSearchResult[],
-        options: Required<SemanticSearchOptions>,
+        options: NormalizedSemanticSearchOptions,
         query: string,
         filterExpr: string | undefined,
         outputLimit: number
@@ -1092,7 +1401,7 @@ export class Context {
             const resultGroup = this.getSearchResultGroup(fileRole);
             const isPrimary = this.isPrimarySearchResult(fileRole, options.targetRole, roleIntent, result.relativePath, query);
             const roleSortPriority = this.getSearchResultRoleSortPriority(fileRole, resultGroup, options.targetRole, roleIntent, result.relativePath, query);
-            const ownerSignalPriority = this.getOwnerSignalPriority(result);
+            const ownerSignalPriority = this.getOwnerSignalPriority(result, query);
             const structureScore = this.getSearchResultStructureScore(result, structuralTerms, options.targetRole);
             return {
                 ...result,
@@ -1134,16 +1443,18 @@ export class Context {
             : decoratedResults.filter(result => result.isPrimary);
 
         if (!options.includeRelated) {
-            return orderedResults
-                .slice(0, outputLimit)
+            return diversifySemanticSearchResultsByFile(orderedResults, outputLimit)
                 .map(result => this.stripGroupedSearchResultSortFields(result));
         }
 
         const primaryResults = orderedResults.filter(result => result.isPrimary);
         const relatedResults = orderedResults.filter(result => !result.isPrimary);
         const relatedReserve = this.getRelatedResultReserve(outputLimit, primaryResults.length, relatedResults.length);
-        const selectedPrimary = primaryResults.slice(0, Math.max(0, outputLimit - relatedReserve));
-        const selectedRelated = this.selectRelatedSearchResults(relatedResults, outputLimit - selectedPrimary.length);
+        const selectedPrimary = diversifySemanticSearchResultsByFile(primaryResults, Math.max(0, outputLimit - relatedReserve));
+        const selectedRelated = this.selectRelatedSearchResults(
+            diversifySemanticSearchResultsByFile(relatedResults, relatedResults.length),
+            outputLimit - selectedPrimary.length
+        );
 
         return [...selectedPrimary, ...selectedRelated]
             .slice(0, outputLimit)
@@ -1327,17 +1638,31 @@ export class Context {
         return this.getSearchResultGroupPriority(group) + 1;
     }
 
-    private getOwnerSignalPriority(result: SemanticSearchResult): number {
+    private getOwnerSignalPriority(result: SemanticSearchResult, query: string): number {
         const reasons = result.scoreReasons ?? (result.scoreReason ? [result.scoreReason] : []);
         if (reasons.includes('exact_filename') || reasons.includes('exact_symbol_definition')) {
             return 0;
         }
 
-        if (reasons.includes('path_match')) {
+        if (reasons.includes('path_match') || this.hasLiteralAnchorMatch(result, query)) {
             return 1;
         }
 
         return 2;
+    }
+
+    private hasLiteralAnchorMatch(result: SemanticSearchResult, query: string): boolean {
+        const literalAnchors = this.extractLexicalSearchTerms(query).literalAnchors;
+        if (literalAnchors.length === 0) {
+            return false;
+        }
+
+        const lowerPath = result.relativePath.toLowerCase();
+        const lowerContent = result.content.toLowerCase();
+        return literalAnchors.some(anchor => {
+            const lowerAnchor = anchor.toLowerCase();
+            return lowerPath.includes(lowerAnchor) || lowerContent.includes(lowerAnchor);
+        });
     }
 
     private getSearchResultStructureScore(
@@ -1515,7 +1840,7 @@ export class Context {
         outputLimit: number,
         filterExpr: string | undefined,
         vectorResults: SemanticSearchResult[],
-        options: Required<SemanticSearchOptions>
+        options: NormalizedSemanticSearchOptions
     ): Promise<SemanticSearchResult[]> {
         const terms = this.extractLexicalSearchTerms(query);
         if (terms.recallTerms.length === 0) {
@@ -1528,7 +1853,9 @@ export class Context {
         let exactCandidates: RankedLexicalCandidate[] = [];
         try {
             const lexicalLimits = this.getLexicalCandidateLimits(candidateLimit);
-            const exactFilter = this.buildExactCandidateFilter(terms, filterExpr);
+            const exactFilter = options.filenameLikeQuery
+                ? this.buildFilenameLikeExactCandidateFilter(options.filenameLikeQuery, filterExpr)
+                : this.buildExactCandidateFilter(terms, filterExpr);
             exactRows = await this.vectorDatabase.query(
                 collectionName,
                 exactFilter,
@@ -1536,7 +1863,7 @@ export class Context {
                 lexicalLimits.exact
             );
             exactCandidates = this.rankLexicalRows(exactRows, terms, roleIntent);
-            if (this.shouldQueryBroadLexicalCandidates(exactCandidates, outputLimit, lexicalLimits.exact)) {
+            if (!options.filenameLikeQuery && this.shouldQueryBroadLexicalCandidates(exactCandidates, outputLimit, lexicalLimits.exact)) {
                 const lexicalFilter = this.buildLexicalFilter(terms, filterExpr);
                 broadRows = await this.vectorDatabase.query(
                     collectionName,
@@ -1546,6 +1873,11 @@ export class Context {
                 );
             }
         } catch (error) {
+            if (this.isMissingStructuredFieldError(error) && options.filenameLikeQuery) {
+                console.warn(`[Context] Filename-like lexical supplement unavailable for '${collectionName}' because structured filename fields are missing.`);
+                return vectorResults;
+            }
+
             throw this.isMissingStructuredFieldError(error)
                 ? this.createCollectionSchemaMismatchError(collectionName, 'Milvus rejected one or more structured lexical filter fields.')
                 : error;
@@ -1625,6 +1957,23 @@ export class Context {
             }) => result);
     }
 
+    private buildFilenameLikeExactCandidateFilter(query: SemanticSearchFilenameLikeQuery, filterExpr?: string): string {
+        const filenameFilter = query.isPathLike
+            ? `relativePath == "${this.escapeFilterString(query.normalizedPath)}"`
+            : this.buildBasenameExactFilter(query.basename);
+        if (filterExpr && filterExpr.trim().length > 0) {
+            return `(${filterExpr}) and (${filenameFilter})`;
+        }
+
+        return `(${filenameFilter})`;
+    }
+
+    private buildBasenameExactFilter(fileName: string): string {
+        const extension = path.posix.extname(fileName);
+        const basename = path.posix.basename(fileName, extension);
+        return `basename == "${this.escapeFilterString(basename)}" and fileExtension == "${this.escapeFilterString(extension)}"`;
+    }
+
     private getLexicalCandidateLimits(topK: number): { exact: number; broad: number } {
         const normalizedTopK = Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 5;
 
@@ -1651,7 +2000,7 @@ export class Context {
 
     private extractLexicalSearchTerms(query: string): LexicalSearchTerms {
         const rawTerms = query
-            .split(/[^A-Za-z0-9_./-]+/)
+            .split(/[^A-Za-z0-9_./:-]+/)
             .map(term => term.trim())
             .filter(term => term.length >= 3 && term.length <= 120);
 
@@ -1659,22 +2008,38 @@ export class Context {
         const weakDescriptors = new Set<string>();
         const roleHints = new Set<string>();
         const pathHints = new Set<string>();
+        const literalAnchors = new Set<string>();
         for (const term of rawTerms) {
-            if (!/^[A-Za-z0-9_./-]+$/.test(term)) {
+            if (!/^[A-Za-z0-9_./:-]+$/.test(term)) {
                 continue;
             }
 
+            const isHttpPath = /^\/[A-Za-z0-9_./:-]+$/.test(term) && term.includes('/');
             const isPathLike = /[./-]/.test(term);
             const isIdentifierLike = /[A-Z]/.test(term) && /[a-z]/.test(term);
+            const isSnakeCase = /^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*$/.test(term) && term.length >= 6;
+            const isEnvVar = /^[A-Z][A-Z0-9_]{2,}$/.test(term) && term.includes('_');
+            const isDottedOrColonApi = /^[A-Za-z_][A-Za-z0-9_-]*(?:[.:][A-Za-z_][A-Za-z0-9_-]*)+$/.test(term);
             const isLongSpecificToken = term.length >= 12 && !/^[a-z]+$/.test(term);
             const isRoleHint = this.isFileRoleHintToken(term);
+            if (this.isQueryAnchorStopword(term)) {
+                weakDescriptors.add(term);
+                continue;
+            }
+            if (isHttpPath || isDottedOrColonApi || isEnvVar) {
+                literalAnchors.add(term);
+                if (isHttpPath || isPathLike) {
+                    pathHints.add(term);
+                }
+            }
+
             if (isPathLike) {
                 pathHints.add(term);
-                const basename = path.basename(term, path.extname(term));
+                const basename = isHttpPath ? '' : path.basename(term, path.extname(term));
                 if (basename && basename !== term && basename.length >= 3) {
                     pathHints.add(basename);
                 }
-            } else if (isIdentifierLike || isLongSpecificToken) {
+            } else if (isIdentifierLike || isSnakeCase || isEnvVar || isDottedOrColonApi || isLongSpecificToken) {
                 strongAnchors.add(term);
             } else if (isRoleHint) {
                 roleHints.add(term);
@@ -1683,10 +2048,11 @@ export class Context {
             }
         }
 
-        const primaryTerms = [
+        const primaryTerms = [...new Set([
             ...strongAnchors,
             ...pathHints,
-        ].slice(0, 8);
+            ...literalAnchors,
+        ])].slice(0, 8);
         const fallbackRecallTerms = primaryTerms.length > 0
             ? primaryTerms
             : [...roleHints].slice(0, 8);
@@ -1696,12 +2062,14 @@ export class Context {
             weakDescriptors: [...weakDescriptors].slice(0, 8),
             roleHints: [...roleHints].slice(0, 8),
             pathHints: [...pathHints].slice(0, 8),
+            literalAnchors: [...literalAnchors].slice(0, 8),
             recallTerms: fallbackRecallTerms,
-            scoringTerms: [
+            scoringTerms: [...new Set([
                 ...strongAnchors,
                 ...pathHints,
                 ...roleHints,
-            ].slice(0, 12)
+                ...literalAnchors,
+            ])].slice(0, 12)
         };
     }
 
@@ -1734,6 +2102,7 @@ export class Context {
             .flatMap(term => {
                 const filters = [
                     `relativePath like "%${term}%"`,
+                    `content like "%${term}%"`,
                     `basename == "${term}"`,
                     `primarySymbol == "${term}"`,
                     `primarySymbol like "%${term}%"`,
@@ -1773,7 +2142,13 @@ export class Context {
 
     private isMissingStructuredFieldError(error: unknown): boolean {
         const message = error instanceof Error ? error.message : String(error);
-        return STRUCTURED_METADATA_FIELDS.some(field => message.includes(field))
+        const lowerMessage = message.toLowerCase();
+        const lexicalFilterFields = [
+            ...STRUCTURED_METADATA_FIELDS,
+            'fileExtension',
+            'relativePath',
+        ];
+        return lexicalFilterFields.some(field => lowerMessage.includes(field.toLowerCase()))
             && /field|schema|output|not.*exist|not.*found|cannot.*find|undefined/i.test(message);
     }
 
@@ -1783,6 +2158,10 @@ export class Context {
 
     private isFileRoleHintToken(term: string): boolean {
         return /^(?:__tests__|tests?|specs?|e2e|readme|docs?|documentation|markdown|mdx?|css|scss|sass|less|stylus?|styles?|stylesheet|generated|dist|build|bundle|minified|min)$/i.test(term);
+    }
+
+    private isQueryAnchorStopword(term: string): boolean {
+        return /^(?:where|when|what|which|who|whom|whose|why|how|does|this|that|these|those|with|from|into|onto|between|including|implemented|handles?|uses?|reads?|writes?|shows?|find)$/i.test(term);
     }
 
     private vectorSearchResultToSemanticSearchResult(document: VectorDocument, score: number): SemanticSearchResult {
@@ -2194,7 +2573,13 @@ export class Context {
      */
     async hasIndex(codebasePath: string): Promise<boolean> {
         const collectionName = this.getCollectionName(codebasePath);
-        return await this.vectorDatabase.hasCollection(collectionName);
+        const hasCollection = await this.vectorDatabase.hasCollection(collectionName);
+        if (!hasCollection) {
+            return false;
+        }
+
+        const rowCount = await this.vectorDatabase.getCollectionRowCount(collectionName);
+        return rowCount !== 0;
     }
 
     /**
@@ -2295,41 +2680,108 @@ export class Context {
         codebasePath: string,
         forceReindex: boolean = false,
         splitter: Splitter = this.codeSplitter,
-        options: { rejectExistingFullIndex?: boolean } = {}
-    ): Promise<void> {
+        options: PrepareCollectionOptions = {}
+    ): Promise<PrepareCollectionResult> {
         const isHybrid = this.getIsHybrid();
         const collectionType = isHybrid === true ? 'hybrid vector' : 'vector';
         console.log(`[Context] 🔧 Preparing ${collectionType} collection for codebase: ${codebasePath}${forceReindex ? ' (FORCE REINDEX)' : ''}`);
         const collectionName = this.getCollectionName(codebasePath);
 
         // Check if collection already exists
+        this.throwIfIndexAborted(options.abortSignal);
         const collectionExists = await this.vectorDatabase.hasCollection(collectionName);
+        this.throwIfIndexAborted(options.abortSignal);
 
         if (collectionExists && !forceReindex) {
+            const rowCount = await this.vectorDatabase.getCollectionRowCount(collectionName);
+            this.throwIfIndexAborted(options.abortSignal);
             if (options.rejectExistingFullIndex) {
-                throw new ExistingCollectionFullIndexError(
-                    `Collection '${collectionName}' already exists for '${codebasePath}'. Refusing ordinary full indexing because it would append chunks without removing stale rows. Use incremental indexing to sync changes, or use force=true to rebuild the collection.`
-                );
-            }
-            await this.validateExistingCollectionEmbedding(collectionName);
-            if (isHybrid === true) {
-                console.log(`📋 Hybrid collection ${collectionName} already exists, ensuring indexes are ready`);
-                await this.vectorDatabase.ensureHybridCollectionReady(collectionName);
+                if (rowCount !== 0) {
+                    const rowCountDetails = rowCount > 0 ? ` It currently has ${rowCount} searchable row(s).` : '';
+                    throw new ExistingCollectionFullIndexError(
+                        `Collection '${collectionName}' already exists for '${codebasePath}'.${rowCountDetails} Refusing ordinary full indexing because it would append chunks without removing stale rows. Use incremental indexing to sync changes, or use force=true to rebuild the collection.`
+                    );
+                }
+                console.log(`📋 Collection ${collectionName} already exists but has 0 rows, dropping it before full indexing`);
+                this.throwIfIndexAborted(options.abortSignal);
+                await this.vectorDatabase.dropCollection(collectionName);
+                if (options.createIfMissing === false) {
+                    console.log(`[Context] ⏳ Collection ${collectionName} will be recreated after the first embedding batch determines vector dimension`);
+                    return {
+                        collectionName,
+                        collectionExists: true,
+                        created: false,
+                        creationDeferred: true
+                    };
+                }
             } else {
-                console.log(`📋 Collection ${collectionName} already exists, skipping creation`);
+                await this.validateExistingCollectionEmbedding(collectionName);
+                if (isHybrid === true) {
+                    console.log(`📋 Hybrid collection ${collectionName} already exists, ensuring indexes are ready`);
+                    await this.vectorDatabase.ensureHybridCollectionReady(collectionName);
+                } else {
+                    console.log(`📋 Collection ${collectionName} already exists, skipping creation`);
+                }
+                return {
+                    collectionName,
+                    collectionExists: true,
+                    created: false,
+                    creationDeferred: false
+                };
             }
-            return;
         }
 
         if (collectionExists && forceReindex) {
             console.log(`[Context] 🗑️  Dropping existing collection ${collectionName} for force reindex...`);
+            this.throwIfIndexAborted(options.abortSignal);
             await this.vectorDatabase.dropCollection(collectionName);
             console.log(`[Context] ✅ Collection ${collectionName} dropped successfully`);
         }
 
+        if (options.createIfMissing === false) {
+            console.log(`[Context] ⏳ Collection ${collectionName} will be created after the first embedding batch determines vector dimension`);
+            return {
+                collectionName,
+                collectionExists: false,
+                created: false,
+                creationDeferred: true
+            };
+        }
+
+        const dimension = options.dimension ?? await this.detectEmbeddingDimensionForCollection();
+        if (options.dimension === undefined) {
+            console.log(`[Context] 📏 Detected dimension: ${dimension} for ${this.embedding.getProvider()}`);
+        } else {
+            console.log(`[Context] 📏 Using embedding dimension from first batch: ${dimension} for ${this.embedding.getProvider()}`);
+        }
+
+        await this.createCollectionWithDimension(codebasePath, splitter, dimension);
+        return {
+            collectionName,
+            collectionExists: false,
+            created: true,
+            creationDeferred: false
+        };
+    }
+
+    private throwIfIndexAborted(signal?: AbortSignal, processedFiles: number = 0, totalFiles: number = 0): void {
+        if (signal?.aborted) {
+            throw new IndexAbortError(`Indexing aborted after processing ${processedFiles}/${totalFiles} files`);
+        }
+    }
+
+    private async detectEmbeddingDimensionForCollection(): Promise<number> {
         console.log(`[Context] 🔍 Detecting embedding dimension for ${this.embedding.getProvider()} provider...`);
-        const dimension = await this.embedding.detectDimension();
-        console.log(`[Context] 📏 Detected dimension: ${dimension} for ${this.embedding.getProvider()}`);
+        return this.embedding.detectDimension();
+    }
+
+    private async createCollectionWithDimension(
+        codebasePath: string,
+        splitter: Splitter,
+        dimension: number
+    ): Promise<void> {
+        const isHybrid = this.getIsHybrid();
+        const collectionName = this.getCollectionName(codebasePath);
         const description = this.createCollectionDescription(codebasePath, this.getCurrentEmbeddingMetadata(dimension), splitter);
         if (isHybrid === true) {
             await this.vectorDatabase.createHybridCollection(collectionName, dimension, description);
@@ -2490,6 +2942,145 @@ export class Context {
         return constructorName || 'custom';
     }
 
+    private createIndexingTimingMetrics(): IndexingTimingMetrics {
+        return {
+            totalIndexingMs: 0,
+            prepareCollectionMs: 0,
+            loadIgnorePatternsMs: 0,
+            scanFilesMs: 0,
+            fileWeightStatMs: 0,
+            readAndSplitMs: 0,
+            embeddingMs: 0,
+            vectorInsertMs: 0,
+            flushLoadMs: 0,
+            verifyMs: 0
+        };
+    }
+
+    private getMonotonicMs(): number {
+        return Number(process.hrtime.bigint()) / 1_000_000;
+    }
+
+    private async measureIndexingStage<T>(
+        metrics: IndexingTimingMetrics | undefined,
+        key: keyof IndexingTimingMetrics,
+        action: () => Promise<T>
+    ): Promise<T> {
+        if (!metrics) {
+            return action();
+        }
+
+        const startedAt = this.getMonotonicMs();
+        try {
+            return await action();
+        } finally {
+            metrics[key] += this.getMonotonicMs() - startedAt;
+        }
+    }
+
+    private getEmbeddingBatchSize(codebasePath: string): number {
+        const configured = configManager.getNumber('embeddingBatchSize', codebasePath);
+        if (configured !== undefined) {
+            return Math.max(1, Math.floor(configured));
+        }
+
+        return this.getDefaultEmbeddingIndexingOptions(codebasePath).batchSize;
+    }
+
+    private getEmbeddingConcurrency(codebasePath: string): number {
+        const configured = configManager.getNumber('embeddingConcurrency', codebasePath);
+        if (configured !== undefined) {
+            return Math.max(1, Math.floor(configured));
+        }
+
+        return this.getDefaultEmbeddingIndexingOptions(codebasePath).concurrency;
+    }
+
+    private getFileProcessingConcurrency(codebasePath: string): number {
+        return Math.max(1, Math.floor(configManager.getNumber('fileProcessingConcurrency', codebasePath) || 2));
+    }
+
+    private getDefaultEmbeddingIndexingOptions(codebasePath: string): { batchSize: number; concurrency: number } {
+        const configuredProvider = configManager.getString('embeddingProvider', codebasePath);
+        const configuredModel = configManager.getString('embeddingModel', codebasePath);
+        const embeddingProvider = this.embedding.getProvider();
+        const embeddingModel = this.embedding.getModel();
+        const provider = this.resolveEmbeddingDefaultProvider(configuredProvider, embeddingProvider);
+        const model = this.resolveEmbeddingDefaultModel(provider, configuredProvider, configuredModel, embeddingModel);
+
+        return getEmbeddingIndexingDefaults(
+            provider,
+            model
+        );
+    }
+
+    private resolveEmbeddingDefaultProvider(configuredProvider: string | undefined, embeddingProvider: string): string | undefined {
+        if (configuredProvider === 'OpenRouter' && embeddingProvider === 'OpenAI') {
+            return configuredProvider;
+        }
+
+        if (embeddingProvider && embeddingProvider !== 'unknown') {
+            return embeddingProvider;
+        }
+
+        return configuredProvider;
+    }
+
+    private resolveEmbeddingDefaultModel(
+        provider: string | undefined,
+        configuredProvider: string | undefined,
+        configuredModel: string | undefined,
+        embeddingModel: string
+    ): string | undefined {
+        if (provider && provider === configuredProvider) {
+            return configuredModel || (embeddingModel !== 'unknown' ? embeddingModel : undefined);
+        }
+
+        if (embeddingModel && embeddingModel !== 'unknown') {
+            return embeddingModel;
+        }
+
+        return configuredModel;
+    }
+
+    private drainVectorDatabasePerformanceMetrics(metrics?: IndexingTimingMetrics): number {
+        const vectorDatabase = this.vectorDatabase as InstrumentedVectorDatabase;
+        const snapshot = vectorDatabase.drainPerformanceMetrics?.();
+        if (!snapshot) {
+            return 0;
+        }
+
+        const flushLoadMs = snapshot.flushLoadMs || 0;
+        if (metrics) {
+            metrics.flushLoadMs += flushLoadMs;
+        }
+        return flushLoadMs;
+    }
+
+    private logIndexingTimingSummary(
+        codebasePath: string,
+        summary: {
+            indexedFiles: number;
+            totalChunks: number;
+            embeddingBatchSize: number;
+            embeddingConcurrency: number;
+            fileProcessingConcurrency: number;
+        },
+        metrics: IndexingTimingMetrics
+    ): void {
+        const roundedMetrics = Object.fromEntries(
+            Object.entries(metrics).map(([key, value]) => [key, Math.round(value)])
+        );
+        const totalIndexingSeconds = Math.max(metrics.totalIndexingMs / 1000, 0.001);
+        console.log('[Context] ⏱️ Indexing timing summary:', {
+            codebasePath,
+            ...summary,
+            ...roundedMetrics,
+            filesPerSecond: Number((summary.indexedFiles / totalIndexingSeconds).toFixed(2)),
+            chunksPerSecond: Number((summary.totalChunks / totalIndexingSeconds).toFixed(2))
+        });
+    }
+
     private isEmbeddingModelCheckSkipped(): boolean {
         const value = process.env[Context.SKIP_EMBEDDING_MODEL_CHECK_ENV];
         return typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
@@ -2502,7 +3093,8 @@ export class Context {
         codebasePath: string,
         ignorePatterns: string[] = this.ignorePatterns,
         supportedExtensions: string[] = this.supportedExtensions,
-        requestMaxDepth?: number
+        requestMaxDepth?: number,
+        discoveryMetrics?: CodeFileDiscoveryMetrics
     ): Promise<string[]> {
         const files: string[] = [];
         const maxDepth = this.normalizeMaxDepth(requestMaxDepth) ?? this.maxDepth;
@@ -2528,6 +3120,17 @@ export class Context {
                     const ext = path.extname(entry.name);
                     if (supportedExtensions.includes(ext)) {
                         files.push(fullPath);
+                        if (discoveryMetrics) {
+                            const startedAt = this.getMonotonicMs();
+                            try {
+                                const stat = await fs.promises.stat(fullPath);
+                                discoveryMetrics.fileSizes.set(fullPath, stat.size);
+                            } catch (error) {
+                                console.warn(`[Context] ⚠️  Could not stat file ${fullPath} during file discovery: ${error}`);
+                            } finally {
+                                discoveryMetrics.fileStatMs += this.getMonotonicMs() - startedAt;
+                            }
+                        }
                     }
                 }
             }
@@ -2537,17 +3140,25 @@ export class Context {
         return files;
     }
 
-    private async getFileProcessingWeights(filePaths: string[]): Promise<{ weights: Map<string, number>; totalWeight: number }> {
+    private async getFileProcessingWeights(
+        filePaths: string[],
+        knownFileSizes: Map<string, number> = new Map<string, number>()
+    ): Promise<{ weights: Map<string, number>; totalWeight: number }> {
         const weights = new Map<string, number>();
         let totalWeight = 0;
 
         await Promise.all(filePaths.map(async (filePath) => {
             let weight = 1;
-            try {
-                const stat = await fs.promises.stat(filePath);
-                weight = Math.max(1, stat.size);
-            } catch (error) {
-                console.warn(`[Context] ⚠️  Could not stat file ${filePath} for progress weighting: ${error}`);
+            const knownSize = knownFileSizes.get(filePath);
+            if (knownSize !== undefined) {
+                weight = Math.max(1, knownSize);
+            } else {
+                try {
+                    const stat = await fs.promises.stat(filePath);
+                    weight = Math.max(1, stat.size);
+                } catch (error) {
+                    console.warn(`[Context] ⚠️  Could not stat file ${filePath} for progress weighting: ${error}`);
+                }
             }
             weights.set(filePath, weight);
             totalWeight += weight;
@@ -2563,12 +3174,13 @@ export class Context {
         filePaths: string[],
         startPercentage: number,
         endPercentage: number,
-        progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number }) => void
+        progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number }) => void,
+        knownFileSizes: Map<string, number> = new Map<string, number>()
     ): Promise<{
         updateFile: (filePath: string, fileProgress: number, phase: string) => void;
         completeFile: (filePath: string, phase: string) => void;
     }> {
-        const fileWeights = await this.getFileProcessingWeights(filePaths);
+        const fileWeights = await this.getFileProcessingWeights(filePaths, knownFileSizes);
         const completedFiles = new Set<string>();
         let completedWeight = 0;
         let lastPercentage = -1;
@@ -2577,7 +3189,7 @@ export class Context {
             const totalWeight = Math.max(fileWeights.totalWeight, 1);
             const safeProgress = Math.max(0, Math.min(1, currentWeight / totalWeight));
             const percentage = Math.max(
-                startPercentage,
+                Math.max(startPercentage, lastPercentage),
                 Math.min(endPercentage, Math.round(startPercentage + safeProgress * (endPercentage - startPercentage)))
             );
             if (!force && percentage === lastPercentage) {
@@ -2620,19 +3232,31 @@ export class Context {
         onFileProcessed?: (filePath: string, fileIndex: number, totalFiles: number) => void,
         splitter: Splitter = this.codeSplitter,
         signal?: AbortSignal,
-        onFileProgress?: (progress: FileProcessingProgress) => void
-    ): Promise<{ processedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
+        onFileProgress?: (progress: FileProcessingProgress) => void,
+        timingMetrics?: IndexingTimingMetrics,
+        options: ProcessFileListOptions = {}
+    ): Promise<{
+        processedFiles: number;
+        totalChunks: number;
+        status: 'completed' | 'limit_reached';
+        embeddingBatchSize: number;
+        embeddingConcurrency: number;
+        fileProcessingConcurrency: number;
+    }> {
         const isHybrid = this.getIsHybrid();
-        const EMBEDDING_BATCH_SIZE = Math.max(1, Math.floor(configManager.getNumber('embeddingBatchSize') || 32));
-        const EMBEDDING_CONCURRENCY = Math.max(1, Math.floor(configManager.getNumber('embeddingConcurrency') || 1));
+        const EMBEDDING_BATCH_SIZE = this.getEmbeddingBatchSize(codebasePath);
+        const EMBEDDING_CONCURRENCY = this.getEmbeddingConcurrency(codebasePath);
+        const FILE_PROCESSING_CONCURRENCY = Math.min(filePaths.length || 1, this.getFileProcessingConcurrency(codebasePath));
         const CHUNK_LIMIT = 450000;
         console.log(`[Context] 🔧 Using embeddingBatchSize: ${EMBEDDING_BATCH_SIZE}`);
         console.log(`[Context] 🔧 Using embeddingConcurrency: ${EMBEDDING_CONCURRENCY}`);
+        console.log(`[Context] 🔧 Using fileProcessingConcurrency: ${FILE_PROCESSING_CONCURRENCY}`);
 
         let chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }> = [];
         let processedFiles = 0;
         let totalChunks = 0;
         let limitReached = false;
+        let chunkLimitWarningLogged = false;
         type BatchResult = { ok: true } | { ok: false; error: unknown };
         const activeBatches = new Set<Promise<BatchResult>>();
 
@@ -2654,22 +3278,54 @@ export class Context {
             }
             const result = await Promise.race(activeBatches);
             if (!result.ok) {
+                firstFatalError = firstFatalError ?? result.error;
                 throwBatchError(result.error, 'concurrent');
             }
         };
 
+        const markChunkLimitReached = (): void => {
+            if (!chunkLimitWarningLogged) {
+                console.warn(`[Context] ⚠️  Chunk limit of ${CHUNK_LIMIT} reached. Stopping indexing.`);
+                chunkLimitWarningLogged = true;
+            }
+            limitReached = true;
+        };
+
         const waitForAllBatches = async (): Promise<void> => {
+            let batchError: unknown;
             while (activeBatches.size > 0) {
-                await waitForOneBatch();
+                try {
+                    await waitForOneBatch();
+                } catch (error) {
+                    batchError = batchError ?? error;
+                }
+            }
+            if (batchError !== undefined) {
+                throw batchError;
+            }
+        };
+
+        const drainActiveBatches = async (): Promise<void> => {
+            while (activeBatches.size > 0) {
+                try {
+                    await waitForOneBatch();
+                } catch {
+                    // Preserve firstFatalError and wait for every in-flight write to settle.
+                }
             }
         };
 
         const enqueueChunkBuffer = async (buffer: Array<{ chunk: CodeChunk; codebasePath: string }>): Promise<void> => {
             const batch = buffer;
-            const task: Promise<BatchResult> = this.processChunkBuffer(batch)
+            const releaseSlot = await this.acquireIndexingBatchSlot(EMBEDDING_CONCURRENCY);
+            const task: Promise<BatchResult> = this.processChunkBuffer(batch, timingMetrics, {
+                deferFlushLoad: options.deferVectorFlushLoad === true,
+                ensureCollectionBeforeInsert: options.ensureCollectionBeforeInsert
+            })
                 .then(() => ({ ok: true as const }))
                 .catch((error) => ({ ok: false as const, error }))
                 .finally(() => {
+                    releaseSlot();
                     activeBatches.delete(task);
                 });
             activeBatches.add(task);
@@ -2679,83 +3335,174 @@ export class Context {
             }
         };
 
-        for (let i = 0; i < filePaths.length; i++) {
-            // Cooperative cancellation: bail out at the next file boundary so the
-            // caller (e.g. clear_index) can rely on no further inserts/snapshot
-            // writes happening once it has signalled abort. See issue #199.
-            if (signal?.aborted) {
-                throw new IndexAbortError(`Indexing aborted after processing ${processedFiles}/${filePaths.length} files`);
+        let nextFileIndex = 0;
+        let chunkQueue: Promise<void> = Promise.resolve();
+        let firstFatalError: unknown;
+
+        const throwIfStopped = (): void => {
+            this.throwIfIndexAborted(signal, processedFiles, filePaths.length);
+            if (firstFatalError !== undefined) {
+                throw firstFatalError;
             }
+        };
 
-            const filePath = filePaths[i];
-
-            let content: string;
-            let chunks: CodeChunk[];
+        const runChunkQueue = async (action: () => Promise<void>): Promise<void> => {
+            const previous = chunkQueue;
+            let releaseQueue!: () => void;
+            chunkQueue = new Promise<void>((resolve) => {
+                releaseQueue = resolve;
+            });
+            await previous;
             try {
-                content = await fs.promises.readFile(filePath, 'utf-8');
-                const language = this.getLanguageFromExtension(path.extname(filePath));
-                chunks = await splitter.split(content, language, filePath);
+                throwIfStopped();
+                await action();
             } catch (error) {
-                if (error instanceof EmbeddingError) {
+                firstFatalError = firstFatalError ?? error;
+                throw error;
+            } finally {
+                releaseQueue();
+            }
+        };
+
+        const readAndSplitFile = async (filePath: string): Promise<{ content: string; chunks: CodeChunk[] } | undefined> => {
+            try {
+                const readSplitStartedAt = this.getMonotonicMs();
+                try {
+                    const knownSize = options.knownFileSizes?.get(filePath);
+                    const fileSize = knownSize ?? (await fs.promises.stat(filePath)).size;
+                    if (fileSize > MAX_INDEX_FILE_BYTES) {
+                        console.warn(`[Context] ⚠️  Skipping file ${filePath}: ${Math.round(fileSize / 1024 / 1024)}MB exceeds the ${Math.round(MAX_INDEX_FILE_BYTES / 1024 / 1024)}MB indexing file size limit`);
+                        return undefined;
+                    }
+                    let content = await fs.promises.readFile(filePath, 'utf-8');
+                    const extension = path.extname(filePath);
+                    if (extension === '.ipynb') {
+                        content = this.extractNotebookSource(content);
+                    }
+                    const language = this.getLanguageFromExtension(extension);
+                    const chunks = this.deduplicateFileChunks(
+                        await splitter.split(content, language, filePath),
+                        codebasePath,
+                        filePath
+                    );
+                    return { content, chunks };
+                } finally {
+                    if (timingMetrics) {
+                        timingMetrics.readAndSplitMs += this.getMonotonicMs() - readSplitStartedAt;
+                    }
+                }
+            } catch (error) {
+                if (error instanceof EmbeddingError || error instanceof IndexAbortError) {
                     throw error;
                 }
                 console.warn(`[Context] ⚠️  Skipping file ${filePath}: ${error}`);
-                continue;
+                return undefined;
             }
+        };
 
-            // Log files with many chunks or large content
-            if (chunks.length > 50) {
-                console.warn(`[Context] ⚠️  File ${filePath} generated ${chunks.length} chunks (${Math.round(content.length / 1024)}KB)`);
-            } else if (content.length > 100000) {
-                console.log(`📄 Large file ${filePath}: ${Math.round(content.length / 1024)}KB -> ${chunks.length} chunks`);
-            }
-
-            // Add chunks to buffer
-            for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-                const chunk = chunks[chunkIndex];
-                chunkBuffer.push({ chunk, codebasePath });
-                totalChunks++;
-
-                // Process batch when buffer reaches EMBEDDING_BATCH_SIZE
-                if (chunkBuffer.length >= EMBEDDING_BATCH_SIZE) {
-                    const batch = chunkBuffer;
-                    chunkBuffer = [];
-                    await enqueueChunkBuffer(batch);
+        const enqueueFileChunks = async (
+            filePath: string,
+            originalFileIndex: number,
+            content: string,
+            chunks: CodeChunk[]
+        ): Promise<void> => {
+            await runChunkQueue(async () => {
+                if (limitReached) {
+                    return;
                 }
 
-                // Check if chunk limit is reached
-                if (totalChunks >= CHUNK_LIMIT) {
-                    console.warn(`[Context] ⚠️  Chunk limit of ${CHUNK_LIMIT} reached. Stopping indexing.`);
-                    limitReached = true;
-                    break; // Exit the inner loop (over chunks)
+                if (chunks.length > 50) {
+                    console.warn(`[Context] ⚠️  File ${filePath} generated ${chunks.length} chunks (${Math.round(content.length / 1024)}KB)`);
+                } else if (content.length > 100000) {
+                    console.log(`📄 Large file ${filePath}: ${Math.round(content.length / 1024)}KB -> ${chunks.length} chunks`);
                 }
 
-                onFileProgress?.({
-                    filePath,
-                    fileIndex: i + 1,
-                    totalFiles: filePaths.length,
-                    processedChunks: chunkIndex + 1,
-                    totalChunks: chunks.length,
-                    fileProgress: (chunkIndex + 1) / chunks.length
-                });
-            }
+                let completedWholeFile = true;
+                for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+                    if (totalChunks >= CHUNK_LIMIT) {
+                        completedWholeFile = false;
+                        markChunkLimitReached();
+                        break;
+                    }
 
-            processedFiles++;
-            if (chunks.length === 0) {
-                onFileProgress?.({
-                    filePath,
-                    fileIndex: i + 1,
-                    totalFiles: filePaths.length,
-                    processedChunks: 0,
-                    totalChunks: 0,
-                    fileProgress: 1
-                });
-            }
-            onFileProcessed?.(filePath, i + 1, filePaths.length);
+                    const chunk = chunks[chunkIndex];
+                    chunkBuffer.push({ chunk, codebasePath });
+                    totalChunks++;
 
-            if (limitReached) {
-                break; // Exit the outer loop (over files)
+                    if (chunkBuffer.length >= EMBEDDING_BATCH_SIZE) {
+                        const batch = chunkBuffer;
+                        chunkBuffer = [];
+                        await enqueueChunkBuffer(batch);
+                    }
+
+                    onFileProgress?.({
+                        filePath,
+                        fileIndex: originalFileIndex + 1,
+                        totalFiles: filePaths.length,
+                        processedChunks: chunkIndex + 1,
+                        totalChunks: chunks.length,
+                        fileProgress: (chunkIndex + 1) / chunks.length
+                    });
+
+                    if (totalChunks >= CHUNK_LIMIT) {
+                        markChunkLimitReached();
+                        if (chunkIndex < chunks.length - 1) {
+                            completedWholeFile = false;
+                        }
+                        break;
+                    }
+                }
+
+                if (!completedWholeFile) {
+                    return;
+                }
+
+                processedFiles++;
+                if (chunks.length === 0) {
+                    onFileProgress?.({
+                        filePath,
+                        fileIndex: originalFileIndex + 1,
+                        totalFiles: filePaths.length,
+                        processedChunks: 0,
+                        totalChunks: 0,
+                        fileProgress: 1
+                    });
+                }
+                onFileProcessed?.(filePath, processedFiles, filePaths.length);
+            });
+        };
+
+        const processWorker = async (): Promise<void> => {
+            while (true) {
+                throwIfStopped();
+                if (limitReached) {
+                    return;
+                }
+                const fileIndex = nextFileIndex;
+                nextFileIndex++;
+                if (fileIndex >= filePaths.length) {
+                    return;
+                }
+
+                const filePath = filePaths[fileIndex];
+                const result = await readAndSplitFile(filePath);
+                throwIfStopped();
+                if (!result) {
+                    continue;
+                }
+                await enqueueFileChunks(filePath, fileIndex, result.content, result.chunks);
             }
+        };
+
+        const workers = Array.from({ length: FILE_PROCESSING_CONCURRENCY }, () => processWorker());
+        const workerResults = await Promise.allSettled(workers);
+        const workerError = workerResults.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
+        if (workerError !== undefined) {
+            firstFatalError = firstFatalError ?? workerError;
+        }
+        if (firstFatalError !== undefined) {
+            await drainActiveBatches();
+            throw firstFatalError;
         }
 
         // Process any remaining chunks in the buffer (skip if cancelled).
@@ -2766,27 +3513,111 @@ export class Context {
                 await enqueueChunkBuffer(chunkBuffer);
                 chunkBuffer = [];
             } catch (error) {
+                firstFatalError = firstFatalError ?? error;
+                await drainActiveBatches();
                 throwBatchError(error, 'final');
             }
         }
 
         await waitForAllBatches();
 
-        if (signal?.aborted) {
-            throw new IndexAbortError(`Indexing aborted after processing ${processedFiles}/${filePaths.length} files`);
+        this.throwIfIndexAborted(signal, processedFiles, filePaths.length);
+
+        if (options.deferVectorFlushLoad === true && totalChunks > 0) {
+            await this.finalizeVectorCollectionWrites(codebasePath, timingMetrics);
         }
 
         return {
             processedFiles,
             totalChunks,
-            status: limitReached ? 'limit_reached' : 'completed'
+            status: limitReached ? 'limit_reached' : 'completed',
+            embeddingBatchSize: EMBEDDING_BATCH_SIZE,
+            embeddingConcurrency: EMBEDDING_CONCURRENCY,
+            fileProcessingConcurrency: FILE_PROCESSING_CONCURRENCY
+        };
+    }
+
+    private extractNotebookSource(content: string): string {
+        const notebook = JSON.parse(content) as unknown;
+        if (!notebook || typeof notebook !== 'object' || !Array.isArray((notebook as { cells?: unknown }).cells)) {
+            throw new Error('Invalid Jupyter notebook: missing cells array');
+        }
+
+        return (notebook as { cells: unknown[] }).cells
+            .map((cell) => this.extractNotebookCellSource(cell))
+            .filter((source): source is string => source !== undefined)
+            .join('\n\n');
+    }
+
+    private extractNotebookCellSource(cell: unknown): string | undefined {
+        if (!cell || typeof cell !== 'object') {
+            return undefined;
+        }
+
+        const record = cell as { cell_type?: unknown; source?: unknown };
+        if (record.cell_type !== 'markdown' && record.cell_type !== 'code') {
+            return undefined;
+        }
+
+        if (typeof record.source === 'string') {
+            return record.source;
+        }
+        if (Array.isArray(record.source)) {
+            return record.source
+                .filter((line): line is string => typeof line === 'string')
+                .join('');
+        }
+        return undefined;
+    }
+
+    private deduplicateFileChunks(chunks: CodeChunk[], codebasePath: string, fallbackFilePath: string): CodeChunk[] {
+        if (chunks.length <= 1) {
+            return chunks;
+        }
+
+        const seen = new Set<string>();
+        const deduplicated: CodeChunk[] = [];
+        for (const chunk of chunks) {
+            const chunkFilePath = chunk.metadata.filePath || fallbackFilePath;
+            const relativePath = path.relative(codebasePath, chunkFilePath).replace(/\\/g, '/');
+            const key = `${relativePath}:${getNormalizedContentHash(chunk.content)}`;
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            deduplicated.push(chunk);
+        }
+        return deduplicated;
+    }
+
+    private async acquireIndexingBatchSlot(maxConcurrency: number): Promise<() => void> {
+        while (this.activeIndexingBatchCount >= maxConcurrency) {
+            await new Promise<void>((resolve) => {
+                this.indexingBatchWaiters.push(resolve);
+            });
+        }
+
+        this.activeIndexingBatchCount += 1;
+        let released = false;
+        return () => {
+            if (released) {
+                return;
+            }
+            released = true;
+            this.activeIndexingBatchCount = Math.max(0, this.activeIndexingBatchCount - 1);
+            const nextWaiter = this.indexingBatchWaiters.shift();
+            nextWaiter?.();
         };
     }
 
     /**
  * Process accumulated chunk buffer
  */
-    private async processChunkBuffer(chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }>): Promise<void> {
+    private async processChunkBuffer(
+        chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }>,
+        timingMetrics?: IndexingTimingMetrics,
+        insertOptions: ChunkBatchInsertOptions = {}
+    ): Promise<void> {
         if (chunkBuffer.length === 0) return;
 
         // Extract chunks and ensure they all have the same codebasePath
@@ -2799,7 +3630,7 @@ export class Context {
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid' : 'regular';
         console.log(`[Context] 🔄 Processing batch of ${chunks.length} chunks (~${estimatedTokens} tokens) for ${searchType}`);
-        await this.processChunkBatch(chunks, codebasePath);
+        await this.processChunkBatch(chunks, codebasePath, timingMetrics, insertOptions);
     }
 
     private async verifyIndexedCollection(codebasePath: string, totalChunks: number): Promise<void> {
@@ -2816,44 +3647,99 @@ export class Context {
             );
         }
 
+        if (rowCount > 0 && rowCount < totalChunks) {
+            throw new IndexingVerificationError(
+                `Indexing produced ${totalChunks} chunks but collection '${collectionName}' has only ${rowCount} searchable row(s)`
+            );
+        }
+
         if (rowCount < 0) {
-            console.warn(`[Context] ⚠️ Unable to verify searchable row count for collection '${collectionName}' after indexing`);
+            throw new IndexingVerificationError(
+                `Indexing produced ${totalChunks} chunks but collection '${collectionName}' row count could not be verified`
+            );
+        }
+    }
+
+    private async finalizeVectorCollectionWrites(
+        codebasePath: string,
+        timingMetrics?: IndexingTimingMetrics
+    ): Promise<void> {
+        const collectionName = this.getCollectionName(codebasePath);
+        try {
+            await this.vectorDatabase.finalizeCollectionWrites?.(collectionName);
+        } finally {
+            if (timingMetrics) {
+                this.drainVectorDatabasePerformanceMetrics(timingMetrics);
+            }
         }
     }
 
     /**
      * Process a batch of chunks
      */
-    private async processChunkBatch(chunks: CodeChunk[], codebasePath: string): Promise<void> {
+    private async processChunkBatch(
+        chunks: CodeChunk[],
+        codebasePath: string,
+        timingMetrics?: IndexingTimingMetrics,
+        insertOptions: ChunkBatchInsertOptions = {}
+    ): Promise<void> {
         const isHybrid = this.getIsHybrid();
 
         // Generate embedding vectors
         const chunkContents = chunks.map(chunk => chunk.content);
 
         let embeddings: EmbeddingVector[];
+        const embeddingStartedAt = this.getMonotonicMs();
         try {
             embeddings = await this.embedding.embedBatch(chunkContents);
         } catch (error) {
+            if (timingMetrics) {
+                this.drainVectorDatabasePerformanceMetrics(timingMetrics);
+            }
             const errorMessage = error instanceof Error ? error.message : String(error);
             // Include batch size in the log/error message so operators can
             // identify how many chunks were lost when the API call failed.
             console.error(`[Context] ❌ Embedding API failed (batch size: ${chunkContents.length}): ${errorMessage}`);
             throw new EmbeddingError(`Embedding API error (batch size: ${chunkContents.length}): ${errorMessage}`);
+        } finally {
+            if (timingMetrics) {
+                timingMetrics.embeddingMs += this.getMonotonicMs() - embeddingStartedAt;
+            }
         }
         this.validateEmbeddings(embeddings, chunks.length);
+        const { ensureCollectionBeforeInsert, ...vectorInsertOptions } = insertOptions;
+        await ensureCollectionBeforeInsert?.(embeddings[0].vector.length);
 
         if (isHybrid === true) {
             // Create hybrid vector documents
             const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index));
 
             // Store to vector database
-            await this.vectorDatabase.insertHybrid(this.getCollectionName(codebasePath), documents);
+            const insertStartedAt = this.getMonotonicMs();
+            try {
+                await this.vectorDatabase.insertHybrid(this.getCollectionName(codebasePath), documents, vectorInsertOptions);
+            } finally {
+                if (timingMetrics) {
+                    const elapsedMs = this.getMonotonicMs() - insertStartedAt;
+                    const flushLoadMs = this.drainVectorDatabasePerformanceMetrics(timingMetrics);
+                    timingMetrics.vectorInsertMs += Math.max(0, elapsedMs - flushLoadMs);
+                }
+            }
         } else {
             // Create regular vector documents
             const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index));
 
             // Store to vector database
-            await this.vectorDatabase.insert(this.getCollectionName(codebasePath), documents);
+            const insertStartedAt = this.getMonotonicMs();
+            try {
+                await this.vectorDatabase.insert(this.getCollectionName(codebasePath), documents, vectorInsertOptions);
+            } finally {
+                if (timingMetrics) {
+                    const elapsedMs = this.getMonotonicMs() - insertStartedAt;
+                    const flushLoadMs = this.drainVectorDatabasePerformanceMetrics(timingMetrics);
+                    timingMetrics.vectorInsertMs += Math.max(0, elapsedMs - flushLoadMs);
+                }
+            }
         }
     }
 
@@ -3021,6 +3907,11 @@ export class Context {
         embeddings.forEach((embedding, index) => {
             if (!embedding || !Array.isArray(embedding.vector) || embedding.vector.length === 0) {
                 throw new EmbeddingError(`Embedding API returned empty embedding vector at index ${index}`);
+            }
+            if (embedding.vector.length !== embeddings[0].vector.length) {
+                throw new EmbeddingError(
+                    `Embedding API returned inconsistent vector dimensions in one batch: index 0=${embeddings[0].vector.length}, index ${index}=${embedding.vector.length}`
+                );
             }
         });
     }

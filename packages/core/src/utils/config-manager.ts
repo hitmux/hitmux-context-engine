@@ -11,6 +11,7 @@ export interface HitmuxConfig {
     embeddingModel?: string;
     embeddingBatchSize?: number;
     embeddingConcurrency?: number;
+    fileProcessingConcurrency?: number;
     openaiApiKey?: string;
     openaiBaseUrl?: string;
     voyageaiApiKey?: string;
@@ -44,6 +45,11 @@ export interface HitmuxConfig {
     syncIntervalMs?: number;
     syncLockStaleMs?: number;
     triggerWatcher?: boolean;
+    projectWatcher?: boolean;
+    projectWatcherDebounceMs?: number;
+    projectWatcherUsePolling?: boolean;
+    projectWatcherFallbackScanIntervalMs?: number;
+    projectWatcherIgnoredDirs?: string[];
     splitterType?: string;
     searchTopK?: number;
     searchThreshold?: number;
@@ -302,9 +308,9 @@ const DEFAULT_GLOBAL_CONFIG_HEADER = `# Hitmux Context Engine global configurati
 `;
 
 const DEFAULT_GLOBAL_CONFIG_ACTIVE_CONTENT = `
-# Server metadata.
-# mcpServerName = Hitmux Context Engine MCP Server
-# mcpServerVersion = 1.0.0
+# =============================================================================
+# Basic configuration: set these fields first to make the service usable.
+# =============================================================================
 
 # Default embedding provider.
 embeddingProvider = OpenRouter
@@ -319,9 +325,24 @@ milvusAddress = localhost:19530
 embeddingUseSystemProxy = false
 databaseUseSystemProxy = false
 
+# =============================================================================
+# Advanced configuration: tune these only when you need custom behavior.
+# =============================================================================
+
+# Server metadata.
+# mcpServerName = Hitmux Context Engine MCP Server
+# mcpServerVersion = 1.0.0
+
+# Index worker defaults.
+fileProcessingConcurrency = 2
+
 # Background sync defaults.
 backgroundSync = true
 triggerWatcher = true
+projectWatcher = true
+projectWatcherDebounceMs = 1000
+projectWatcherUsePolling = false
+projectWatcherFallbackScanIntervalMs = 600000
 `;
 
 const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
@@ -353,7 +374,12 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     {
         key: 'embeddingConcurrency',
         description: 'Embedding request concurrency for index operations.',
-        example: '1'
+        example: '4'
+    },
+    {
+        key: 'fileProcessingConcurrency',
+        description: 'Read/split worker concurrency for index operations.',
+        example: '2'
     },
     {
         key: 'openaiApiKey',
@@ -497,7 +523,7 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     },
     {
         key: 'backgroundSync',
-        description: 'Enable startup and periodic background sync.',
+        description: 'Enable startup and periodic background sync; project watcher event sync remains available when false.',
         example: 'true'
     },
     {
@@ -508,7 +534,7 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     {
         key: 'syncIntervalMs',
         description: 'Background sync interval in milliseconds.',
-        example: '300000'
+        example: '120000'
     },
     {
         key: 'syncLockStaleMs',
@@ -519,6 +545,31 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
         key: 'triggerWatcher',
         description: 'Watch ~/.hitmux-context-engine/.sync-trigger for immediate debounced sync.',
         example: 'true'
+    },
+    {
+        key: 'projectWatcher',
+        description: 'Watch indexed project roots and use dirty paths for faster incremental sync.',
+        example: 'true'
+    },
+    {
+        key: 'projectWatcherDebounceMs',
+        description: 'Debounce window for project file watcher events.',
+        example: '1000'
+    },
+    {
+        key: 'projectWatcherUsePolling',
+        description: 'Use polling for project file watchers on filesystems with unreliable native events.',
+        example: 'false'
+    },
+    {
+        key: 'projectWatcherFallbackScanIntervalMs',
+        description: 'Maximum time between full fallback scans while project watcher fast path is active.',
+        example: '600000'
+    },
+    {
+        key: 'projectWatcherIgnoredDirs',
+        description: 'Directory names ignored by the project watcher; repeat the field for multiple values.',
+        example: 'node_modules'
     },
     {
         key: 'splitterType',

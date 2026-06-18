@@ -276,19 +276,30 @@ autoIndexing = true
 interactiveIndexing = true
 backgroundSync = true
 automaticIncrementalEffectiveLineLimit = 5000
-syncIntervalMs = 300000
+syncIntervalMs = 120000
 syncLockStaleMs = 600000
 triggerWatcher = true
+projectWatcher = true
+projectWatcherDebounceMs = 1000
+projectWatcherUsePolling = false
+projectWatcherFallbackScanIntervalMs = 600000
+# projectWatcherIgnoredDirs = node_modules
+# projectWatcherIgnoredDirs = dist
+# projectWatcherIgnoredDirs = build
 ```
 
 Useful combinations:
 
-- Set `backgroundSync = false` to disable periodic polling while keeping trigger-based sync.
+- Set `backgroundSync = false` to disable periodic polling while keeping trigger-based and project-watcher event sync.
 - Set `triggerWatcher = false` on read-only or sandboxed filesystems.
+- Set `projectWatcher = false` to force the older full change scan before automatic sync and default `search_code` refreshes.
+- Set `projectWatcherUsePolling = true` only when native file events are unreliable.
+- Set `projectWatcherIgnoredDirs` when the default watcher directory skips do not match the project's indexed scope.
 - Set `interactiveIndexing = false` to block `index_codebase` writes while still allowing dry-run previews.
 - Set `automaticIncrementalEffectiveLineLimit` to control when automatic incremental sync pauses and asks for manual `index_codebase` with `incremental=true`.
 
 The trigger watcher listens to `~/.hitmux-context-engine/.sync-trigger`. Touching that file requests a debounced re-index.
+The project watcher records dirty paths for indexed codebases during the MCP server lifetime and schedules a debounced targeted sync after file events. Clean projects skip full scans until `projectWatcherFallbackScanIntervalMs` forces reconciliation.
 
 ## Full Template
 
@@ -319,8 +330,9 @@ gitRemoteName = origin
 hybridMode = true
 
 searchTimeoutMs = 30000
-embeddingBatchSize = 32
-embeddingConcurrency = 1
+# embeddingBatchSize = 32
+# embeddingConcurrency = 4
+fileProcessingConcurrency = 2
 customExtensions = .vue
 customExtensions = .svelte
 customExtensions = .astro
@@ -332,9 +344,13 @@ autoIndexing = true
 interactiveIndexing = true
 backgroundSync = true
 automaticIncrementalEffectiveLineLimit = 5000
-syncIntervalMs = 300000
+syncIntervalMs = 120000
 syncLockStaleMs = 600000
 triggerWatcher = true
+projectWatcher = true
+projectWatcherDebounceMs = 1000
+projectWatcherUsePolling = false
+projectWatcherFallbackScanIntervalMs = 600000
 
 splitterType = ast
 searchTopK = 5

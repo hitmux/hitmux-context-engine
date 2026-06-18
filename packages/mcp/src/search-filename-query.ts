@@ -1,10 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
 
-const MAX_TREE_ENTRIES_TO_SCAN = 100_000;
-const MAX_INDEX_ROWS_TO_SCAN = 10_000;
-const SKIPPED_TREE_DIRS = new Set([".git", ".hg", ".svn", "node_modules"]);
 const FILE_TOKEN_PATTERN = /(?:^|[\s"'`(<{\[])([A-Za-z0-9_.@+~-]+(?:[\\/][A-Za-z0-9_.@+~-]+)*\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})(?=$|[\s"'`),}\]>:;!?])/g;
+const MAX_EXACT_BASENAME_INDEX_ROWS = 20;
 
 interface QueryableVectorDatabase {
     query(collectionName: string, filter: string, outputFields: string[], limit?: number): Promise<Record<string, any>[]>;
@@ -21,6 +19,7 @@ export interface FilenameQueryStatus {
     query: FilenameLikeQuery;
     exactFileExistsInTree: boolean | undefined;
     exactFileExistsInIndex: boolean | undefined;
+    indexVerificationWarning?: string;
 }
 
 export async function analyzeFilenameLikeQuery(options: {
@@ -34,14 +33,19 @@ export async function analyzeFilenameLikeQuery(options: {
         return null;
     }
 
-    const exactFileExistsInTree = checkExactFileInTree(options.codebasePath, filenameQuery);
     const collectionName = options.getCollectionName();
-    const exactFileExistsInIndex = await checkExactFileInIndex(options.getVectorDatabase(), collectionName, filenameQuery);
+    const indexStatus = await checkExactFileInIndex(options.getVectorDatabase(), collectionName, filenameQuery);
+    const exactFileExistsInTree = checkExactFileInTree(
+        options.codebasePath,
+        filenameQuery,
+        indexStatus.exactRelativePaths
+    );
 
     return {
         query: filenameQuery,
         exactFileExistsInTree,
-        exactFileExistsInIndex
+        exactFileExistsInIndex: indexStatus.exists,
+        ...(indexStatus.warning ? { indexVerificationWarning: indexStatus.warning } : {})
     };
 }
 
@@ -50,7 +54,9 @@ export function filenameQueryNeedsNotice(status: FilenameQueryStatus | null): bo
         return false;
     }
 
-    return status.exactFileExistsInTree === false || status.exactFileExistsInIndex === false;
+    return status.exactFileExistsInTree === false
+        || status.exactFileExistsInIndex === false
+        || typeof status.indexVerificationWarning === "string";
 }
 
 export function searchResultsAreFallbackMatches(status: FilenameQueryStatus | null): boolean {
@@ -83,6 +89,9 @@ export function formatFilenameQueryNotice(status: FilenameQueryStatus | null, ha
     } else if (exactFileExistsInIndex === false) {
         lines.push(`Exact file not found in the current index: ${target}`);
         lines.push("The index may be stale. Re-index may be needed.");
+    }
+    if (status.indexVerificationWarning) {
+        lines.push(status.indexVerificationWarning);
     }
 
     if (hasSearchResults) {
@@ -121,7 +130,11 @@ function extractFilenameLikeQuery(query: string): FilenameLikeQuery | null {
         }
     }
 
-    return matches.length === 1 ? matches[0] : null;
+    if (matches.length !== 1) {
+        return null;
+    }
+
+    return isStandaloneFilenameLikeQuery(query, matches[0].normalizedPath) ? matches[0] : null;
 }
 
 function normalizeQueryPath(value: string): string {
@@ -146,14 +159,26 @@ function isLikelyFileToken(normalizedPath: string): boolean {
     return extension.length >= 2 && extension.length <= 17 && /[A-Za-z0-9]/.test(extension.slice(1));
 }
 
-function checkExactFileInTree(codebasePath: string, query: FilenameLikeQuery): boolean | undefined {
-    try {
-        if (query.isPathLike) {
-            const candidatePath = resolveInside(codebasePath, query.normalizedPath);
-            return candidatePath ? isFile(candidatePath) : false;
-        }
+function isStandaloneFilenameLikeQuery(query: string, normalizedPath: string): boolean {
+    const trimmedQuery = query
+        .trim()
+        .replace(/^[\s"'`(<{\[]+/, "")
+        .replace(/[\s"'`),}\]>:;!?]+$/, "");
+    return normalizeQueryPath(trimmedQuery) === normalizedPath;
+}
 
-        return findFileByBasename(codebasePath, query.basename);
+function checkExactFileInTree(
+    codebasePath: string,
+    query: FilenameLikeQuery,
+    exactIndexedRelativePaths: string[] = []
+): boolean | undefined {
+    try {
+        const relativePaths = query.isPathLike ? [query.normalizedPath] : exactIndexedRelativePaths;
+        if (relativePaths.length === 0) return undefined;
+        return relativePaths.some((relativePath) => {
+            const candidatePath = resolveInside(codebasePath, relativePath);
+            return candidatePath ? isFile(candidatePath) : false;
+        });
     } catch {
         return undefined;
     }
@@ -177,68 +202,78 @@ function isFile(filePath: string): boolean {
     }
 }
 
-function findFileByBasename(rootPath: string, basename: string): boolean | undefined {
-    const stack = [rootPath];
-    let visitedEntries = 0;
-
-    while (stack.length > 0) {
-        const currentPath = stack.pop()!;
-        let entries: fs.Dirent[];
-        try {
-            entries = fs.readdirSync(currentPath, { withFileTypes: true });
-        } catch {
-            continue;
-        }
-
-        for (const entry of entries) {
-            visitedEntries += 1;
-            if (visitedEntries > MAX_TREE_ENTRIES_TO_SCAN) {
-                return undefined;
-            }
-
-            if (entry.isFile() && entry.name === basename) {
-                return true;
-            }
-
-            if (entry.isDirectory() && !SKIPPED_TREE_DIRS.has(entry.name)) {
-                stack.push(path.join(currentPath, entry.name));
-            }
-        }
-    }
-
-    return false;
-}
-
 async function checkExactFileInIndex(
     vectorDatabase: QueryableVectorDatabase,
     collectionName: string,
     query: FilenameLikeQuery
-): Promise<boolean | undefined> {
-    const filterTerm = escapeFilterString(query.isPathLike ? query.normalizedPath : query.basename);
+): Promise<{ exists: boolean | undefined; exactRelativePaths: string[]; warning?: string }> {
+    const filter = buildExactIndexFilter(query);
     try {
         const rows = await vectorDatabase.query(
             collectionName,
-            `relativePath like "%${filterTerm}%"`,
+            filter,
             ["relativePath"],
-            MAX_INDEX_ROWS_TO_SCAN
+            query.isPathLike ? 1 : MAX_EXACT_BASENAME_INDEX_ROWS
         );
 
-        return rows.some((row) => {
+        const exactRelativePaths: string[] = [];
+        const exists = rows.some((row) => {
             if (typeof row.relativePath !== "string" || row.relativePath.length === 0) {
                 return false;
             }
 
             const indexedPath = normalizeQueryPath(row.relativePath);
             if (query.isPathLike) {
-                return indexedPath === query.normalizedPath;
+                if (indexedPath === query.normalizedPath) {
+                    exactRelativePaths.push(indexedPath);
+                    return true;
+                }
+                return false;
             }
 
-            return path.posix.basename(indexedPath) === query.basename;
+            if (path.posix.basename(indexedPath) === query.basename) {
+                exactRelativePaths.push(indexedPath);
+                return true;
+            }
+            return false;
         });
+
+        return {
+            exists,
+            exactRelativePaths
+        };
     } catch (error) {
-        console.warn(`[SEARCH] Failed to check exact filename query in index '${collectionName}':`, error);
-        return undefined;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.warn(`[SEARCH] Failed to check exact filename query in index '${collectionName}': ${errorMessage}`);
+        if (isMissingStructuredFieldError(error)) {
+            return {
+                exists: undefined,
+                exactRelativePaths: [],
+                warning: "Exact filename verification is unavailable for this index schema. Re-index may be needed."
+            };
+        }
+        return { exists: undefined, exactRelativePaths: [] };
     }
+}
+
+function buildExactIndexFilter(query: FilenameLikeQuery): string {
+    if (query.isPathLike) {
+        return `relativePath == "${escapeFilterString(query.normalizedPath)}"`;
+    }
+
+    return buildBasenameExactFilter(query.basename);
+}
+
+function buildBasenameExactFilter(fileName: string): string {
+    const extension = path.posix.extname(fileName);
+    const basename = path.posix.basename(fileName, extension);
+    return `basename == "${escapeFilterString(basename)}" and fileExtension == "${escapeFilterString(extension)}"`;
+}
+
+function isMissingStructuredFieldError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /field|schema|output|not.*exist|not.*found|cannot.*find|undefined/i.test(message)
+        && /\b(?:basename|fileExtension|relativePath)\b/.test(message);
 }
 
 function escapeFilterString(value: string): string {

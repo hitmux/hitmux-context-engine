@@ -1,6 +1,12 @@
-import {
-    Embedding,
+import corePackage from "@hitmux/hitmux-context-engine-core";
+import type {
+    Embedding as EmbeddingInstance,
     EmbeddingVector,
+} from "@hitmux/hitmux-context-engine-core";
+import { ContextMcpConfig } from "./config.js";
+
+const {
+    Embedding,
     OpenAIEmbedding,
     VoyageAIEmbedding,
     GeminiEmbedding,
@@ -8,14 +14,27 @@ import {
     applySystemProxyPolicy,
     restoreProxyEnvironment,
     withSystemProxyPolicy,
-} from "@hitmux/hitmux-context-engine-core";
-import { ContextMcpConfig } from "./config.js";
+} = corePackage;
+
+const HITMUX_CLIENT_HEADERS = {
+    "X-Hitmux-Client": "Hitmux Context Engine",
+} as const;
+
+const OPENROUTER_APP_ATTRIBUTION_HEADERS = {
+    ...HITMUX_CLIENT_HEADERS,
+    "HTTP-Referer": "https://github.com/hitmux/hitmux-context-engine",
+    "X-OpenRouter-Title": "Hitmux Context Engine",
+} as const;
+
+export interface EmbeddingInstanceOptions {
+    openAiRetryMaxElapsedMs?: number;
+}
 
 class ProxyControlledEmbedding extends Embedding {
     protected maxTokens = 0;
 
     constructor(
-        private readonly delegate: Embedding,
+        private readonly delegate: EmbeddingInstance,
         private readonly useSystemProxy: boolean,
     ) {
         super();
@@ -53,12 +72,15 @@ class ProxyControlledEmbedding extends Embedding {
 }
 
 // Helper function to create embedding instance based on provider
-export function createEmbeddingInstance(config: ContextMcpConfig): Embedding {
+export function createEmbeddingInstance(
+    config: ContextMcpConfig,
+    options: EmbeddingInstanceOptions = {},
+): EmbeddingInstance {
     console.log(
         `[EMBEDDING] Creating ${config.embeddingProvider} embedding instance...`,
     );
 
-    let embedding: Embedding;
+    let embedding: EmbeddingInstance;
     const previousProxyEnv = applySystemProxyPolicy(
         config.embeddingUseSystemProxy,
     );
@@ -79,8 +101,12 @@ export function createEmbeddingInstance(config: ContextMcpConfig): Embedding {
                 embedding = new OpenAIEmbedding({
                     apiKey: config.openaiApiKey,
                     model: config.embeddingModel,
+                    defaultHeaders: HITMUX_CLIENT_HEADERS,
                     ...(config.openaiBaseUrl && {
                         baseURL: config.openaiBaseUrl,
+                    }),
+                    ...(options.openAiRetryMaxElapsedMs !== undefined && {
+                        retryMaxElapsedMs: options.openAiRetryMaxElapsedMs,
                     }),
                 });
                 console.log(
@@ -153,6 +179,10 @@ export function createEmbeddingInstance(config: ContextMcpConfig): Embedding {
                     apiKey: config.openrouterApiKey,
                     model: config.embeddingModel,
                     baseURL: "https://openrouter.ai/api/v1",
+                    defaultHeaders: OPENROUTER_APP_ATTRIBUTION_HEADERS,
+                    ...(options.openAiRetryMaxElapsedMs !== undefined && {
+                        retryMaxElapsedMs: options.openAiRetryMaxElapsedMs,
+                    }),
                 });
                 console.log(
                     `[EMBEDDING] OpenRouter embedding instance created successfully`,
@@ -196,7 +226,7 @@ export function createEmbeddingInstance(config: ContextMcpConfig): Embedding {
 
 export function logEmbeddingProviderInfo(
     config: ContextMcpConfig,
-    embedding: Embedding,
+    embedding: EmbeddingInstance,
 ): void {
     console.log(
         `[EMBEDDING] Successfully initialized ${config.embeddingProvider} embedding provider`,

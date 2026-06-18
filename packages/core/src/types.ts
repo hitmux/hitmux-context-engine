@@ -17,9 +17,16 @@ export type SearchResultGroup = 'implementation' | 'entry_exports' | 'related_te
 
 export type SearchChunkRole = 'definition' | 'method_body' | 'reference' | 'test_case' | 'assertion' | 're_export' | 'module_decl';
 
+export interface SemanticSearchFilenameLikeQuery {
+    normalizedPath: string;
+    basename: string;
+    isPathLike: boolean;
+}
+
 export interface SemanticSearchOptions {
     targetRole?: SearchTargetRole;
     includeRelated?: boolean;
+    filenameLikeQuery?: SemanticSearchFilenameLikeQuery;
 }
 
 export interface SemanticSearchResult {

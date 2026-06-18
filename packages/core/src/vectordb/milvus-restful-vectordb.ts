@@ -19,6 +19,7 @@ import {
     HybridSearchResult,
     COLLECTION_LIMIT_MESSAGE,
     DEFAULT_SEARCH_OUTPUT_FIELDS,
+    InsertOptions,
 } from './types';
 import { ClusterManager } from './zilliz-utils';
 import { formatErrorDetails, milvusOperationError } from '../utils/error-format';
@@ -28,6 +29,8 @@ import {
     createSchemaMismatchError,
     createStructuredInsertRow as createInsertRow,
     getStructuredDocumentFields,
+    getMetadataHydrationOutputFields,
+    hydrateSlimMetadataRows,
     isMissingStructuredFieldMessage,
     mergeStructuredMetadata,
     requireCurrentStructuredSchema
@@ -96,6 +99,9 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
     protected initializationPromise: Promise<void>;
     private initializationError: unknown;
     private verifiedStructuredSchemaCollections = new Set<string>();
+    private performanceMetrics = {
+        flushLoadMs: 0
+    };
 
     constructor(config: MilvusRestfulConfig) {
         this.config = config;
@@ -175,6 +181,21 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         } catch (error) {
             console.error(`[MilvusRestfulDB] ❌ Failed to ensure collection '${collectionName}' is loaded:`, error);
             throw error;
+        }
+    }
+
+    drainPerformanceMetrics(): { flushLoadMs: number } {
+        const snapshot = { ...this.performanceMetrics };
+        this.performanceMetrics.flushLoadMs = 0;
+        return snapshot;
+    }
+
+    private async measureFlushLoad<T>(action: () => Promise<T>): Promise<T> {
+        const startedAt = Number(process.hrtime.bigint()) / 1_000_000;
+        try {
+            return await action();
+        } finally {
+            this.performanceMetrics.flushLoadMs += Number(process.hrtime.bigint()) / 1_000_000 - startedAt;
         }
     }
 
@@ -447,6 +468,19 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         }
     }
 
+    private async flushCollection(collectionName: string): Promise<void> {
+        try {
+            const restfulConfig = this.config as MilvusRestfulConfig;
+            await this.makeRequest('/collections/flush', 'POST', {
+                collectionName,
+                dbName: restfulConfig.database
+            });
+        } catch (error) {
+            console.error(`[MilvusRestfulDB] ❌ Failed to flush collection '${collectionName}':`, error);
+            throw error;
+        }
+    }
+
     async dropCollection(collectionName: string): Promise<void> {
         await this.ensureInitialized();
 
@@ -496,9 +530,11 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         }
     }
 
-    async insert(collectionName: string, documents: VectorDocument[]): Promise<void> {
+    async insert(collectionName: string, documents: VectorDocument[], options: InsertOptions = {}): Promise<void> {
         await this.ensureInitialized();
-        await this.ensureLoaded(collectionName);
+        if (!options.deferFlushLoad) {
+            await this.measureFlushLoad(() => this.ensureLoaded(collectionName));
+        }
 
         try {
             const restfulConfig = this.config as MilvusRestfulConfig;
@@ -512,7 +548,12 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
             };
 
             await this.makeRequest('/entities/insert', 'POST', insertRequest);
-            await this.ensureLoaded(collectionName);
+            if (!options.deferFlushLoad) {
+                await this.measureFlushLoad(async () => {
+                    await this.flushCollection(collectionName);
+                    await this.ensureLoaded(collectionName);
+                });
+            }
 
         } catch (error) {
             console.error(`[MilvusRestfulDB] ❌ Failed to insert documents into collection '${collectionName}':`, error);
@@ -622,10 +663,12 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
 
         try {
             const restfulConfig = this.config as MilvusRestfulConfig;
+            const requestedOutputFields = outputFields;
+            const hydrationOutputFields = getMetadataHydrationOutputFields(requestedOutputFields);
             const queryRequest: Record<string, any> = {
                 collectionName,
                 dbName: restfulConfig.database,
-                outputFields,
+                outputFields: hydrationOutputFields,
                 offset: 0
             };
             // Only include filter if it's a non-empty, non-whitespace string
@@ -639,13 +682,23 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
                 queryRequest.limit = 16384;
             }
 
-            const response = await this.makeRequest('/entities/query', 'POST', queryRequest);
+            let response = await this.makeRequest('/entities/query', 'POST', queryRequest);
+            if (
+                response.code !== 0
+                && hydrationOutputFields.length !== requestedOutputFields.length
+                && isMissingStructuredFieldMessage(response.message || '')
+            ) {
+                response = await this.makeRequest('/entities/query', 'POST', {
+                    ...queryRequest,
+                    outputFields: requestedOutputFields,
+                });
+            }
 
             if (response.code !== 0) {
                 throw new Error(`Failed to query Milvus: ${response.message || 'Unknown error'}`);
             }
 
-            return response.data || [];
+            return hydrateSlimMetadataRows(response.data || [], outputFields);
 
         } catch (error) {
             console.error(`[MilvusRestfulDB] ❌ Failed to query collection '${collectionName}':`, error);
@@ -807,9 +860,11 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         }
     }
 
-    async insertHybrid(collectionName: string, documents: VectorDocument[]): Promise<void> {
+    async insertHybrid(collectionName: string, documents: VectorDocument[], options: InsertOptions = {}): Promise<void> {
         await this.ensureInitialized();
-        await this.ensureLoaded(collectionName);
+        if (!options.deferFlushLoad) {
+            await this.measureFlushLoad(() => this.ensureLoaded(collectionName));
+        }
 
         try {
             const restfulConfig = this.config as MilvusRestfulConfig;
@@ -827,12 +882,25 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
             if (response.code !== 0) {
                 throw new Error(`Insert failed: ${response.message || 'Unknown error'}`);
             }
-            await this.ensureLoaded(collectionName);
+            if (!options.deferFlushLoad) {
+                await this.measureFlushLoad(async () => {
+                    await this.flushCollection(collectionName);
+                    await this.ensureLoaded(collectionName);
+                });
+            }
 
         } catch (error) {
             console.error(`[MilvusRestfulDB] ❌ Failed to insert hybrid documents to collection '${collectionName}':`, error);
             throw error;
         }
+    }
+
+    async finalizeCollectionWrites(collectionName: string): Promise<void> {
+        await this.ensureInitialized();
+        await this.measureFlushLoad(async () => {
+            await this.flushCollection(collectionName);
+            await this.ensureLoaded(collectionName);
+        });
     }
 
     async hybridSearch(collectionName: string, searchRequests: HybridSearchRequest[], options?: HybridSearchOptions): Promise<HybridSearchResult[]> {

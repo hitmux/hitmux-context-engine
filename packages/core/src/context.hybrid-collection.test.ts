@@ -81,7 +81,7 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     query: jest.fn().mockResolvedValue([]),
     getCollectionDescription: jest.fn().mockResolvedValue(''),
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
-    getCollectionRowCount: jest.fn().mockResolvedValue(-1),
+    getCollectionRowCount: jest.fn().mockResolvedValue(999),
 });
 
 describe('Context hybrid collection recovery', () => {

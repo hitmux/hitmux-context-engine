@@ -1,0 +1,8 @@
+{
+  "runId": "rescore-2026-06-17T11-52-37.481Z",
+  "status": "rescored",
+  "updatedAt": "2026-06-17T11:52:37.481Z",
+  "scoreVersion": "file-rank-v4",
+  "backupPath": "/opt/hitmux-context-engine/benchmark/results/test-hce-newapi-cliproxyapi-smoke/results.jsonl.backup-2026-06-17T11-52-37.477Z",
+  "note": "Rescored latest benchmark records without rerunning search."
+}

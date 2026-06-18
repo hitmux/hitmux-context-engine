@@ -267,6 +267,21 @@ describe('Context lexical search supplement', () => {
         expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
     });
 
+    it.each(['basename', 'fileExtension'])('keeps filename-like search usable when structured filename field %s is missing', async (field) => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query.mockRejectedValueOnce(new Error(`field ${field} not found in schema`));
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'spawnSystem.ts', 5, 0.3);
+
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
+        expect(results[0].relativePath).toBe('server/src/rooms/GameRoom.ts');
+    });
+
     it('queries broad lexical candidates when exact rows do not contain enough owner-quality matches', async () => {
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.query
@@ -361,6 +376,158 @@ describe('Context lexical search supplement', () => {
         expect(results[0].relativePath).toBe('src/workers/bridge/renderWorkerBridge.ts');
         expect(results[0].scoreReasons).toEqual(expect.arrayContaining(['exact_filename']));
         expect(results[1].relativePath).toBe('server/src/rooms/GameRoom.ts');
+    });
+
+    it('infers filename-like queries and avoids broad lexical like filters for direct core searches', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query.mockResolvedValueOnce([createRow({
+            id: 'spawn-system',
+            content: 'export function spawnSystem() {}',
+            relativePath: 'src/systems/spawnSystem.ts',
+            startLine: 1,
+            endLine: 5,
+            metadata: {
+                language: 'typescript',
+                fileName: 'spawnSystem.ts',
+                basename: 'spawnSystem',
+            },
+        })]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        await context.semanticSearch('/repo', 'spawnSystem.ts', 5, 0.3);
+
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
+        const filter = vectorDatabase.query.mock.calls[0][1];
+        expect(filter).toBe('(basename == "spawnSystem" and fileExtension == ".ts")');
+        expect(filter).not.toContain(' like ');
+        expect(filter).not.toContain('content like');
+        expect(filter).not.toContain('relativePath like');
+    });
+
+    it('uses structured exact lexical query for basename filename-like searches', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query.mockResolvedValueOnce([createRow({
+            id: 'spawn-system',
+            content: 'export function spawnSystem() {}',
+            relativePath: 'src/systems/spawnSystem.ts',
+            startLine: 1,
+            endLine: 5,
+            metadata: {
+                language: 'typescript',
+                fileName: 'spawnSystem.ts',
+                basename: 'spawnSystem',
+            },
+        })]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        await context.semanticSearch('/repo', 'spawnSystem.ts', 5, 0.3, undefined, {
+            filenameLikeQuery: {
+                normalizedPath: 'spawnSystem.ts',
+                basename: 'spawnSystem.ts',
+                isPathLike: false,
+            },
+        });
+
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
+        const filter = vectorDatabase.query.mock.calls[0][1];
+        expect(filter).toBe('(basename == "spawnSystem" and fileExtension == ".ts")');
+        expect(filter).not.toContain(' like ');
+        expect(filter).not.toContain('content like');
+        expect(filter).not.toContain('relativePath like');
+    });
+
+    it('uses structured exact lexical query for path-like filename searches', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query.mockResolvedValueOnce([createRow({
+            id: 'spawn-system',
+            content: 'export function spawnSystem() {}',
+            relativePath: 'src/systems/spawnSystem.ts',
+            startLine: 1,
+            endLine: 5,
+            metadata: {
+                language: 'typescript',
+                fileName: 'spawnSystem.ts',
+                basename: 'spawnSystem',
+            },
+        })]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        await context.semanticSearch('/repo', 'src/systems/spawnSystem.ts', 5, 0.3, undefined, {
+            filenameLikeQuery: {
+                normalizedPath: 'src/systems/spawnSystem.ts',
+                basename: 'spawnSystem.ts',
+                isPathLike: true,
+            },
+        });
+
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
+        const filter = vectorDatabase.query.mock.calls[0][1];
+        expect(filter).toBe('(relativePath == "src/systems/spawnSystem.ts")');
+        expect(filter).not.toContain(' like ');
+        expect(filter).not.toContain('content like');
+        expect(filter).not.toContain('relativePath like');
+    });
+
+    it('recalls path fragments like router/relay-router.go as strong anchors', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'router-owner',
+                    content: 'func TaskPrivateData() {}',
+                    relativePath: 'internal/router/relay-router.go',
+                    startLine: 1,
+                    endLine: 18,
+                    fileExtension: '.go',
+                    metadata: {
+                        language: 'go',
+                        fileName: 'relay-router.go',
+                        basename: 'relay-router',
+                        symbols: ['TaskPrivateData'],
+                        definitionIdentifiers: ['TaskPrivateData'],
+                        pathTokens: ['internal', 'router', 'relay-router'],
+                    },
+                }),
+                createRow({
+                    id: 'drift',
+                    content: 'func RelayStatus() {}',
+                    relativePath: 'internal/router/relay-status.go',
+                    startLine: 1,
+                    endLine: 10,
+                    fileExtension: '.go',
+                    metadata: {
+                        language: 'go',
+                        fileName: 'relay-status.go',
+                        basename: 'relay-status',
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'router/relay-router.go TaskPrivateData', 5, 0.3);
+        const exactFilter = String(vectorDatabase.query.mock.calls[0][1]);
+
+        expect(results[0].relativePath).toBe('internal/router/relay-router.go');
+        expect(exactFilter).toContain('router/relay-router.go');
+        expect(exactFilter).toContain('TaskPrivateData');
+        expect(exactFilter).toContain('relay-router');
     });
 
     it('ranks symbol definitions above references with the same identifier', async () => {
@@ -723,6 +890,113 @@ describe('Context lexical search supplement', () => {
         expect(broadFilter).not.toContain('config');
         expect(broadFilter).not.toContain('manager');
         expect(broadFilter).not.toContain('system');
+    });
+
+    it('recalls literal anchors for HTTP paths, env vars, and dotted config keys', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'config-owner',
+                    content: [
+                        'export const FRONTEND_BASE_URL = "https://api.hitmux.com";',
+                        'export const serverPort = 8080;',
+                        'export const chatCompletionsRoute = "/v1/chat/completions";',
+                    ].join('\n'),
+                    relativePath: 'src/config/serviceConfig.ts',
+                    startLine: 1,
+                    endLine: 12,
+                    metadata: {
+                        language: 'typescript',
+                        fileName: 'serviceConfig.ts',
+                        basename: 'serviceConfig',
+                        symbols: ['FRONTEND_BASE_URL', 'serverPort', 'chatCompletionsRoute'],
+                        definitionIdentifiers: ['FRONTEND_BASE_URL', 'serverPort', 'chatCompletionsRoute'],
+                        pathTokens: ['src', 'config', 'serviceConfig'],
+                    },
+                }),
+                createRow({
+                    id: 'drift',
+                    content: 'export const chatStatusRoute = "/v1/chat/status";',
+                    relativePath: 'src/config/chatStatus.ts',
+                    startLine: 1,
+                    endLine: 8,
+                    metadata: {
+                        language: 'typescript',
+                        fileName: 'chatStatus.ts',
+                        basename: 'chatStatus',
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch(
+            '/repo',
+            'FRONTEND_BASE_URL /v1/chat/completions api.hitmux.com:443 server.port',
+            5,
+            0.3
+        );
+        const exactFilter = String(vectorDatabase.query.mock.calls[0][1]);
+
+        expect(results.map(result => result.relativePath)).toContain('src/config/serviceConfig.ts');
+        expect(exactFilter).toContain('FRONTEND_BASE_URL');
+        expect(exactFilter).toContain('/v1/chat/completions');
+        expect(exactFilter).toContain('api.hitmux.com:443');
+        expect(exactFilter).toContain('server.port');
+        expect(exactFilter).not.toContain('basename == "chat"');
+        expect(exactFilter).not.toContain('primarySymbol == "chat"');
+    });
+
+    it('keeps full HTTP route matches above tail segment matches', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'tail-only',
+                    content: 'export const completions = createLegacyCompletionHandler();',
+                    relativePath: 'src/api/completions.ts',
+                    startLine: 1,
+                    endLine: 12,
+                    metadata: {
+                        language: 'typescript',
+                        fileName: 'completions.ts',
+                        basename: 'completions',
+                        symbols: ['completions'],
+                    },
+                }),
+                createRow({
+                    id: 'full-route',
+                    content: 'router.post("/v1/chat/completions", handleChatCompletions);',
+                    relativePath: 'src/routes/chatCompletions.ts',
+                    startLine: 20,
+                    endLine: 34,
+                    metadata: {
+                        language: 'typescript',
+                        fileName: 'chatCompletions.ts',
+                        basename: 'chatCompletions',
+                        symbols: ['handleChatCompletions'],
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', '/v1/chat/completions', 5, 0.3);
+
+        expect(results[0].relativePath).toBe('src/routes/chatCompletions.ts');
+        expect(results[0].scoreReasons).toEqual(expect.arrayContaining(['reference_match']));
+        expect(results.map(result => result.relativePath).indexOf('src/routes/chatCompletions.ts')).toBeLessThan(
+            results.map(result => result.relativePath).indexOf('src/api/completions.ts')
+        );
     });
 
     it('treats a standalone config descriptor as weak when a strong anchor is present', async () => {
@@ -1103,6 +1377,64 @@ describe('Context lexical search supplement', () => {
             'docs_config',
         ]);
         expect(results.map(result => result.isPrimary)).toEqual([true, false, false]);
+    });
+
+    it('keeps targetRole=all output in original ranked order without file diversification', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValueOnce([
+            createVectorResult({
+                id: 'first-a',
+                content: 'export function firstA(): void {}',
+                relativePath: 'src/a.ts',
+                startLine: 10,
+                endLine: 20,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                    chunkRole: 'definition',
+                },
+            }, 0.99),
+            createVectorResult({
+                id: 'second-a',
+                content: 'export function secondA(): void {}',
+                relativePath: 'src/a.ts',
+                startLine: 40,
+                endLine: 50,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                    chunkRole: 'definition',
+                },
+            }, 0.98),
+            createVectorResult({
+                id: 'test',
+                content: 'it("uses A", () => firstA());',
+                relativePath: 'src/a.test.ts',
+                startLine: 1,
+                endLine: 8,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'test',
+                    chunkRole: 'test_case',
+                },
+            }, 0.97),
+        ]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'go', 3, 0.3, undefined, {
+            targetRole: 'all',
+        });
+
+        expect(results.map(result => `${result.relativePath}:${result.startLine}`)).toEqual([
+            'src/a.ts:10',
+            'src/a.ts:40',
+            'src/a.test.ts:1',
+        ]);
+        expect(results.map(result => result.isPrimary)).toEqual([true, true, true]);
     });
 
     it('reranks implementation matches by structure before semantic drift inside the same group', async () => {
@@ -1587,7 +1919,7 @@ describe('Context lexical search supplement', () => {
         expect(results[0].content).toBe(canonicalFunction);
     });
 
-    it('keeps shifted overlap chunks when they contain different definitions', async () => {
+    it('keeps distinct shifted overlap chunks without treating them as duplicate snippets', async () => {
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.search.mockResolvedValue([
             createVectorResult({

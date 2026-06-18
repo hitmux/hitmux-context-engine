@@ -1,13 +1,13 @@
 {
     "name": "hitmux-context-engine",
-    "version": "0.1.20",
+    "version": "0.1.24",
     "description": "A powerful code indexing tool with multi-platform support",
     "private": true,
     "scripts": {
         "build": "pnpm clean:build && tsc --build --force packages/core packages/mcp && pnpm build:aliases",
         "build:core": "pnpm --filter @hitmux/hitmux-context-engine-core build",
         "build:mcp": "pnpm clean:build && tsc --build --force packages/core packages/mcp",
-        "build:aliases": "pnpm -r --parallel --filter @hitmux/hce --filter @hitmux/hitmux-context-engine build",
+        "build:aliases": "pnpm -r --parallel --filter @hitmux/hce --filter hce-mcp --filter @hitmux/hitmux-context-engine build",
         "build:examples": "pnpm build:core && pnpm -r --parallel --filter='./examples/*' build",
         "dev": "pnpm -r --filter='./packages/*' dev",
         "dev:core": "pnpm --filter @hitmux/hitmux-context-engine-core dev",
@@ -23,10 +23,12 @@
         "release:core": "pnpm build:core && pnpm --filter @hitmux/hitmux-context-engine-core publish --access public --no-git-checks",
         "release:mcp": "pnpm --filter @hitmux/hitmux-context-engine-mcp publish --access public --no-git-checks",
         "release:hce": "pnpm --filter @hitmux/hce publish --access public --no-git-checks",
+        "release:hce-mcp": "pnpm --filter hce-mcp publish --access public --no-git-checks",
         "release:hitmux-context-engine": "pnpm --filter @hitmux/hitmux-context-engine publish --access public --no-git-checks",
-        "release:aliases": "pnpm release:hce && pnpm release:hitmux-context-engine",
+        "release:aliases": "pnpm release:hce && pnpm release:hce-mcp && pnpm release:hitmux-context-engine",
         "example:basic": "pnpm --filter hitmux-context-engine-basic-example start",
         "benchmark": "node scripts/build-benchmark.js",
+        "benchmark:indexing": "pnpm build:core && pnpm --dir packages/mcp exec tsx ../../benchmark/run-indexing-baseline.ts",
         "benchmark:search:cannonwar": "pnpm build:core && pnpm --dir packages/mcp exec tsx ../../evaluation/search-quality/run-cannonwar-search-quality.ts"
     },
     "devDependencies": {

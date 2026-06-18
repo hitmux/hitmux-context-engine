@@ -4,6 +4,7 @@ export {
     SearchOptions,
     VectorSearchResult,
     VectorDatabase,
+    InsertOptions,
     HybridSearchRequest,
     HybridSearchOptions,
     HybridSearchResult,

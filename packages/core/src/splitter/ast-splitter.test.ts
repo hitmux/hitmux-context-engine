@@ -119,6 +119,51 @@ describe('AstCodeSplitter leading comments', () => {
     });
 });
 
+describe('AstCodeSplitter parser cache', () => {
+    it('reuses parser and language instances per tree-sitter language branch', async () => {
+        const splitter = new AstCodeSplitter(2000, 0);
+        const cacheView = splitter as unknown as {
+            parserCache: Map<string, unknown>;
+            languageCache: Map<string, unknown>;
+        };
+
+        await splitter.split('export const first = 1;', 'typescript', '/repo/src/first.ts');
+        await splitter.split('export const second = 2;', 'ts', '/repo/src/second.ts');
+        await splitter.split('export function Panel() { return null; }', 'tsx', '/repo/src/Panel.tsx');
+        await splitter.split('package rooms\nfunc BuildRoom() {}', 'go', '/repo/rooms/registry.go');
+        await splitter.split('def build_room():\n    return None', 'python', '/repo/src/rooms.py');
+
+        expect(cacheView.parserCache.size).toBe(4);
+        expect(cacheView.languageCache.size).toBe(4);
+        expect(cacheView.parserCache.has('typescript')).toBe(true);
+        expect(cacheView.parserCache.has('tsx')).toBe(true);
+        expect(cacheView.parserCache.has('go')).toBe(true);
+        expect(cacheView.parserCache.has('python')).toBe(true);
+    });
+
+    it('keeps mixed-language cache entries correct across parallel split calls', async () => {
+        const splitter = new AstCodeSplitter(2000, 0);
+        const cacheView = splitter as unknown as {
+            parserCache: Map<string, unknown>;
+            languageCache: Map<string, unknown>;
+        };
+
+        const [tsChunks, tsxChunks, goChunks, pythonChunks] = await Promise.all([
+            splitter.split('export const value = 1;', 'typescript', '/repo/src/value.ts'),
+            splitter.split('export function Panel() { return null; }', 'tsx', '/repo/src/Panel.tsx'),
+            splitter.split('package rooms\nfunc BuildRoom() {}', 'go', '/repo/rooms/registry.go'),
+            splitter.split('def build_room():\n    return None', 'python', '/repo/src/rooms.py'),
+        ]);
+
+        expect(tsChunks.every((chunk) => chunk.metadata.language === 'typescript')).toBe(true);
+        expect(tsxChunks.every((chunk) => chunk.metadata.language === 'tsx')).toBe(true);
+        expect(goChunks.find((chunk) => chunk.metadata.symbolName === 'BuildRoom')).toBeDefined();
+        expect(pythonChunks.find((chunk) => chunk.metadata.symbolName === 'build_room')).toBeDefined();
+        expect([...cacheView.parserCache.keys()].sort()).toEqual(['go', 'python', 'tsx', 'typescript']);
+        expect([...cacheView.languageCache.keys()].sort()).toEqual(['go', 'python', 'tsx', 'typescript']);
+    });
+});
+
 describe('AstCodeSplitter symbol metadata', () => {
     it('records TypeScript definition symbols for exact search reranking', async () => {
         const splitter = new AstCodeSplitter(2000, 0);

@@ -1,0 +1,28 @@
+{
+    "name": "hce-mcp",
+    "version": "0.1.24",
+    "description": "Short package alias for the Hitmux Context Engine MCP server",
+    "type": "module",
+    "bin": {
+        "hce": "bin/hce.js"
+    },
+    "scripts": {
+        "build": "node --check bin/hce.js",
+        "prepublishOnly": "pnpm build"
+    },
+    "dependencies": {
+        "@hitmux/hitmux-context-engine-mcp": "workspace:*"
+    },
+    "files": [
+        "bin"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/hitmux/hitmux-context-engine.git",
+        "directory": "packages/hce-unscoped"
+    },
+    "license": "MIT",
+    "publishConfig": {
+        "access": "public"
+    }
+}
