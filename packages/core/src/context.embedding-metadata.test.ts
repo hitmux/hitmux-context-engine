@@ -1,8 +1,11 @@
 import * as fs from 'fs/promises';
+import * as crypto from 'crypto';
 import * as os from 'os';
 import * as path from 'path';
 import { CollectionSchemaMismatchError, Context, EmbeddingModelMismatchError } from './context';
 import { Embedding, EmbeddingVector } from './embedding';
+import { FileSynchronizer } from './sync/synchronizer';
+import { normalizeCodebaseIdentityPath } from './utils/path-identity';
 import { VectorDatabase } from './vectordb';
 
 class TestEmbedding extends Embedding {
@@ -123,6 +126,20 @@ describe('Context embedding collection metadata', () => {
         ].join('\n');
     }
 
+    async function createProjectSnapshot(project: string): Promise<void> {
+        await fs.mkdir(project, { recursive: true });
+        await fs.writeFile(path.join(project, 'index.ts'), 'export const value = 1;\n', 'utf-8');
+        const synchronizer = new FileSynchronizer(project, [], ['.ts']);
+        await synchronizer.initialize();
+        await synchronizer.checkForChanges();
+    }
+
+    function getMerkleSnapshotPath(codebasePath: string): string {
+        const normalizedPath = normalizeCodebaseIdentityPath(codebasePath);
+        const hash = crypto.createHash('md5').update(normalizedPath).digest('hex');
+        return path.join(homeDir, '.hitmux-context-engine', 'merkle', `${hash}.json`);
+    }
+
     it('stores embedding provider, model, and dimension in collection description', async () => {
         const project = path.join(tempRoot, 'project');
         const vectorDatabase = createVectorDatabase();
@@ -214,6 +231,87 @@ describe('Context embedding collection metadata', () => {
 
         await expect(context.getPreparedCollection(project)).rejects.toBeInstanceOf(CollectionSchemaMismatchError);
         expect(vectorDatabase.createCollection).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        {
+            label: 'same-dimension model mismatch',
+            description: (project: string) => createDescription(project, 'model-a', 3),
+            embedding: new TestEmbedding('test', 'model-b', 3),
+            errorType: EmbeddingModelMismatchError,
+        },
+        {
+            label: 'dimension mismatch',
+            description: (project: string) => createDescription(project, 'model-a', 3),
+            embedding: new TestEmbedding('test', 'model-a', 4),
+            errorType: EmbeddingModelMismatchError,
+        },
+        {
+            label: 'schema mismatch',
+            description: (project: string) => createDescription(project, 'model-a', 3, 1, 2),
+            embedding: new TestEmbedding('test', 'model-a', 3),
+            errorType: CollectionSchemaMismatchError,
+        },
+    ])('rejects incremental writes before deleting chunks on $label', async ({ description, embedding, errorType }) => {
+        const project = path.join(tempRoot, 'project-incremental-mismatch');
+        await createProjectSnapshot(project);
+        await fs.writeFile(path.join(project, 'index.ts'), 'export const value = 2;\n', 'utf-8');
+
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionDescription.mockResolvedValue(description(project));
+        vectorDatabase.query.mockResolvedValue([{ id: 'old-chunk' }]);
+        const context = new Context({
+            embedding,
+            vectorDatabase,
+        });
+
+        await expect(context.reindexChangedPaths(project, ['index.ts'])).rejects.toBeInstanceOf(errorType);
+
+        expect(vectorDatabase.query).not.toHaveBeenCalled();
+        expect(vectorDatabase.delete).not.toHaveBeenCalled();
+        expect(vectorDatabase.insert).not.toHaveBeenCalled();
+
+        const synchronizer = new FileSynchronizer(project, [], ['.ts']);
+        await synchronizer.initialize();
+        await expect(synchronizer.checkChangedPaths(['index.ts'])).resolves.toMatchObject({
+            modified: ['index.ts'],
+        });
+    });
+
+    it('rejects incremental metadata mismatch before creating a missing Merkle baseline', async () => {
+        const project = path.join(tempRoot, 'project-incremental-no-baseline');
+        await fs.mkdir(project, { recursive: true });
+        await fs.writeFile(path.join(project, 'index.ts'), 'export const value = 1;\n', 'utf-8');
+
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project, 'model-a', 3));
+        const context = new Context({
+            embedding: new TestEmbedding('test', 'model-b', 3),
+            vectorDatabase,
+        });
+
+        await expect(context.reindexChangedPaths(project, ['index.ts'])).rejects.toBeInstanceOf(EmbeddingModelMismatchError);
+        await expect(fs.access(getMerkleSnapshotPath(project))).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(vectorDatabase.query).not.toHaveBeenCalled();
+        expect(vectorDatabase.delete).not.toHaveBeenCalled();
+        expect(vectorDatabase.insert).not.toHaveBeenCalled();
+    });
+
+    it('rejects incremental metadata mismatch even when no content changes are detected', async () => {
+        const project = path.join(tempRoot, 'project-incremental-no-content-change');
+        await createProjectSnapshot(project);
+
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project, 'model-a', 3));
+        const context = new Context({
+            embedding: new TestEmbedding('test', 'model-b', 3),
+            vectorDatabase,
+        });
+
+        await expect(context.reindexChangedPaths(project, ['index.ts'])).rejects.toBeInstanceOf(EmbeddingModelMismatchError);
+        expect(vectorDatabase.query).not.toHaveBeenCalled();
+        expect(vectorDatabase.delete).not.toHaveBeenCalled();
+        expect(vectorDatabase.insert).not.toHaveBeenCalled();
     });
 });
 

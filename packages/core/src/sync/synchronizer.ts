@@ -7,6 +7,7 @@ import { normalizeCodebaseIdentityPath } from '../utils/path-identity';
 import { IgnoreMatcher } from '../utils/ignore-matcher';
 import { configManager } from '../utils/config-manager';
 import { countEffectiveLinesInContent } from '../utils/effective-lines';
+import { isSupportedCodeFileName } from '../utils/file-support';
 
 interface FileSnapshotState {
     hash: string;
@@ -36,6 +37,10 @@ export interface CheckForChangesOptions {
 
 export interface CheckChangedPathsOptions {
     deferSnapshotUpdate?: boolean;
+}
+
+export interface InitializeOptions {
+    createSnapshotIfMissing?: boolean;
 }
 
 export class SnapshotTooLargeError extends Error {
@@ -173,8 +178,7 @@ export class FileSynchronizer {
             } else if (stat.isFile()) {
                 // Verify it's really a file and not ignored
                 if (!this.shouldIgnore(relativePath, false)) {
-                    const ext = path.extname(entry.name);
-                    if (this.supportedExtensions.length > 0 && !this.supportedExtensions.includes(ext)) {
+                    if (this.supportedExtensions.length > 0 && !isSupportedCodeFileName(entry.name, this.supportedExtensions)) {
                         continue;
                     }
                     this.currentScanMetrics!.filesVisited += 1;
@@ -275,9 +279,11 @@ export class FileSynchronizer {
         return dag;
     }
 
-    public async initialize() {
+    public async initialize(options: InitializeOptions = {}) {
         console.log(`Initializing file synchronizer for ${this.rootDir}`);
-        await this.loadSnapshot();
+        await this.loadSnapshot({
+            createIfMissing: options.createSnapshotIfMissing !== false
+        });
         this.merkleDAG = this.buildMerkleDAG(this.fileHashes);
         console.log(`[Synchronizer] File synchronizer initialized. Loaded ${this.fileHashes.size} file hashes.`);
     }
@@ -555,8 +561,7 @@ export class FileSynchronizer {
             return null;
         }
 
-        const ext = path.extname(relativePath);
-        if (this.supportedExtensions.length > 0 && !this.supportedExtensions.includes(ext)) {
+        if (this.supportedExtensions.length > 0 && !isSupportedCodeFileName(path.basename(relativePath), this.supportedExtensions)) {
             return null;
         }
 
@@ -582,6 +587,10 @@ export class FileSynchronizer {
 
     public getFileHash(filePath: string): string | undefined {
         return this.fileHashes.get(filePath);
+    }
+
+    public getTrackedFileCount(): number {
+        return this.fileHashes.size;
     }
 
     private async saveSnapshot(): Promise<void> {
@@ -661,7 +670,7 @@ export class FileSynchronizer {
         return bytes;
     }
 
-    private async loadSnapshot(): Promise<void> {
+    private async loadSnapshot(options: { createIfMissing: boolean } = { createIfMissing: true }): Promise<void> {
         try {
             const data = await fs.readFile(this.snapshotPath, 'utf-8');
             const obj = JSON.parse(data);
@@ -688,6 +697,14 @@ export class FileSynchronizer {
             console.log(`Loaded snapshot from ${this.snapshotPath}`);
         } catch (error: any) {
             if (error.code === 'ENOENT') {
+                if (!options.createIfMissing) {
+                    console.log(`Snapshot file not found at ${this.snapshotPath}. Starting from an empty in-memory baseline.`);
+                    this.fileHashes = new Map();
+                    this.fileStates = new Map();
+                    this.pendingFileStates = new Map();
+                    this.merkleDAG = this.buildMerkleDAG(this.fileHashes);
+                    return;
+                }
                 console.log(`Snapshot file not found at ${this.snapshotPath}. Generating new one.`);
                 this.fileHashes = await this.generateFileHashes(this.rootDir);
                 this.fileStates = this.pendingFileStates;

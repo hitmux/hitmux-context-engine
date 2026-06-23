@@ -1,0 +1,54 @@
+{
+  "generatedAt": "2026-06-19T13:33:20.718Z",
+  "resultsPath": "/opt/hitmux-context-engine/benchmark/results/test-hce-p0/results.jsonl",
+  "scoreVersion": "file-rank-v4",
+  "projects": [
+    {
+      "project": "fastapi",
+      "total": 20,
+      "scorableTotal": 20,
+      "scoreExcluded": 0,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 92,
+      "primaryTop5": 18,
+      "primaryTop8": 18,
+      "primarySymbolTop5": 14,
+      "primarySymbolTop8": 14,
+      "expectedTop10": 20,
+      "expectedTop20": 20,
+      "manualReview": 5,
+      "failureTaxonomy": {
+        "expected_hit": 20,
+        "search_miss": 0,
+        "empty_result": 0,
+        "search_error": 0,
+        "invalid_fixture": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 1,
+        "anchor_not_recalled": 3,
+        "anchor_recalled_but_reranked": 1
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "missingPrimaryPathCases": 0,
+        "missingPrimaryPathCount": 0,
+        "missingAcceptablePathCases": 0,
+        "missingAcceptablePathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "unscorableCases": [],
+        "missingExpectedPaths": [],
+        "missingPrimaryPaths": [],
+        "missingAcceptablePaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100,
+      "scorePercent": 92
+    }
+  ]
+}

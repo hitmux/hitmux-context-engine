@@ -68,6 +68,44 @@ test("index_codebase rejects missing path before path resolution", async () => {
     assert.match(result.content[0].text, /'path'/);
 });
 
+test("MCP tools reject relative codebase paths", async () => {
+    await withTempDir(async () => {
+        const handlers = new ToolHandlers({
+            hasIndex: async () => {
+                throw new Error("relative path should be rejected before index lookup");
+            },
+            semanticSearch: async () => {
+                throw new Error("relative path should be rejected before search");
+            }
+        } as any, new SnapshotManager());
+        const cases: Array<{ tool: string; run: () => Promise<any> }> = [
+            {
+                tool: "index_codebase",
+                run: () => handlers.handleIndexCodebase({ path: "repo", dryRun: true })
+            },
+            {
+                tool: "search_code",
+                run: () => handlers.handleSearchCode({ path: "repo", query: "auth middleware" })
+            },
+            {
+                tool: "clear_index",
+                run: () => handlers.handleClearIndex({ path: "repo" })
+            },
+            {
+                tool: "get_indexing_status",
+                run: () => handlers.handleGetIndexingStatus({ path: "repo" })
+            }
+        ];
+
+        for (const { tool, run } of cases) {
+            const result = await run();
+            assert.equal(result.isError, true, `${tool} should reject relative paths`);
+            assert.match(result.content[0].text, /Path must be absolute/);
+            assert.match(result.content[0].text, /repo/);
+        }
+    });
+});
+
 test("index_codebase rejects malformed ignore pattern arrays before path resolution", async () => {
     const handlers = createHandlers();
 
@@ -219,7 +257,7 @@ test("index_codebase incremental=true manually syncs changed files without full 
     });
 });
 
-test("index_codebase incremental=true refreshes snapshot statistics after changed files are synced", async () => {
+test("index_codebase incremental=true updates snapshot without metadata statistics scan", async () => {
     await withTempDir(async (tempRoot) => {
         const project = path.join(tempRoot, "repo");
         await mkdir(project, { recursive: true });
@@ -229,13 +267,9 @@ test("index_codebase incremental=true refreshes snapshot statistics after change
             getVectorDatabase: () => ({
                 listCollections: async () => [],
                 getCollectionRowCount: async () => 5,
-                query: async () => [
-                    { relativePath: "src/a.ts" },
-                    { relativePath: "src/a.ts" },
-                    { relativePath: "src/b.ts" },
-                    { relativePath: "src/c.ts" },
-                    { relativePath: "src/c.ts" }
-                ]
+                query: async () => {
+                    throw new Error("metadata query should not run after manual incremental indexing");
+                }
             }),
             getCollectionName: () => collectionName,
             hasIndex: async () => true,
@@ -261,9 +295,9 @@ test("index_codebase incremental=true refreshes snapshot statistics after change
         assert.equal(result.isError, undefined);
         const info = snapshotManager.getCodebaseInfo(project);
         assert.equal(info?.status, "indexed");
-        assert.equal((info as any).indexedFiles, 3);
-        assert.equal((info as any).totalChunks, 5);
-        assert.equal((info as any).statsSource, "collection_row_count");
+        assert.equal((info as any).indexedFiles, 2);
+        assert.equal((info as any).totalChunks, 2);
+        assert.equal((info as any).statsSource, undefined);
         assert.equal((info as any).requestSplitter, "langchain");
         assert.deepEqual((info as any).requestCustomExtensions, [".vue"]);
     });
@@ -346,116 +380,6 @@ test("search_code rejects missing query before search handling", async () => {
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /search_code/);
     assert.match(result.content[0].text, /'query'/);
-});
-
-test("trace_symbol rejects malformed arguments before tracing", async () => {
-    const handlers = createHandlers();
-
-    const missingSymbol = await handlers.handleTraceSymbol({ path: "/tmp/project" });
-    assert.equal(missingSymbol.isError, true);
-    assert.match(missingSymbol.content[0].text, /trace_symbol/);
-    assert.match(missingSymbol.content[0].text, /'symbol'/);
-
-    const invalidSymbol = await handlers.handleTraceSymbol({
-        path: "/tmp/project",
-        symbol: "../EntityManager"
-    });
-    assert.equal(invalidSymbol.isError, true);
-    assert.match(invalidSymbol.content[0].text, /single identifier/);
-
-    const invalidMaxReferences = await handlers.handleTraceSymbol({
-        path: "/tmp/project",
-        symbol: "EntityManager",
-        maxReferences: "5"
-    });
-    assert.equal(invalidMaxReferences.isError, true);
-    assert.match(invalidMaxReferences.content[0].text, /maxReferences/);
-
-    const invalidLineRange = await handlers.handleTraceSymbol({
-        path: "/tmp/project",
-        symbol: "EntityManager",
-        startLine: 20,
-        endLine: 10
-    });
-    assert.equal(invalidLineRange.isError, true);
-    assert.match(invalidLineRange.content[0].text, /endLine/);
-});
-
-test("trace_symbol passes options and formats evidence sections", async () => {
-    await withTempDir(async (tempRoot) => {
-        const project = path.join(tempRoot, "repo");
-        await mkdir(project, { recursive: true });
-
-        let requestedOptions: any;
-        const context = {
-            traceSymbol: async (codebasePath: string, symbol: string, options: any) => {
-                requestedOptions = { codebasePath, symbol, options };
-                return {
-                    symbol,
-                    codebasePath,
-                    definitions: [{
-                        kind: "definition",
-                        relativePath: "src/game/entities/entityManager.ts",
-                        line: 130,
-                        preview: "export class EntityManager {",
-                        matchedText: "EntityManager"
-                    }],
-                    references: [{
-                        kind: "reference",
-                        relativePath: "src/game/world.ts",
-                        line: 445,
-                        preview: "this._entityManager.addTower(battery);",
-                        matchedText: "_entityManager"
-                    }],
-                    imports: [{
-                        kind: "import",
-                        relativePath: "src/game/world.ts",
-                        line: 23,
-                        preview: "import { EntityManager } from './entities';",
-                        matchedText: "EntityManager"
-                    }],
-                    exports: [],
-                    relatedTests: [],
-                    scannedFiles: 12,
-                    truncated: false,
-                    warnings: []
-                };
-            }
-        } as any;
-        const handlers = new ToolHandlers(context, new SnapshotManager());
-
-        const result = await handlers.handleTraceSymbol({
-            path: project,
-            symbol: "EntityManager",
-            startPath: "src/game/world.ts",
-            startLine: 431,
-            endLine: 493,
-            maxFiles: 50,
-            maxReferences: 5,
-            includeTests: false
-        });
-
-        assert.equal(result.isError, undefined);
-        assert.deepEqual(requestedOptions, {
-            codebasePath: project,
-            symbol: "EntityManager",
-            options: {
-                startPath: "src/game/world.ts",
-                startLine: 431,
-                endLine: 493,
-                maxFiles: 50,
-                maxReferences: 5,
-                includeTests: false
-            }
-        });
-        assert.match(result.content[0].text, /Trace for symbol 'EntityManager'/);
-        assert.match(result.content[0].text, /## Definitions/);
-        assert.match(result.content[0].text, /src\/game\/entities\/entityManager\.ts:130/);
-        assert.match(result.content[0].text, /## References/);
-        assert.match(result.content[0].text, /Matched: _entityManager/);
-        assert.match(result.content[0].text, /## Exports/);
-        assert.match(result.content[0].text, /None found/);
-    });
 });
 
 test("search_code not-indexed response recommends project ignore file", async () => {
@@ -607,6 +531,7 @@ test("search_code recovers a missing snapshot from the target collection only", 
         let listCollectionCalls = 0;
         let hasIndexCalls = 0;
         let rowCountCalls = 0;
+        let metadataQueryCalls = 0;
         let searchCalls = 0;
         const collectionName = "code_chunks_repo";
         const context = {
@@ -620,14 +545,26 @@ test("search_code recovers a missing snapshot from the target collection only", 
                     assert.equal(requestedCollection, collectionName);
                     return 3;
                 },
-                query: async (requestedCollection: string) => {
+                readIndexManifest: async (requestedCollection: string, codebasePath: string) => {
                     assert.equal(requestedCollection, collectionName);
-                    return [
-                        { relativePath: "src/search.ts" },
-                        { relativePath: "src/search.ts" },
-                        { relativePath: "src/other.ts" }
-                    ];
-                }
+                    assert.equal(codebasePath, project);
+                    return {
+                        manifestVersion: 1,
+                        codebasePath: project,
+                        collectionName,
+                        status: "completed" as const,
+                        indexedFiles: 2,
+                        totalChunks: 3,
+                        schemaVersion: 2,
+                        metadataVersion: 2,
+                        generation: 1,
+                        updatedAt: "2026-06-21T00:00:00.000Z"
+                    };
+                },
+                query: async () => {
+                    metadataQueryCalls += 1;
+                    throw new Error("metadata query should not run during search snapshot recovery");
+                },
             }),
             getCollectionName: () => collectionName,
             hasIndex: async (codebasePath: string) => {
@@ -662,7 +599,8 @@ test("search_code recovers a missing snapshot from the target collection only", 
         assert.equal(result.isError, undefined);
         assert.equal(listCollectionCalls, 0);
         assert.equal(hasIndexCalls, 1);
-        assert.equal(rowCountCalls, 1);
+        assert.equal(rowCountCalls, 0);
+        assert.equal(metadataQueryCalls, 0);
         assert.equal(searchCalls, 1);
         const info = snapshotManager.getCodebaseInfo(project) as any;
         assert.equal(info.status, "indexed");
@@ -680,6 +618,7 @@ test("search_code recovers a missing snapshot from an indexed ancestor without l
         let listCollectionCalls = 0;
         const hasIndexCalls: string[] = [];
         let rowCountCalls = 0;
+        let metadataQueryCalls = 0;
         let searchCalls = 0;
         const collectionName = "code_chunks_repo";
         const context = {
@@ -693,13 +632,26 @@ test("search_code recovers a missing snapshot from an indexed ancestor without l
                     assert.equal(requestedCollection, collectionName);
                     return 2;
                 },
-                query: async (requestedCollection: string) => {
+                readIndexManifest: async (requestedCollection: string, codebasePath: string) => {
                     assert.equal(requestedCollection, collectionName);
-                    return [
-                        { relativePath: "src/search.ts" },
-                        { relativePath: "src/other.ts" }
-                    ];
-                }
+                    assert.equal(codebasePath, project);
+                    return {
+                        manifestVersion: 1,
+                        codebasePath: project,
+                        collectionName,
+                        status: "completed" as const,
+                        indexedFiles: 2,
+                        totalChunks: 2,
+                        schemaVersion: 2,
+                        metadataVersion: 2,
+                        generation: 1,
+                        updatedAt: "2026-06-21T00:00:00.000Z"
+                    };
+                },
+                query: async () => {
+                    metadataQueryCalls += 1;
+                    throw new Error("metadata query should not run during ancestor recovery");
+                },
             }),
             getCollectionName: (codebasePath: string) => {
                 assert.equal(
@@ -739,7 +691,8 @@ test("search_code recovers a missing snapshot from an indexed ancestor without l
         assert.equal(result.isError, undefined);
         assert.equal(listCollectionCalls, 0);
         assert.deepEqual(hasIndexCalls, [requestedPath, project]);
-        assert.equal(rowCountCalls, 1);
+        assert.equal(rowCountCalls, 0);
+        assert.equal(metadataQueryCalls, 0);
         assert.equal(searchCalls, 1);
         assert.match(result.content[0].text, /covered by indexed codebase/);
         const info = snapshotManager.getCodebaseInfo(project) as any;
@@ -761,7 +714,10 @@ test("search_code stops snapshot recovery when a matched collection has unverifi
             getVectorDatabase: () => ({
                 getCollectionDescription: async () => undefined,
                 getCollectionRowCount: async () => -1,
-                query: async () => []
+                readIndexManifest: async () => null,
+                query: async () => {
+                    throw new Error("metadata query should not run when manifest is missing");
+                },
             }),
             getCollectionName: () => "code_chunks_src",
             hasIndex: async (codebasePath: string) => {
@@ -818,13 +774,25 @@ test("search_code uses collection metadata to recover the real indexed root for 
                     assert.equal(requestedCollection, collectionName);
                     return 2;
                 },
-                query: async (requestedCollection: string) => {
+                readIndexManifest: async (requestedCollection: string, codebasePath: string) => {
                     assert.equal(requestedCollection, collectionName);
-                    return [
-                        { relativePath: "src/search.ts" },
-                        { relativePath: "src/other.ts" }
-                    ];
-                }
+                    assert.equal(codebasePath, project);
+                    return {
+                        manifestVersion: 1,
+                        codebasePath: project,
+                        collectionName,
+                        status: "completed" as const,
+                        indexedFiles: 2,
+                        totalChunks: 2,
+                        schemaVersion: 2,
+                        metadataVersion: 2,
+                        generation: 1,
+                        updatedAt: "2026-06-21T00:00:00.000Z"
+                    };
+                },
+                query: async () => {
+                    throw new Error("metadata query should not run during shared identity recovery");
+                },
             }),
             getCollectionName: (codebasePath: string) => {
                 assert.equal(
@@ -1151,7 +1119,7 @@ test("search_code refreshes an indexed codebase before searching in strong consi
         assert.deepEqual(calls, [`sync:${project}`, `search:${project}`]);
         const info = snapshotManager.getCodebaseInfo(project) as any;
         assert.equal(info.indexedFiles, 2);
-        assert.equal(info.totalChunks, 2);
+        assert.equal(info.totalChunks, 1);
     });
 });
 
@@ -1662,57 +1630,6 @@ test("search_code passes target role options and formats grouped results", async
         assert.match(result.content[0].text, /## Related tests/);
         assert.match(result.content[0].text, /Match signals: semantic_match/);
         assert.match(result.content[0].text, /Match signals: reference_match/);
-    });
-});
-
-test("search_code suggests trace_symbol follow-up for traceable implementation symbols", async () => {
-    await withTempDir(async (tempRoot) => {
-        const project = path.join(tempRoot, "repo");
-        await mkdir(project, { recursive: true });
-
-        const context = {
-            getVectorDatabase: () => ({
-                listCollections: async () => []
-            }),
-            getEmbedding: () => ({
-                getProvider: () => "test"
-            }),
-            semanticSearch: async () => [{
-                content: [
-                    "/**",
-                    " * @delegate EntityManager",
-                    " */",
-                    "addTower(tower: TowerLike): void {",
-                    "    this._entityManager.addTower(tower);",
-                    "}"
-                ].join("\n"),
-                relativePath: "src/game/world.ts",
-                startLine: 431,
-                endLine: 493,
-                language: "typescript",
-                score: 1,
-                resultGroup: "implementation",
-                isPrimary: true,
-                scoreReasons: ["semantic_match"]
-            }]
-        } as any;
-        const snapshotManager = new SnapshotManager();
-        snapshotManager.setCodebaseIndexed(project, {
-            indexedFiles: 4,
-            totalChunks: 37,
-            status: "completed"
-        });
-        snapshotManager.saveCodebaseSnapshot();
-        const handlers = new ToolHandlers(context, snapshotManager);
-
-        const result = await handlers.handleSearchCode({
-            path: project,
-            query: "client creates removes and updates towers monsters bullets and buildings in the world"
-        });
-
-        assert.equal(result.isError, undefined);
-        assert.match(result.content[0].text, /Structure follow-up:/);
-        assert.match(result.content[0].text, /trace_symbol\(\{ path: ".*repo", symbol: "EntityManager", startPath: "src\/game\/world\.ts" \}\)/);
     });
 });
 

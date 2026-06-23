@@ -24,18 +24,19 @@ EOF
 
 By default, Hitmux Context Engine does not inherit system proxy environment variables such as `http_proxy`, `https_proxy`, or `grpc_proxy`. See [System Proxy](#system-proxy) when an embedding provider or remote vector database must use a proxy.
 
-Add the MCP server:
+For Claude Code and OpenAI Codex CLI, install the CLI globally and add the MCP server:
 
 ```bash
-claude mcp add hitmux-context-engine -- npx -y @hitmux/hce@latest
-codex mcp add hitmux-context-engine -- npx -y @hitmux/hce@latest
+npm install -g @hitmux/hce@latest
+claude mcp add hitmux-context-engine -- hce
+codex mcp add hitmux-context-engine -- hce
 ```
 
 `@hitmux/hce`, `@hitmux/hitmux-context-engine`, and `@hitmux/hitmux-context-engine-mcp` start the same MCP server.
 
-For a local source checkout, `./scripts/install-local-global.sh` builds the MCP package and installs a user-level `hitmux-context-engine-mcp` command. Run it with `sudo` for a global install. Use that installed command in client setup, such as `claude mcp add hitmux-context-engine -- hitmux-context-engine-mcp` or `codex mcp add hitmux-context-engine -- hitmux-context-engine-mcp`.
+For a local source checkout, `./scripts/install-local-global.sh` builds the MCP package and installs a user-level `hitmux-context-engine-mcp` command. Run it with `sudo` for a global install. Published-package Claude Code and Codex CLI setup uses the global `hce` command shown above.
 
-Database note: Use Local Milvus with `milvusAddress = localhost:19530`. For self-hosted remote Milvus, replace it with the reachable host and port. For Zilliz Cloud, use the cloud public endpoint and add `milvusToken` with your Personal Key.
+Database note: Use Local Milvus with `milvusAddress = localhost:19530`. For self-hosted remote Milvus, replace it with the reachable host and port. For a free Zilliz Cloud database, sign up at https://cloud.zilliz.com/signup, then use the cloud public endpoint and add `milvusToken` with your Personal Key.
 
 ## Embedding Providers
 
@@ -180,6 +181,8 @@ milvusToken = your-milvus-token
 ```
 
 Zilliz Cloud:
+
+Sign up for a free Zilliz Cloud database at https://cloud.zilliz.com/signup, then configure the cloud endpoint and Personal Key:
 
 ```conf
 milvusAddress = your-zilliz-cloud-public-endpoint
@@ -330,8 +333,8 @@ gitRemoteName = origin
 hybridMode = true
 
 searchTimeoutMs = 30000
-# embeddingBatchSize = 32
-# embeddingConcurrency = 4
+# embeddingBatchSize = 64
+# embeddingConcurrency = 2
 fileProcessingConcurrency = 2
 customExtensions = .vue
 customExtensions = .svelte

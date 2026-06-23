@@ -350,7 +350,7 @@ export class AstCodeSplitter implements Splitter {
                     starts.push({ lineIndex: index, nodeType: 'package_declaration' });
                 } else if (/^(?:public|private|protected|internal|static|final|abstract|sealed|\s)*(?:class|interface|struct|enum)\s+[A-Za-z_$][A-Za-z0-9_$]*\b/.test(trimmed)) {
                     starts.push({ lineIndex: index, nodeType: 'class_declaration' });
-                } else if (/^(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+[A-Za-z_$][A-Za-z0-9_$]*\s*\(/.test(trimmed)) {
+                } else if (/^(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>[\],.?]*\s+)+[A-Za-z_$][A-Za-z0-9_$]*\s*\(/.test(trimmed)) {
                     starts.push({ lineIndex: index, nodeType: 'method_declaration' });
                 }
                 continue;
@@ -568,7 +568,7 @@ export class AstCodeSplitter implements Splitter {
             { kind: 'const', pattern: /\bconst\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/ },
             { kind: 'let', pattern: /\blet\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/ },
             { kind: 'var', pattern: /\bvar\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/ },
-            { kind: 'method', pattern: /^\s*(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/m },
+            { kind: 'method', pattern: /^\s*(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/m },
             { kind: 'method', pattern: /^\s*(?:public|private|protected|static|async|override|readonly|\s)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/m },
         ];
 

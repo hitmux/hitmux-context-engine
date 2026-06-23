@@ -3,14 +3,22 @@ export type FileRole = 'implementation' | 'test' | 'docs' | 'style' | 'config' |
 export interface FileRoleIntent {
     preferredRoles: ReadonlySet<FileRole>;
     explicitExtensions: ReadonlySet<string>;
+    disableRoleScoring?: boolean;
 }
 
 const STYLE_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less', '.styl', '.stylus', '.pcss']);
 const DOC_EXTENSIONS = new Set(['.md', '.markdown', '.mdx', '.rst', '.adoc', '.txt']);
-const CONFIG_EXTENSIONS = new Set(['.json', '.jsonc', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env']);
+const CONFIG_EXTENSIONS = new Set(['.json', '.jsonc', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env', '.cmake']);
 
 const CONFIG_FILENAMES = new Set([
+    'cmakelists.txt',
+    'makefile',
+    'gnumakefile',
     'package.json',
+    'pyproject.toml',
+    'cargo.toml',
+    'go.mod',
+    'go.sum',
     'tsconfig.json',
     'jsconfig.json',
     'pnpm-workspace.yaml',
@@ -46,16 +54,16 @@ export function classifyFileRole(relativePath: string, fileExtension?: string, c
         return 'test';
     }
 
+    if (isConfigPath(lowerPath, fileName, extension)) {
+        return 'config';
+    }
+
     if (isDocsPath(lowerPath, fileName, extension)) {
         return 'docs';
     }
 
     if (STYLE_EXTENSIONS.has(extension)) {
         return 'style';
-    }
-
-    if (isConfigPath(lowerPath, fileName, extension)) {
-        return 'config';
     }
 
     if (content && isPureBarrelFile(basename, extension, content)) {
@@ -100,7 +108,8 @@ export function inferFileRoleIntent(query: string, filterExpr?: string): FileRol
     if (hasExplicitConfigIntent(lowerQuery)) {
         preferredRoles.add('config');
     }
-    if (/\b(generated|__generated__|dist|build|bundle|minified|min)\b/.test(lowerQuery)) {
+    if (/\b(generated|__generated__|minified|min)\b/.test(lowerQuery)
+        || /\b(?:dist|build|bundle)\s+(?:output|artifact|artifacts|directory|folder|files?)\b/.test(lowerQuery)) {
         preferredRoles.add('generated');
     }
 
@@ -123,8 +132,13 @@ export function inferFileRoleIntent(query: string, filterExpr?: string): FileRol
 function hasExplicitConfigIntent(lowerQuery: string): boolean {
     return /\b(?:config|configuration)\s+files?\b/.test(lowerQuery)
         || /\bfiles?\s+(?:config|configuration)\b/.test(lowerQuery)
-        || /\b(jsonc?|ya?ml|toml|ini|conf|env)\b/.test(lowerQuery)
-        || /(?:^|[\/\\])configs?(?:[\/\\]|$)/.test(lowerQuery);
+        || /\bbuild\s+(?:config|configuration|script|scripts|metadata|files?|system)\b/.test(lowerQuery)
+        || /\b(?:config|configuration)\s+for\s+(?:build|packaging|dependencies?)\b/.test(lowerQuery)
+        || /\b(?:packaging|package)\s+metadata\b/.test(lowerQuery)
+        || /\bdependency\s+groups?\b/.test(lowerQuery)
+        || /\bsource\s+file\s+lists?\b/.test(lowerQuery)
+        || /\b(?:cmake|cmakelists\.txt|makefile|pyproject(?:\.toml)?|cargo\.toml|go\.mod|package\.json)\b/.test(lowerQuery)
+        || /(?:^|[/\\])configs?(?:[/\\]|$)/.test(lowerQuery);
 }
 
 export function isFileRoleExplicitlyRequested(role: FileRole, intent: FileRoleIntent, relativePath: string): boolean {

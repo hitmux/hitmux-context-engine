@@ -14,7 +14,6 @@ import {
     RequestSplitterType,
     createMcpConfig,
 } from "./config.js";
-import { queryCollectionStats } from "./collection-stats.js";
 import { createEmbeddingInstance } from "./embedding.js";
 import { createRequestSplitter, resolveRequestSplitterType } from "./splitter.js";
 import { SnapshotManager } from "./snapshot.js";
@@ -253,7 +252,7 @@ async function removeCollection(
         await runtime.vectorDatabase.dropCollection(collection.collectionName);
         if (collection.codebasePath) {
             runtime.snapshotManager.removeCodebaseCompletely(collection.codebasePath);
-            runtime.snapshotManager.saveCodebaseSnapshot();
+            await runtime.snapshotManager.saveCodebaseSnapshotAsync();
             await FileSynchronizer.deleteSnapshot(collection.codebasePath);
         }
     } finally {
@@ -333,17 +332,26 @@ async function syncOrCreatePath(
             indexOptions.requestIgnoreFiles ?? [],
             indexOptions.requestMaxDepth,
         );
-        const collectionStats = await queryCollectionStats(
-            runtime.context,
-            codebasePath,
-            "CLI-INDEX",
-        );
-        if (collectionStats) {
+        const collectionName = runtime.context.getCollectionName(codebasePath);
+        const remoteManifest =
+            typeof runtime.context.getVectorDatabase().readIndexManifest === "function"
+                ? await runtime.context
+                      .getVectorDatabase()
+                      .readIndexManifest!(collectionName, codebasePath)
+                : null;
+        if (remoteManifest) {
             runtime.snapshotManager.setCodebaseIndexed(codebasePath, {
-                ...collectionStats,
-                status: "completed",
+                indexedFiles: remoteManifest.indexedFiles,
+                totalChunks: remoteManifest.totalChunks,
+                status: remoteManifest.status,
+                statsSource: "remote_manifest",
             }, indexOptions);
-            runtime.snapshotManager.saveCodebaseSnapshot();
+            await runtime.snapshotManager.saveCodebaseSnapshotAsync();
+        } else {
+            writeStderr(
+                options,
+                `Remote manifest missing for '${codebasePath}'. Snapshot counts were not refreshed; run repair_index_manifest for legacy collections.\n`,
+            );
         }
         return `Synced '${codebasePath}'. Changes: added=${stats.added}, removed=${stats.removed}, modified=${stats.modified}.`;
     }
@@ -365,7 +373,7 @@ async function syncOrCreatePath(
         ...indexOptions,
         requestSplitter: splitterType,
     });
-    runtime.snapshotManager.saveCodebaseSnapshot();
+    await runtime.snapshotManager.saveCodebaseSnapshotAsync();
     return `Indexed '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
 }
 
@@ -394,7 +402,7 @@ async function forceRebuildPath(
         ...indexOptions,
         requestSplitter: splitterType,
     });
-    runtime.snapshotManager.saveCodebaseSnapshot();
+    await runtime.snapshotManager.saveCodebaseSnapshotAsync();
     return `Rebuilt '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
 }
 

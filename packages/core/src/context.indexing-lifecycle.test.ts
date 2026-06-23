@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Context, ExistingCollectionFullIndexError } from './context';
 import { Embedding, EmbeddingVector } from './embedding';
+import { FileSynchronizer } from './sync/synchronizer';
 import { Splitter, CodeChunk } from './splitter';
 import { VectorDatabase } from './vectordb';
 
@@ -172,6 +173,31 @@ describe('Context indexing lifecycle', () => {
         return project;
     }
 
+    function createDescription(codebasePath: string): string {
+        return [
+            `codebasePath:${codebasePath}`,
+            `hitmuxContext:${JSON.stringify({
+                version: 1,
+                codebasePath,
+                embedding: {
+                    provider: 'test',
+                    model: 'unknown',
+                    dimension: 3,
+                },
+                schemaVersion: 2,
+                metadataVersion: 2,
+                splitterType: 'ast',
+                createdAt: '2026-06-20T00:00:00.000Z',
+            })}`,
+        ].join('\n');
+    }
+
+    async function createProjectSnapshot(project: string): Promise<void> {
+        const synchronizer = new FileSynchronizer(project, [], ['.ts']);
+        await synchronizer.initialize();
+        await synchronizer.checkForChanges();
+    }
+
     async function indexProjectAndReadTimingSummary(
         project: string,
         embedding: Embedding = new TestEmbedding()
@@ -263,6 +289,121 @@ describe('Context indexing lifecycle', () => {
         expect(vectorDatabase.insert).toHaveBeenCalled();
     });
 
+    it('creates a Merkle baseline during core-only full indexing for the first incremental sync', async () => {
+        const project = await createProject();
+        await fs.writeFile(path.join(project, 'removed.ts'), 'export const removed = true;');
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project));
+
+        await expect(context.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 2,
+            totalChunks: 2,
+            status: 'completed',
+        });
+
+        await fs.writeFile(path.join(project, 'index.ts'), 'export const value = 2;');
+        await fs.writeFile(path.join(project, 'added.ts'), 'export const added = true;');
+        await fs.rm(path.join(project, 'removed.ts'));
+
+        await expect(context.reindexByChange(project)).resolves.toEqual({
+            added: 1,
+            removed: 1,
+            modified: 1,
+        });
+    });
+
+    it('does not commit a full-index Merkle baseline when indexing stops at the chunk limit', async () => {
+        const project = await createProject();
+        await fs.writeFile(path.join(project, 'skipped.ts'), 'export const skipped = true;');
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(1);
+        vectorDatabase.readIndexManifest = jest.fn().mockResolvedValue(null);
+        vectorDatabase.writeIndexManifest = jest.fn().mockResolvedValue(undefined);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+        const processFileListSpy = jest
+            .spyOn(context as any, 'processFileList')
+            .mockResolvedValue({
+                processedFiles: 1,
+                totalChunks: 1,
+                status: 'limit_reached',
+                embeddingBatchSize: 100,
+                embeddingConcurrency: 5,
+                fileProcessingConcurrency: 2,
+            });
+
+        try {
+            await expect(context.indexCodebase(project)).resolves.toMatchObject({
+                indexedFiles: 1,
+                totalChunks: 1,
+                status: 'limit_reached',
+            });
+        } finally {
+            processFileListSpy.mockRestore();
+        }
+
+        expect(vectorDatabase.writeIndexManifest).toHaveBeenCalledWith(expect.objectContaining({
+            codebasePath: project,
+            collectionName: context.getCollectionName(project),
+            status: 'limit_reached',
+            indexedFiles: 1,
+            totalChunks: 1,
+        }));
+
+        const synchronizer = new FileSynchronizer(project, [], ['.ts']);
+        await synchronizer.initialize({ createSnapshotIfMissing: false });
+        await expect(synchronizer.checkForChanges({ deferSnapshotUpdate: true })).resolves.toMatchObject({
+            added: expect.arrayContaining(['index.ts', 'skipped.ts']),
+        });
+    });
+
+    it('refreshes the remote manifest when incremental sync has no changes', async () => {
+        const project = await createProject();
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(1);
+        vectorDatabase.readIndexManifest = jest.fn().mockResolvedValue(null);
+        vectorDatabase.writeIndexManifest = jest.fn().mockResolvedValue(undefined);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project));
+
+        await expect(context.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: 'completed',
+        });
+
+        await expect(context.reindexByChange(project)).resolves.toEqual({
+            added: 0,
+            removed: 0,
+            modified: 0,
+        });
+
+        expect(vectorDatabase.writeIndexManifest).toHaveBeenCalledTimes(2);
+        expect(vectorDatabase.writeIndexManifest).toHaveBeenLastCalledWith(expect.objectContaining({
+            codebasePath: project,
+            collectionName: context.getCollectionName(project),
+            status: 'completed',
+            indexedFiles: 1,
+            totalChunks: 1,
+        }));
+    });
+
     it('logs indexing timing summary with runtime batch settings', async () => {
         const project = await createProject();
         const vectorDatabase = createVectorDatabase() as jest.Mocked<VectorDatabase> & {
@@ -295,8 +436,8 @@ describe('Context indexing lifecycle', () => {
                 codebasePath: project,
                 indexedFiles: 1,
                 totalChunks: 1,
-                embeddingBatchSize: 32,
-                embeddingConcurrency: 4,
+                embeddingBatchSize: 64,
+                embeddingConcurrency: 2,
                 fileProcessingConcurrency: 1,
                 flushLoadMs: 7,
             });
@@ -380,6 +521,152 @@ describe('Context indexing lifecycle', () => {
         expect(vectorDatabase.getCollectionRowCount).toHaveBeenCalledWith(context.getCollectionName(project));
     });
 
+    it('does not fail clearIndex when remote manifest deletion fails', async () => {
+        const project = await createProject();
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.hasCollection.mockResolvedValue(true);
+        vectorDatabase.deleteIndexManifest = jest.fn().mockRejectedValue(new Error('manifest delete failed'));
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        try {
+            await expect(context.clearIndex(project)).resolves.toBeUndefined();
+        } finally {
+            warnSpy.mockRestore();
+        }
+
+        expect(vectorDatabase.dropCollection).toHaveBeenCalledWith(context.getCollectionName(project));
+        expect(vectorDatabase.deleteIndexManifest).toHaveBeenCalledWith(
+            context.getCollectionName(project),
+            project
+        );
+    });
+
+    it('finalizes removed-only incremental deletes before committing the Merkle snapshot', async () => {
+        const project = await createProject();
+        await createProjectSnapshot(project);
+        await fs.rm(path.join(project, 'index.ts'));
+
+        const vectorDatabase = createVectorDatabase() as jest.Mocked<VectorDatabase> & {
+            finalizeCollectionWrites: jest.Mock<Promise<void>, [string]>;
+        };
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project));
+        vectorDatabase.query.mockResolvedValue([{ id: 'old-chunk' }]);
+        vectorDatabase.finalizeCollectionWrites = jest.fn().mockResolvedValue(undefined);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(context.reindexChangedPaths(project, ['index.ts'])).resolves.toEqual({
+            added: 0,
+            removed: 1,
+            modified: 0,
+        });
+
+        expect(vectorDatabase.delete).toHaveBeenCalledWith(context.getCollectionName(project), ['old-chunk']);
+        expect(vectorDatabase.finalizeCollectionWrites).toHaveBeenCalledWith(context.getCollectionName(project));
+
+        const synchronizer = new FileSynchronizer(project, [], ['.ts']);
+        await synchronizer.initialize();
+        await expect(synchronizer.checkChangedPaths(['index.ts'])).resolves.toMatchObject({
+            removed: [],
+        });
+    });
+
+    it('does not commit the Merkle snapshot when incremental finalize fails', async () => {
+        const project = await createProject();
+        await createProjectSnapshot(project);
+        await fs.rm(path.join(project, 'index.ts'));
+
+        const vectorDatabase = createVectorDatabase() as jest.Mocked<VectorDatabase> & {
+            finalizeCollectionWrites: jest.Mock<Promise<void>, [string]>;
+        };
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project));
+        vectorDatabase.query.mockResolvedValue([{ id: 'old-chunk' }]);
+        vectorDatabase.finalizeCollectionWrites = jest.fn().mockRejectedValue(new Error('flush failed'));
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(context.reindexChangedPaths(project, ['index.ts'])).rejects.toThrow('flush failed');
+
+        const synchronizer = new FileSynchronizer(project, [], ['.ts']);
+        await synchronizer.initialize();
+        await expect(synchronizer.checkChangedPaths(['index.ts'])).resolves.toMatchObject({
+            removed: ['index.ts'],
+        });
+    });
+
+    it('defers and finalizes modified incremental writes before committing the Merkle snapshot', async () => {
+        const project = await createProject();
+        await createProjectSnapshot(project);
+        await fs.writeFile(path.join(project, 'index.ts'), 'export const value = 2;');
+
+        const vectorDatabase = createVectorDatabase() as jest.Mocked<VectorDatabase> & {
+            finalizeCollectionWrites: jest.Mock<Promise<void>, [string]>;
+        };
+        vectorDatabase.getCollectionDescription.mockResolvedValue(createDescription(project));
+        vectorDatabase.query.mockResolvedValue([{ id: 'old-chunk' }]);
+        vectorDatabase.finalizeCollectionWrites = jest.fn().mockResolvedValue(undefined);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(context.reindexChangedPaths(project, ['index.ts'])).resolves.toEqual({
+            added: 0,
+            removed: 0,
+            modified: 1,
+        });
+
+        expect(vectorDatabase.insert).toHaveBeenCalledWith(
+            context.getCollectionName(project),
+            expect.any(Array),
+            { deferFlushLoad: true }
+        );
+        expect(vectorDatabase.finalizeCollectionWrites).toHaveBeenCalledWith(context.getCollectionName(project));
+
+        const synchronizer = new FileSynchronizer(project, [], ['.ts']);
+        await synchronizer.initialize();
+        await expect(synchronizer.checkChangedPaths(['index.ts'])).resolves.toMatchObject({
+            modified: [],
+        });
+    });
+
+    it('does not drop the collection when local Merkle snapshot cleanup fails', async () => {
+        const project = await createProject();
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.hasCollection.mockResolvedValue(true);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+        const deleteSnapshotSpy = jest.spyOn(FileSynchronizer, 'deleteSnapshot')
+            .mockRejectedValueOnce(new Error('unlink failed'));
+
+        try {
+            await expect(context.clearIndex(project)).rejects.toThrow('unlink failed');
+            expect(vectorDatabase.dropCollection).not.toHaveBeenCalled();
+        } finally {
+            deleteSnapshotSpy.mockRestore();
+        }
+    });
+
     it('creates a new full-index collection from the first embedding batch dimension', async () => {
         const project = await createProject();
         const vectorDatabase = createVectorDatabase();
@@ -443,7 +730,10 @@ describe('Context indexing lifecycle', () => {
             statSpy.mockRestore();
         }
 
-        expect(indexedFileStats).toHaveLength(2);
+        expect(new Set(indexedFileStats)).toEqual(new Set([
+            path.join(project, 'small.ts'),
+            path.join(project, 'large.ts')
+        ]));
     });
 
     it('keeps weighted progress monotonic when file updates arrive out of size order', async () => {

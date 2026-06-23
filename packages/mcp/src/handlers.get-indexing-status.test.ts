@@ -8,6 +8,7 @@ import test from "node:test";
 import { normalizeCodebaseIdentityPath } from "@hitmux/hitmux-context-engine-core";
 import { ToolHandlers } from "./handlers.js";
 import { SnapshotManager } from "./snapshot.js";
+import { getMcpWriterLockPath } from "./sync-lock.js";
 
 async function withTempHome(run: (tempRoot: string) => Promise<void>): Promise<void> {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), "hitmux-context-engine-mcp-status-"));
@@ -64,7 +65,7 @@ test("get_indexing_status syncs vector database state before reading the snapsho
 
         const handlers = new ToolHandlers({} as any, snapshotManager);
         let syncCalls = 0;
-        (handlers as any).syncIndexedCodebasesFromVectorDatabase = async () => {
+        (handlers as any).syncTargetCodebaseFromVectorDatabase = async () => {
             syncCalls += 1;
             snapshotManager.setCodebaseIndexed(codebasePath, {
                 indexedFiles: 3,
@@ -83,6 +84,36 @@ test("get_indexing_status syncs vector database state before reading the snapsho
     });
 });
 
+test("get_indexing_status reports job state when global snapshot entry is missing", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        const handlers = new ToolHandlers({} as any, snapshotManager);
+        const jobStates = (handlers as any).indexingJobStates;
+        await jobStates.createRunningJob({
+            jobId: "index_missing_snapshot",
+            codebasePath,
+            collectionName: "collection_repo",
+            splitterType: "ast",
+        });
+        await jobStates.updateProgress("index_missing_snapshot", {
+            phase: "Processing files...",
+            current: 1,
+            total: 4,
+            percentage: 25,
+        });
+
+        const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
+
+        assert.equal(result.isError, undefined);
+        assert.match(result.content[0].text, /not recorded in the global snapshot/);
+        assert.match(result.content[0].text, /index_missing_snapshot/);
+        assert.match(result.content[0].text, /25\.0%/);
+    });
+});
+
 test("get_indexing_status refreshes indexed entries written by another MCP process", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
@@ -98,7 +129,7 @@ test("get_indexing_status refreshes indexed entries written by another MCP proce
         secondSnapshotManager.saveCodebaseSnapshot();
 
         const handlers = new ToolHandlers({} as any, firstSnapshotManager);
-        (handlers as any).syncIndexedCodebasesFromVectorDatabase = async () => {};
+        (handlers as any).syncTargetCodebaseFromVectorDatabase = async () => {};
 
         const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
 
@@ -120,7 +151,7 @@ test("get_indexing_status refreshes active indexing entries without marking them
         secondSnapshotManager.saveCodebaseSnapshot();
 
         const handlers = new ToolHandlers({} as any, firstSnapshotManager);
-        (handlers as any).syncIndexedCodebasesFromVectorDatabase = async () => {};
+        (handlers as any).syncTargetCodebaseFromVectorDatabase = async () => {};
 
         const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
 
@@ -131,15 +162,16 @@ test("get_indexing_status refreshes active indexing entries without marking them
     });
 });
 
-test("get_indexing_status does not hang when vector database sync collection listing stalls", async () => {
+test("get_indexing_status does not hang when target collection existence check stalls", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
 
         const snapshotManager = new SnapshotManager();
         const context = {
+            getCollectionName: () => "code_chunks_stalled",
             getVectorDatabase: () => ({
-                listCollections: async () => new Promise<string[]>(() => {}),
+                hasCollection: async () => new Promise<boolean>(() => {}),
             }),
         };
 
@@ -149,6 +181,56 @@ test("get_indexing_status does not hang when vector database sync collection lis
 
         assert.equal(result.isError, undefined);
         assert.match(result.content[0].text, /is not indexed/);
+    });
+});
+
+test("get_indexing_status does not scan unrelated vector database collections for a tracked codebase", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 3,
+            totalChunks: 5,
+            status: "completed",
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        const collectionName = "hybrid_code_chunks_target";
+        let hasCollectionCalls = 0;
+        let descriptionCalls = 0;
+        const vectorDb = {
+            hasCollection: async () => {
+                hasCollectionCalls += 1;
+                return true;
+            },
+            getCollectionDescription: async () => {
+                descriptionCalls += 1;
+                return `codebasePath:${codebasePath}`;
+            },
+            listCollections: async () => {
+                throw new Error("listCollections should not run for single-path status");
+            },
+            getCollectionRowCount: async () => {
+                throw new Error("metadata row count should not run for tracked target");
+            },
+            query: async () => {
+                throw new Error("metadata query should not run for tracked target");
+            },
+        };
+        const context = {
+            getVectorDatabase: () => vectorDb,
+            getCollectionName: () => collectionName,
+        };
+
+        const handlers = new ToolHandlers(context as any, snapshotManager);
+        const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
+
+        assert.equal(result.isError, undefined);
+        assert.match(result.content[0].text, /fully indexed and ready for search/);
+        assert.equal(hasCollectionCalls, 1);
+        assert.equal(descriptionCalls, 1);
     });
 });
 
@@ -164,11 +246,16 @@ test("get_indexing_status does not let vector database recovery mark active inde
         let rowCountQueries = 0;
         const collectionName = "code_chunks_partial";
         const vectorDb = {
+            hasCollection: async () => true,
             listCollections: async () => [collectionName],
             getCollectionDescription: async () => `codebasePath:${codebasePath}`,
             getCollectionRowCount: async () => {
                 rowCountQueries += 1;
                 return 64;
+            },
+            readIndexManifest: async () => null,
+            query: async () => {
+                throw new Error("metadata query should not run during status");
             },
         };
         const context = {
@@ -179,11 +266,220 @@ test("get_indexing_status does not let vector database recovery mark active inde
         const handlers = new ToolHandlers(context as any, snapshotManager);
         const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
 
-        assert.equal(rowCountQueries, 0);
+        assert.equal(rowCountQueries, 1);
         assert.equal(result.isError, undefined);
         assert.match(result.content[0].text, /currently being indexed/);
         assert.match(result.content[0].text, /42\.0%/);
         assert.equal(snapshotManager.getCodebaseStatus(codebasePath), "indexing");
+    });
+});
+
+test("get_indexing_status keeps shared local snapshot entries while collection description path is indexing", async () => {
+    await withTempHome(async (tempRoot) => {
+        const indexingCodebasePath = path.join(tempRoot, "repo-indexing");
+        const indexedCodebasePath = path.join(tempRoot, "repo-indexed");
+        await mkdir(indexingCodebasePath, { recursive: true });
+        await mkdir(indexedCodebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexing(indexingCodebasePath, 42);
+        snapshotManager.setCodebaseIndexed(indexedCodebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed",
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        let rowCountQueries = 0;
+        const collectionName = "hybrid_code_chunks_shared";
+        const vectorDb = {
+            hasCollection: async () => true,
+            listCollections: async () => [collectionName],
+            getCollectionDescription: async () => `codebasePath:${indexingCodebasePath}`,
+            getCollectionRowCount: async () => {
+                rowCountQueries += 1;
+                return 64;
+            },
+            readIndexManifest: async () => null,
+            query: async () => {
+                throw new Error("metadata query should not run while collection path is indexing");
+            },
+        };
+        const context = {
+            getVectorDatabase: () => vectorDb,
+            getCollectionName: () => collectionName,
+        };
+
+        const handlers = new ToolHandlers(context as any, snapshotManager);
+        const result = await handlers.handleGetIndexingStatus({ path: indexedCodebasePath });
+
+        assert.equal(rowCountQueries, 1);
+        assert.equal(result.isError, undefined);
+        assert.match(result.content[0].text, /fully indexed and ready for search/);
+        assert.equal(snapshotManager.getCodebaseStatus(indexingCodebasePath), "indexing");
+        assert.equal(snapshotManager.getCodebaseStatus(indexedCodebasePath), "indexed");
+    });
+});
+
+test("get_indexing_status recovers requested codebase from shared remote manifest", async () => {
+    await withTempHome(async (tempRoot) => {
+        const firstCodebasePath = path.join(tempRoot, "repo-a");
+        const secondCodebasePath = path.join(tempRoot, "repo-b");
+        await mkdir(firstCodebasePath, { recursive: true });
+        await mkdir(secondCodebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        const collectionName = "hybrid_code_chunks_shared";
+        let metadataQueryCalls = 0;
+        const vectorDb = {
+            hasCollection: async () => true,
+            listCollections: async () => [collectionName],
+            getCollectionDescription: async () => `codebasePath:${firstCodebasePath}`,
+            getCollectionRowCount: async () => 1,
+            readIndexManifest: async (_collectionName: string, codebasePath: string) =>
+                codebasePath === secondCodebasePath
+                    ? {
+                        manifestVersion: 1,
+                        codebasePath: secondCodebasePath,
+                        collectionName,
+                        status: "completed" as const,
+                        indexedFiles: 1,
+                        totalChunks: 1,
+                        schemaVersion: 2,
+                        metadataVersion: 2,
+                        generation: 1,
+                        updatedAt: "2026-06-21T00:00:00.000Z",
+                    }
+                    : null,
+            query: async () => {
+                metadataQueryCalls += 1;
+                throw new Error("metadata query should not run during status recovery");
+            },
+        };
+        const context = {
+            getVectorDatabase: () => vectorDb,
+            getCollectionName: () => collectionName,
+        };
+
+        const handlers = new ToolHandlers(context as any, snapshotManager);
+        const result = await handlers.handleGetIndexingStatus({ path: secondCodebasePath });
+
+        assert.equal(result.isError, undefined);
+        assert.match(result.content[0].text, /fully indexed and ready for search/);
+        assert.match(result.content[0].text, /1 files, 1 chunks/);
+        assert.equal(metadataQueryCalls, 0);
+        assert.equal(snapshotManager.getCodebaseStatus(firstCodebasePath), "not_found");
+        assert.equal(snapshotManager.getCodebaseStatus(secondCodebasePath), "indexed");
+    });
+});
+
+test("get_indexing_status deduplicates concurrent collection probes for the same collection", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed",
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        const collectionName = "code_chunks_dedupe";
+        let hasCollectionCalls = 0;
+        let descriptionCalls = 0;
+        let rowCountCalls = 0;
+        let releaseProbe!: () => void;
+        const probeGate = new Promise<void>((resolve) => {
+            releaseProbe = resolve;
+        });
+        const vectorDb = {
+            hasCollection: async () => {
+                hasCollectionCalls += 1;
+                await probeGate;
+                return true;
+            },
+            getCollectionDescription: async () => {
+                descriptionCalls += 1;
+                return `codebasePath:${codebasePath}`;
+            },
+            getCollectionRowCount: async () => {
+                rowCountCalls += 1;
+                return 1;
+            },
+            readIndexManifest: async () => ({
+                manifestVersion: 1,
+                codebasePath,
+                collectionName,
+                status: "completed" as const,
+                indexedFiles: 1,
+                totalChunks: 1,
+                schemaVersion: 2,
+                metadataVersion: 2,
+                generation: 1,
+                updatedAt: "2026-06-21T00:00:00.000Z",
+            }),
+            query: async () => {
+                throw new Error("metadata query should not run during status");
+            },
+        };
+        const context = {
+            getVectorDatabase: () => vectorDb,
+            getCollectionName: () => collectionName,
+        };
+
+        const handlers = new ToolHandlers(context as any, snapshotManager);
+        const first = handlers.handleGetIndexingStatus({ path: codebasePath });
+        const second = handlers.handleGetIndexingStatus({ path: codebasePath });
+        await new Promise((resolve) => setImmediate(resolve));
+        releaseProbe();
+        const results = await Promise.all([first, second]);
+
+        assert.equal(results[0].isError, undefined);
+        assert.equal(results[1].isError, undefined);
+        assert.equal(hasCollectionCalls, 1);
+        assert.equal(descriptionCalls, 1);
+        assert.equal(rowCountCalls, 1);
+    });
+});
+
+test("get_indexing_status keeps local shared snapshot entries when path extraction is incomplete", async () => {
+    await withTempHome(async (tempRoot) => {
+        const firstCodebasePath = path.join(tempRoot, "repo-a");
+        const secondCodebasePath = path.join(tempRoot, "repo-b");
+        await mkdir(firstCodebasePath, { recursive: true });
+        await mkdir(secondCodebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(secondCodebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed",
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        const collectionName = "hybrid_code_chunks_shared";
+        const vectorDb = {
+            hasCollection: async () => true,
+            listCollections: async () => [collectionName],
+            getCollectionDescription: async () => `codebasePath:${firstCodebasePath}`,
+            getCollectionRowCount: async () => -1,
+            query: async () => {
+                throw new Error("metadata query unavailable");
+            },
+        };
+        const context = {
+            getVectorDatabase: () => vectorDb,
+            getCollectionName: () => collectionName,
+        };
+
+        const handlers = new ToolHandlers(context as any, snapshotManager);
+        const result = await handlers.handleGetIndexingStatus({ path: secondCodebasePath });
+
+        assert.equal(result.isError, undefined);
+        assert.match(result.content[0].text, /fully indexed and ready for search/);
+        assert.equal(snapshotManager.getCodebaseStatus(secondCodebasePath), "indexed");
     });
 });
 
@@ -215,7 +511,7 @@ test("get_indexing_status reports active automatic sync progress for indexed cod
         };
 
         const handlers = new ToolHandlers({} as any, snapshotManager, syncManager);
-        (handlers as any).syncIndexedCodebasesFromVectorDatabase = async () => {};
+        (handlers as any).syncTargetCodebaseFromVectorDatabase = async () => {};
 
         const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
 
@@ -242,7 +538,7 @@ test("get_indexing_status does not report recovered row count as file count", as
         });
 
         const handlers = new ToolHandlers({} as any, snapshotManager);
-        (handlers as any).syncIndexedCodebasesFromVectorDatabase = async () => {};
+        (handlers as any).syncTargetCodebaseFromVectorDatabase = async () => {};
 
         const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
 
@@ -267,7 +563,7 @@ test("get_indexing_status uses merkle file count for legacy equal file and chunk
         });
 
         const handlers = new ToolHandlers({} as any, snapshotManager);
-        (handlers as any).syncIndexedCodebasesFromVectorDatabase = async () => {};
+        (handlers as any).syncTargetCodebaseFromVectorDatabase = async () => {};
 
         const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
 
@@ -277,14 +573,16 @@ test("get_indexing_status uses merkle file count for legacy equal file and chunk
     });
 });
 
-test("vector database recovery counts distinct relative paths for indexed file count", async () => {
+test("repair_index_manifest counts distinct relative paths for legacy indexed file count", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
 
         const snapshotManager = new SnapshotManager();
         const collectionName = "code_chunks_recovered";
+        let savedManifest: any = null;
         const vectorDb = {
+            hasCollection: async () => true,
             listCollections: async () => [collectionName],
             getCollectionDescription: async () => `codebasePath:${codebasePath}`,
             getCollectionRowCount: async () => 4,
@@ -294,6 +592,10 @@ test("vector database recovery counts distinct relative paths for indexed file c
                 { relativePath: "src/b.ts" },
                 { relativePath: "src/c.ts" },
             ],
+            readIndexManifest: async () => null,
+            writeIndexManifest: async (manifest: any) => {
+                savedManifest = manifest;
+            },
         };
         const context = {
             getVectorDatabase: () => vectorDb,
@@ -301,10 +603,47 @@ test("vector database recovery counts distinct relative paths for indexed file c
         };
 
         const handlers = new ToolHandlers(context as any, snapshotManager);
-        const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
+        const result = await handlers.handleRepairIndexManifest({ path: codebasePath });
 
         assert.equal(result.isError, undefined);
         assert.match(result.content[0].text, /3 files, 4 chunks/);
-        assert.doesNotMatch(result.content[0].text, /4 files, 4 chunks/);
+        assert.equal(savedManifest.indexedFiles, 3);
+        assert.equal(savedManifest.totalChunks, 4);
+        assert.equal(snapshotManager.getCodebaseStatus(codebasePath), "indexed");
+    });
+});
+
+test("repair_index_manifest refuses to run while another writer holds the lock", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+        const collectionName = "code_chunks_locked";
+        await mkdir(
+            getMcpWriterLockPath({ kind: "collection", collectionName }),
+            { recursive: true },
+        );
+
+        const snapshotManager = new SnapshotManager();
+        let metadataQueryCalls = 0;
+        const context = {
+            getVectorDatabase: () => ({
+                hasCollection: async () => true,
+                getCollectionDescription: async () => `codebasePath:${codebasePath}`,
+                getCollectionRowCount: async () => 1,
+                query: async () => {
+                    metadataQueryCalls += 1;
+                    return [];
+                },
+            }),
+            getCollectionName: () => collectionName,
+        };
+
+        const handlers = new ToolHandlers(context as any, snapshotManager);
+        const result = await handlers.handleRepairIndexManifest({ path: codebasePath });
+
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /already writing index state for collection/);
+        assert.match(result.content[0].text, /code_chunks_locked/);
+        assert.equal(metadataQueryCalls, 0);
     });
 });

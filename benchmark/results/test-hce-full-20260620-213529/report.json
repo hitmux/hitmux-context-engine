@@ -1,0 +1,101 @@
+{
+  "generatedAt": "2026-06-20T13:36:04.659Z",
+  "resultsPath": "/opt/hitmux-context-engine/benchmark/results/test-hce-full-20260620-213529/results.jsonl",
+  "scoreVersion": "file-rank-v4",
+  "projects": [
+    {
+      "project": "CLIProxyAPI",
+      "total": 20,
+      "scorableTotal": 20,
+      "scoreExcluded": 0,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 84,
+      "primaryTop5": 15,
+      "primaryTop8": 16,
+      "primarySymbolTop5": 13,
+      "primarySymbolTop8": 14,
+      "expectedTop10": 17,
+      "expectedTop20": 18,
+      "manualReview": 5,
+      "failureTaxonomy": {
+        "expected_hit": 18,
+        "search_miss": 2,
+        "empty_result": 0,
+        "search_error": 0,
+        "invalid_fixture": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 0,
+        "anchor_not_recalled": 2,
+        "anchor_recalled_but_reranked": 2
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "missingPrimaryPathCases": 0,
+        "missingPrimaryPathCount": 0,
+        "missingAcceptablePathCases": 0,
+        "missingAcceptablePathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "unscorableCases": [],
+        "missingExpectedPaths": [],
+        "missingPrimaryPaths": [],
+        "missingAcceptablePaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100,
+      "scorePercent": 84
+    },
+    {
+      "project": "ClassNamePicker",
+      "total": 20,
+      "scorableTotal": 20,
+      "scoreExcluded": 0,
+      "completed": 20,
+      "errors": 0,
+      "suggestedScore": 99,
+      "primaryTop5": 20,
+      "primaryTop8": 20,
+      "primarySymbolTop5": 19,
+      "primarySymbolTop8": 19,
+      "expectedTop10": 20,
+      "expectedTop20": 20,
+      "manualReview": 1,
+      "failureTaxonomy": {
+        "expected_hit": 20,
+        "search_miss": 0,
+        "empty_result": 0,
+        "search_error": 0,
+        "invalid_fixture": 0
+      },
+      "failureDiagnostics": {
+        "missing_expected_path": 0,
+        "stale_result_path": 0,
+        "same_file_saturation": 0,
+        "anchor_not_recalled": 0,
+        "anchor_recalled_but_reranked": 0
+      },
+      "freshness": {
+        "missingExpectedPathCases": 0,
+        "missingExpectedPathCount": 0,
+        "missingPrimaryPathCases": 0,
+        "missingPrimaryPathCount": 0,
+        "missingAcceptablePathCases": 0,
+        "missingAcceptablePathCount": 0,
+        "staleResultPathCases": 0,
+        "staleResultPathCount": 0,
+        "unscorableCases": [],
+        "missingExpectedPaths": [],
+        "missingPrimaryPaths": [],
+        "missingAcceptablePaths": [],
+        "staleResultPaths": []
+      },
+      "maxScore": 100,
+      "scorePercent": 99
+    }
+  ]
+}

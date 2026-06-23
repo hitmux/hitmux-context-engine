@@ -7,14 +7,23 @@ Packages:
 - `@hitmux/hce`: short alias for the MCP server.
 - `@hitmux/hitmux-context-engine`: full-name alias for the MCP server.
 - `@hitmux/hitmux-context-engine-mcp`: original MCP server package.
+- `hce-mcp`: unscoped install alias for environments that cannot use scoped package names; it installs the same `hce` command.
 
-Run with:
+Install the short CLI globally:
 
 ```bash
-npx -y @hitmux/hce@latest
-npx -y @hitmux/hitmux-context-engine@latest
-npx -y @hitmux/hitmux-context-engine-mcp@latest
+npm install -g @hitmux/hce@latest
+hce
 ```
+
+Use the unscoped alias when scoped packages are unavailable:
+
+```bash
+npm install -g hce-mcp@latest
+hce
+```
+
+The full-name alias `@hitmux/hitmux-context-engine`, the original MCP package `@hitmux/hitmux-context-engine-mcp`, and the unscoped alias `hce-mcp` are equivalent server packages. All setup examples use the global `hce` command; installing `hce-mcp` does not add a separate `hce-mcp` command.
 
 Configure product options in `~/.hitmux-context-engine/config.conf` or `./.hitmux-context-engine/config.conf`. See [configuration.md](configuration.md).
 
@@ -24,7 +33,7 @@ Configure product options in `~/.hitmux-context-engine/config.conf` or `./.hitmu
 
 Indexes a codebase directory for hybrid search. Useful arguments include:
 
-- `path`: codebase path.
+- `path`: absolute codebase path.
 - `incremental`: manually sync added, modified, removed, or newly ignored files for an already indexed codebase without rebuilding.
 - `force`: full rebuild for exceptional cases only, such as embedding/schema/splitter compatibility changes or untrustworthy index state.
 - `dryRun`: preview indexable files without writing vectors.
@@ -35,26 +44,12 @@ Indexes a codebase directory for hybrid search. Useful arguments include:
 
 Searches an indexed codebase with a focused code-search query.
 
-- `path`: codebase path.
+- `path`: absolute codebase path.
 - `query`: focused query using likely identifiers, filenames, path words, domain terms, and scope hints.
 - `limit`: optional max number of returned results. Leave empty for the bounded default.
 - `targetRole`: optional explicit search target: `implementation`, `test`, `docs`, `config`, or `all`. Defaults to `implementation`.
 - `includeRelated`: optional boolean. Defaults to `true`; set `false` to return only the primary role group.
-- `includeTraceEvidence`: optional boolean. Defaults to `false`; set `true` to attach compact `trace_symbol` evidence for a small number of top implementation or entry results.
-
-`trace_symbol`
-
-Traces an identifier through current source files without requiring a schema migration or re-index. It returns definitions, references, imports, exports, and related tests.
-
-- `path`: codebase path.
-- `symbol`: identifier to trace.
-- `startPath`: optional file to scan first, usually a top `search_code` result or known entry point.
-- `startLine` / `endLine`: optional 1-based line range inside `startPath` to prioritize evidence near a current search result.
-- `maxFiles`: optional maximum source files to scan. Defaults to `1000`.
-- `maxReferences`: optional maximum entries per evidence section. Defaults to `40`.
-- `includeTests`: optional boolean. Defaults to `true`.
-
-Reference evidence may include caller/callee hints when a simple line-level call can be inferred, such as `World.addTower -> EntityManager.addTower`.
+- `includeTraceEvidence`: optional boolean. Defaults to `false`; set `true` to attach compact symbol relationship evidence for a small number of top implementation or entry results.
 
 `clear_index`
 
@@ -103,7 +98,7 @@ const results = await context.semanticSearch(
 );
 ```
 
-Database note: Use Local Milvus with `address: "localhost:19530"`. For self-hosted remote Milvus, replace it with the reachable host and port, and pass `token` only if authentication is required. For Zilliz Cloud, use the cloud public endpoint and pass the Personal Key as `token`.
+Database note: Use Local Milvus with `address: "localhost:19530"`. For self-hosted remote Milvus, replace it with the reachable host and port, and pass `token` only if authentication is required. For a free Zilliz Cloud database, sign up at https://cloud.zilliz.com/signup, then use the cloud public endpoint and pass the Personal Key as `token`.
 
 ### Common Core APIs
 

@@ -8,6 +8,7 @@ import { IncrementalIndexTooLargeError } from "@hitmux/hitmux-context-engine-cor
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 import { ProjectChangeTracker } from "./project-change-tracker.js";
+import { getMcpWriterLockPath } from "./sync-lock.js";
 
 async function withTempHome(run: (tempRoot: string) => Promise<void>): Promise<void> {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), "hitmux-context-engine-mcp-sync-"));
@@ -140,6 +141,104 @@ test("autoIndexing=false disables background reindexing", async () => {
     });
 });
 
+test("automatic sync skips a locked collection and continues syncing other collections", async () => {
+    await withTempHome(async (tempRoot) => {
+        const firstCodebasePath = path.join(tempRoot, "repo-a");
+        const secondCodebasePath = path.join(tempRoot, "repo-b");
+        await mkdir(firstCodebasePath, { recursive: true });
+        await mkdir(secondCodebasePath, { recursive: true });
+        await writeProjectConfig(tempRoot, { projectWatcher: false });
+
+        const snapshotManager = new SnapshotManager();
+        for (const codebasePath of [firstCodebasePath, secondCodebasePath]) {
+            snapshotManager.setCodebaseIndexed(codebasePath, {
+                indexedFiles: 1,
+                totalChunks: 1,
+                status: "completed"
+            });
+        }
+        snapshotManager.saveCodebaseSnapshot();
+
+        const firstCollectionName = "collection_repo_a";
+        await mkdir(
+            getMcpWriterLockPath({ kind: "collection", collectionName: firstCollectionName }),
+            { recursive: true }
+        );
+
+        const syncedCodebases: string[] = [];
+        const context = {
+            getCollectionName: (codebasePath: string) =>
+                codebasePath === firstCodebasePath
+                    ? firstCollectionName
+                    : "collection_repo_b",
+            reindexByChange: async (codebasePath: string) => {
+                syncedCodebases.push(codebasePath);
+                return { added: 0, removed: 0, modified: 0 };
+            }
+        } as any;
+        const syncManager = new SyncManager(context, snapshotManager);
+
+        await syncManager.handleSyncIndex();
+
+        assert.deepEqual(syncedCodebases, [secondCodebasePath]);
+        const firstInfo = snapshotManager.getCodebaseInfo(firstCodebasePath);
+        if (firstInfo?.status !== "indexed") {
+            throw new Error("Expected first codebase to remain indexed");
+        }
+        assert.match(firstInfo.syncWarning ?? "", /already writing index state/);
+    });
+});
+
+test("syncCodebaseForSearch acquires the collection lock when caller does not already hold it", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+        await writeProjectConfig(tempRoot, { projectWatcher: false });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        let activeSyncs = 0;
+        let maxActiveSyncs = 0;
+        let reindexCalls = 0;
+        let releaseFirstSync!: () => void;
+        const firstSyncGate = new Promise<void>((resolve) => {
+            releaseFirstSync = resolve;
+        });
+        const context = {
+            getCollectionName: () => "collection_search_sync",
+            reindexByChange: async () => {
+                activeSyncs += 1;
+                maxActiveSyncs = Math.max(maxActiveSyncs, activeSyncs);
+                reindexCalls += 1;
+                try {
+                    await firstSyncGate;
+                    return { added: 0, removed: 0, modified: 0 };
+                } finally {
+                    activeSyncs -= 1;
+                }
+            }
+        } as any;
+        const syncManager = new SyncManager(context, snapshotManager);
+
+        const firstSyncPromise = syncManager.syncCodebaseForSearch(codebasePath);
+        await waitFor(() => activeSyncs === 1, 500);
+        const secondStats = await syncManager.syncCodebaseForSearch(codebasePath);
+
+        assert.equal(reindexCalls, 1);
+        assert.equal(maxActiveSyncs, 1);
+        assert.match(secondStats.warning ?? "", /already writing index state/);
+
+        releaseFirstSync();
+        await firstSyncPromise;
+    });
+});
+
 test("background sync exposes per-codebase progress while running", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
@@ -262,7 +361,7 @@ test("background sync uses provider default concurrency when embeddingConcurrenc
 
         await syncManager.handleSyncIndex();
 
-        assert.equal(maxActiveSyncs, 3);
+        assert.equal(maxActiveSyncs, 2);
     });
 });
 
@@ -441,7 +540,7 @@ test("automatic sync removes missing codebases from tracking", async () => {
     });
 });
 
-test("successful automatic sync refreshes snapshot statistics when files changed", async () => {
+test("successful automatic sync updates snapshot without querying full collection metadata", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
@@ -461,13 +560,9 @@ test("successful automatic sync refreshes snapshot statistics when files changed
             reindexByChange: async () => ({ added: 1, removed: 1, modified: 0 }),
             getCollectionName: () => "code_chunks_repo",
             getVectorDatabase: () => ({
-                getCollectionRowCount: async () => 4,
-                query: async () => [
-                    { relativePath: "src/a.ts" },
-                    { relativePath: "src/b.ts" },
-                    { relativePath: "src/b.ts" },
-                    { relativePath: "src/c.ts" }
-                ]
+                query: async () => {
+                    throw new Error("metadata query should not run after sync");
+                }
             })
         } as any;
         const syncManager = new SyncManager(context, snapshotManager);
@@ -476,9 +571,9 @@ test("successful automatic sync refreshes snapshot statistics when files changed
 
         const info = snapshotManager.getCodebaseInfo(codebasePath);
         assert.equal(info?.status, "indexed");
-        assert.equal((info as any).indexedFiles, 3);
-        assert.equal((info as any).totalChunks, 4);
-        assert.equal((info as any).statsSource, "collection_row_count");
+        assert.equal((info as any).indexedFiles, 1);
+        assert.equal((info as any).totalChunks, 2);
+        assert.equal((info as any).statsSource, undefined);
         assert.equal((info as any).requestSplitter, "langchain");
         assert.deepEqual((info as any).requestIgnorePatterns, ["dist/**"]);
     });
@@ -560,7 +655,7 @@ test("low-latency search sync queues due full scan for clean watcher state", asy
     });
 });
 
-test("dirty project watcher state syncs targeted paths and refreshes snapshot statistics", async () => {
+test("dirty project watcher state syncs targeted paths without metadata statistics scan", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
@@ -605,11 +700,9 @@ test("dirty project watcher state syncs targeted paths and refreshes snapshot st
             },
             getCollectionName: () => "code_chunks_repo",
             getVectorDatabase: () => ({
-                getCollectionRowCount: async () => 2,
-                query: async () => [
-                    { relativePath: "src/a.ts" },
-                    { relativePath: "src/a.ts" }
-                ]
+                query: async () => {
+                    throw new Error("metadata query should not run after targeted sync");
+                }
             })
         } as any;
         const syncManager = new SyncManager(context, snapshotManager);
@@ -630,7 +723,7 @@ test("dirty project watcher state syncs targeted paths and refreshes snapshot st
         assert.equal(targetedCalls, 1);
         assert.deepEqual(cleanedPaths, ["src/a.ts"]);
         assert.equal((info as any).indexedFiles, 1);
-        assert.equal((info as any).totalChunks, 2);
+        assert.equal((info as any).totalChunks, 1);
         assert.deepEqual((info as any).requestIgnorePatterns, ["dist/**"]);
     });
 });
@@ -1083,7 +1176,7 @@ test("global sync does not overlap an active project watcher sync in the same ma
     });
 });
 
-test("project watcher requests queue behind active global sync without tight timer rescheduling", async () => {
+test("project watcher requests queue behind active collection sync without tight timer rescheduling", async () => {
     await withTempHome(async (tempRoot) => {
         await writeProjectConfig(tempRoot, { projectWatcherDebounceMs: 0 });
         const codebasePath = path.join(tempRoot, "repo");
@@ -1098,15 +1191,15 @@ test("project watcher requests queue behind active global sync without tight tim
         snapshotManager.saveCodebaseSnapshot();
 
         let fullScanCalls = 0;
-        let releaseGlobalSync!: () => void;
-        const globalSyncGate = new Promise<void>((resolve) => {
-            releaseGlobalSync = resolve;
+        let releaseCollectionSync!: () => void;
+        const collectionSyncGate = new Promise<void>((resolve) => {
+            releaseCollectionSync = resolve;
         });
         const context = {
             reindexByChange: async () => {
                 fullScanCalls += 1;
                 if (fullScanCalls === 1) {
-                    await globalSyncGate;
+                    await collectionSyncGate;
                 }
                 return { added: 0, removed: 0, modified: 0 };
             }
@@ -1119,7 +1212,7 @@ test("project watcher requests queue behind active global sync without tight tim
             close: async () => undefined
         };
 
-        const globalSyncPromise = syncManager.handleSyncIndex();
+        const collectionSyncPromise = syncManager.handleSyncIndex();
         await waitFor(() => fullScanCalls === 1, 500);
 
         await (syncManager as any).runProjectWatcherSync(codebasePath, { forceFullScan: true });
@@ -1129,8 +1222,8 @@ test("project watcher requests queue behind active global sync without tight tim
         assert.equal((syncManager as any).projectWatcherFullScanTimers.size, 0);
         assert.equal(fullScanCalls, 1);
 
-        releaseGlobalSync();
-        await globalSyncPromise;
+        releaseCollectionSync();
+        await collectionSyncPromise;
         await waitFor(() => fullScanCalls === 2, 500);
         syncManager.stopBackgroundSync();
     });
@@ -1202,7 +1295,7 @@ test("projectWatcher=false keeps full change scan behavior", async () => {
 });
 
 test("stopBackgroundSync closes project and trigger watchers", async () => {
-    await withTempHome(async (tempRoot) => {
+    await withTempHome(async () => {
         const snapshotManager = new SnapshotManager();
         const syncManager = new SyncManager({} as any, snapshotManager);
         let projectClosed = false;
@@ -1274,7 +1367,7 @@ test("separate MCP sync managers do not run the same sync concurrently", async (
     });
 });
 
-test("active global sync lock heartbeat prevents stale reclaim by another manager", async () => {
+test("active collection sync lock heartbeat prevents stale reclaim by another manager", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });

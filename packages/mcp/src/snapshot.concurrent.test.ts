@@ -96,3 +96,70 @@ test("snapshot save skips writing when the lock cannot be acquired", async () =>
         assert.deepEqual(snapshot.codebases, {});
     });
 });
+
+test("async snapshot save waits for a short lock without blocking timers", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotDir = path.join(tempRoot, "home", ".hitmux-context-engine");
+        const snapshotPath = path.join(snapshotDir, "mcp-codebase-snapshot.json");
+        const lockPath = `${snapshotPath}.lock`;
+        await mkdir(lockPath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 2,
+            status: "completed"
+        });
+
+        let timerFired = false;
+        setTimeout(async () => {
+            timerFired = true;
+            await rm(lockPath, { recursive: true, force: true });
+        }, 25);
+
+        const saved = await snapshotManager.saveCodebaseSnapshotAsync();
+        const snapshot = JSON.parse(await readFile(snapshotPath, "utf8"));
+
+        assert.equal(timerFired, true);
+        assert.equal(saved, true);
+        assert.equal(snapshot.codebases[codebasePath].status, "indexed");
+    });
+});
+
+test("snapshot tombstones prevent stale managers from restoring cleared codebases", async () => {
+    await withTempHome(async (tempRoot) => {
+        const firstCodebase = path.join(tempRoot, "repo-a");
+        const secondCodebase = path.join(tempRoot, "repo-b");
+        await mkdir(firstCodebase, { recursive: true });
+        await mkdir(secondCodebase, { recursive: true });
+
+        const staleManager = new SnapshotManager();
+        staleManager.setCodebaseIndexed(firstCodebase, {
+            indexedFiles: 1,
+            totalChunks: 2,
+            status: "completed"
+        });
+        assert.equal(staleManager.saveCodebaseSnapshot(), true);
+
+        const clearingManager = new SnapshotManager();
+        clearingManager.loadCodebaseSnapshot();
+        clearingManager.removeCodebaseCompletely(firstCodebase);
+        assert.equal(await clearingManager.saveCodebaseSnapshotAsync(), true);
+
+        staleManager.setCodebaseIndexed(secondCodebase, {
+            indexedFiles: 3,
+            totalChunks: 4,
+            status: "completed"
+        });
+        assert.equal(await staleManager.saveCodebaseSnapshotAsync(), true);
+
+        const reloadedManager = new SnapshotManager();
+        reloadedManager.loadCodebaseSnapshot();
+
+        assert.equal(reloadedManager.getCodebaseInfo(firstCodebase), undefined);
+        assert.equal(reloadedManager.getCodebaseInfo(secondCodebase)?.status, "indexed");
+    });
+});

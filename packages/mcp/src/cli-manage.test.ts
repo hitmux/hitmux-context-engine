@@ -171,6 +171,11 @@ class FakeSnapshotManager {
         this.saved++;
         return true;
     }
+
+    async saveCodebaseSnapshotAsync(): Promise<boolean> {
+        this.saved++;
+        return true;
+    }
 }
 
 function createFakeLock(): McpWriterLock {
@@ -283,19 +288,35 @@ test("runCliManageCommand rm drops collection and removes snapshot entry", async
     assert.match(output.join(""), /Removed collection 'hybrid_code_chunks_app'/);
 });
 
-test("runCliManageCommand index sync writes recovered chunk and file counts", async () => {
+test("runCliManageCommand index sync refreshes snapshot from remote manifest", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "hce-cli-index-"));
     const output: string[] = [];
+    let metadataQueryCalls = 0;
     const vectorDatabase = createFakeVectorDatabase({
         hybrid_code_chunks_app: {
             rowCount: 3,
-            queryRows: [
-                { relativePath: "src/a.ts" },
-                { relativePath: "src/a.ts" },
-                { relativePath: "src/b.ts" },
-            ],
         },
     });
+    vectorDatabase.readIndexManifest = async (collectionName: string, codebasePath: string) => {
+        assert.equal(collectionName, "hybrid_code_chunks_app");
+        assert.equal(codebasePath, tempDir);
+        return {
+            manifestVersion: 1,
+            codebasePath,
+            collectionName,
+            status: "completed",
+            indexedFiles: 2,
+            totalChunks: 3,
+            schemaVersion: 2,
+            metadataVersion: 2,
+            generation: 1,
+            updatedAt: "2026-06-21T00:00:00.000Z",
+        };
+    };
+    vectorDatabase.query = async () => {
+        metadataQueryCalls++;
+        throw new Error("CLI index sync should not scan row metadata");
+    };
     const snapshotManager = new FakeSnapshotManager();
 
     try {
@@ -320,12 +341,13 @@ test("runCliManageCommand index sync writes recovered chunk and file counts", as
                     indexedFiles: 2,
                     totalChunks: 3,
                     status: "completed",
-                    statsSource: "collection_row_count",
+                    statsSource: "remote_manifest",
                 },
                 indexOptions: {},
             },
         ]);
         assert.equal(snapshotManager.saved, 1);
+        assert.equal(metadataQueryCalls, 0);
     } finally {
         rmSync(tempDir, { recursive: true, force: true });
     }
@@ -336,8 +358,19 @@ test("runCliManageCommand index sync reuses snapshot request options", async () 
     const vectorDatabase = createFakeVectorDatabase({
         hybrid_code_chunks_app: {
             rowCount: 1,
-            queryRows: [{ relativePath: "src/app.vue" }],
         },
+    });
+    vectorDatabase.readIndexManifest = async (collectionName: string, codebasePath: string) => ({
+        manifestVersion: 1,
+        codebasePath,
+        collectionName,
+        status: "completed",
+        indexedFiles: 1,
+        totalChunks: 1,
+        schemaVersion: 2,
+        metadataVersion: 2,
+        generation: 1,
+        updatedAt: "2026-06-21T00:00:00.000Z",
     });
     const context = new FakeContext(vectorDatabase);
     const snapshotManager = new FakeSnapshotManager();

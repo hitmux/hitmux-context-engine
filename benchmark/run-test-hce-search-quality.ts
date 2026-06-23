@@ -7,7 +7,8 @@ type FailureTaxonomy =
     | "expected_hit"
     | "search_miss"
     | "empty_result"
-    | "search_error";
+    | "search_error"
+    | "invalid_fixture";
 
 type FailureDiagnostic =
     | "missing_expected_path"
@@ -55,7 +56,14 @@ interface SearchResultRecord {
 }
 
 interface BenchmarkContext {
-    semanticSearch(projectRoot: string, question: string, limit: number, threshold: number): Promise<SearchResultRecord[]>;
+    semanticSearch(
+        projectRoot: string,
+        question: string,
+        limit: number,
+        threshold: number,
+        filterExpr?: string,
+        options?: { enableLexicalSupplement?: boolean }
+    ): Promise<SearchResultRecord[]>;
     getCollectionName(projectRoot: string): string;
     hasIndex(projectRoot: string): Promise<boolean>;
     indexCodebase(
@@ -84,6 +92,8 @@ interface CaseResult {
     firstAcceptableSymbolRank: number | null;
     symbolHitCount: number;
     needsManualReview: boolean;
+    scoreExcluded: boolean;
+    scoreExclusionReason?: string;
     freshness: CaseFreshness;
     failureTaxonomy: FailureTaxonomy;
     failureDiagnostics: FailureDiagnostic[];
@@ -110,15 +120,48 @@ interface CaseResult {
 
 interface CaseFreshness {
     missingExpectedPaths: string[];
+    missingPrimaryPaths: string[];
+    missingAcceptablePaths: string[];
     staleResultPaths: string[];
+    scorable: boolean;
+    scoreExclusionReason?: string;
+}
+
+interface TemporaryIndexRecord {
+    project: string;
+    projectRoot: string;
+    collectionName: string;
+    createdAt: string;
+}
+
+interface ProjectIndexStatus {
+    collectionName: string;
+    temporary: boolean;
+    createdNow: boolean;
 }
 
 interface ProjectFreshnessSummary {
     missingExpectedPathCases: number;
     missingExpectedPathCount: number;
+    missingPrimaryPathCases: number;
+    missingPrimaryPathCount: number;
+    missingAcceptablePathCases: number;
+    missingAcceptablePathCount: number;
     staleResultPathCases: number;
     staleResultPathCount: number;
+    unscorableCases: Array<{
+        caseId: string;
+        missingPrimaryPaths: string[];
+    }>;
     missingExpectedPaths: Array<{
+        caseId: string;
+        paths: string[];
+    }>;
+    missingPrimaryPaths: Array<{
+        caseId: string;
+        paths: string[];
+    }>;
+    missingAcceptablePaths: Array<{
         caseId: string;
         paths: string[];
     }>;
@@ -128,8 +171,8 @@ interface ProjectFreshnessSummary {
     }>;
 }
 
-type LegacyCaseResult = Omit<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons">
-    & Partial<Pick<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons" | "queryAnchors" | "anchorCoverage">>;
+type LegacyCaseResult = Omit<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons" | "scoreExcluded" | "scoreExclusionReason">
+    & Partial<Pick<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons" | "queryAnchors" | "anchorCoverage" | "scoreExcluded" | "scoreExclusionReason">>;
 
 interface CaseLookup {
     benchmarkCase: BenchmarkCase;
@@ -410,6 +453,66 @@ function writeJson(filePath: string, value: unknown): void {
     fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+function readTemporaryIndexes(statePath: string): TemporaryIndexRecord[] {
+    if (!fs.existsSync(statePath)) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(fs.readFileSync(statePath, "utf8")) as { temporaryIndexes?: unknown };
+        if (!Array.isArray(parsed.temporaryIndexes)) {
+            return [];
+        }
+
+        return parsed.temporaryIndexes.filter((record): record is TemporaryIndexRecord => {
+            if (typeof record !== "object" || record === null) {
+                return false;
+            }
+            const candidate = record as Partial<TemporaryIndexRecord>;
+            return typeof candidate.project === "string" &&
+                typeof candidate.projectRoot === "string" &&
+                typeof candidate.collectionName === "string" &&
+                typeof candidate.createdAt === "string";
+        });
+    } catch {
+        return [];
+    }
+}
+
+function findTemporaryIndex(statePath: string, projectRoot: string): TemporaryIndexRecord | undefined {
+    const normalizedProjectRoot = path.resolve(projectRoot);
+    return readTemporaryIndexes(statePath).find((record) => path.resolve(record.projectRoot) === normalizedProjectRoot);
+}
+
+function writeBenchmarkState(
+    statePath: string,
+    value: Record<string, unknown>,
+    temporaryIndexes = readTemporaryIndexes(statePath)
+): void {
+    writeJson(statePath, {
+        ...value,
+        temporaryIndexes,
+    });
+}
+
+function upsertTemporaryIndex(
+    statePath: string,
+    record: TemporaryIndexRecord
+): TemporaryIndexRecord[] {
+    const temporaryIndexes = readTemporaryIndexes(statePath);
+    const normalizedProjectRoot = path.resolve(record.projectRoot);
+    const next = [
+        ...temporaryIndexes.filter((existing) => path.resolve(existing.projectRoot) !== normalizedProjectRoot),
+        record,
+    ];
+    return next;
+}
+
+function removeTemporaryIndex(statePath: string, projectRoot: string): TemporaryIndexRecord[] {
+    const normalizedProjectRoot = path.resolve(projectRoot);
+    return readTemporaryIndexes(statePath).filter((record) => path.resolve(record.projectRoot) !== normalizedProjectRoot);
+}
+
 function normalizeRelativePath(projectRoot: string, resultPath: string): string {
     const absolute = path.isAbsolute(resultPath) ? resultPath : path.join(projectRoot, resultPath);
     return path.relative(projectRoot, absolute).split(path.sep).join("/");
@@ -446,7 +549,21 @@ function auditFreshness(
 
     return {
         missingExpectedPaths: uniqueExpectedPaths.filter((expectedPath) => !fileExistsInProject(projectRoot, expectedPath)),
+        missingPrimaryPaths: benchmarkCase.expected.primaryPaths
+            .map(normalizeExpectedPath)
+            .filter((expectedPath) => !fileExistsInProject(projectRoot, expectedPath)),
+        missingAcceptablePaths: (benchmarkCase.expected.acceptablePaths ?? [])
+            .map(normalizeExpectedPath)
+            .filter((expectedPath) => !fileExistsInProject(projectRoot, expectedPath)),
         staleResultPaths: resultPaths.filter((resultPath) => !fileExistsInProject(projectRoot, resultPath)),
+        scorable: benchmarkCase.expected.primaryPaths
+            .map(normalizeExpectedPath)
+            .some((expectedPath) => fileExistsInProject(projectRoot, expectedPath)),
+        ...(!benchmarkCase.expected.primaryPaths
+            .map(normalizeExpectedPath)
+            .some((expectedPath) => fileExistsInProject(projectRoot, expectedPath))
+            ? { scoreExclusionReason: "all_primary_paths_missing" }
+            : {}),
     };
 }
 
@@ -542,7 +659,9 @@ function classifyFailure(
     }
 
     let failureTaxonomy: FailureTaxonomy;
-    if (scoring.topResults.length === 0) {
+    if (freshness.scorable === false) {
+        failureTaxonomy = "invalid_fixture";
+    } else if (scoring.topResults.length === 0) {
         failureTaxonomy = "empty_result";
     } else if (!hasExpectedHit(scoring)) {
         failureTaxonomy = "search_miss";
@@ -816,7 +935,9 @@ async function runCase(
             projectRoot,
             benchmarkCase.question,
             options.limit,
-            options.threshold
+            options.threshold,
+            undefined,
+            { enableLexicalSupplement: false }
         );
         const finishedAtDate = new Date();
         const scoring = scoreResult(projectRoot, benchmarkCase, results);
@@ -836,6 +957,8 @@ async function runCase(
             finishedAt: finishedAtDate.toISOString(),
             durationMs: finishedAtDate.getTime() - startedAtDate.getTime(),
             ...scoring,
+            scoreExcluded: !freshness.scorable,
+            ...(freshness.scoreExclusionReason ? { scoreExclusionReason: freshness.scoreExclusionReason } : {}),
             freshness,
             ...classification,
             queryAnchors: anchorCoverage.extracted,
@@ -867,8 +990,10 @@ async function runCase(
             firstAcceptableSymbolRank: null,
             symbolHitCount: 0,
             needsManualReview: true,
+            scoreExcluded: !freshness.scorable,
+            ...(freshness.scoreExclusionReason ? { scoreExclusionReason: freshness.scoreExclusionReason } : {}),
             freshness,
-            failureTaxonomy: "search_error",
+            failureTaxonomy: freshness.scorable ? "search_error" : "invalid_fixture",
             failureDiagnostics,
             failureReasons: failureDiagnostics,
             queryAnchors: extractQueryAnchors(benchmarkCase.question),
@@ -880,16 +1005,39 @@ async function runCase(
     }
 }
 
-async function ensureProjectIndex(context: BenchmarkContext, project: ResolvedBenchmarkProject): Promise<void> {
+async function ensureProjectIndex(
+    context: BenchmarkContext,
+    project: ResolvedBenchmarkProject,
+    statePath: string,
+    runId: string
+): Promise<ProjectIndexStatus> {
     const collectionName = context.getCollectionName(project.projectRoot);
+    const temporaryIndex = findTemporaryIndex(statePath, project.projectRoot);
     const hasIndex = await context.hasIndex(project.projectRoot);
     if (hasIndex) {
-        console.log(`Index ready for ${project.name}: ${collectionName}`);
-        return;
+        if (temporaryIndex) {
+            console.log(`Temporary index ready for ${project.name}: ${collectionName}`);
+            return { collectionName, temporary: true, createdNow: false };
+        }
+        console.log(`Existing index ready for ${project.name}: ${collectionName}`);
+        return { collectionName, temporary: false, createdNow: false };
     }
 
     console.log(`Index missing for ${project.name}: ${collectionName}`);
     console.log(`Indexing ${project.name}: ${project.projectRoot}`);
+    const temporaryIndexes = upsertTemporaryIndex(statePath, {
+        project: project.name,
+        projectRoot: project.projectRoot,
+        collectionName,
+        createdAt: new Date().toISOString(),
+    });
+    writeBenchmarkState(statePath, {
+        runId,
+        status: "indexing",
+        project: project.name,
+        collectionName,
+        updatedAt: new Date().toISOString(),
+    }, temporaryIndexes);
 
     let lastReportedPercentage = -1;
     const result = await context.indexCodebase(
@@ -906,6 +1054,7 @@ async function ensureProjectIndex(context: BenchmarkContext, project: ResolvedBe
     console.log(
         `Indexed ${project.name}: ${result.indexedFiles} files, ${result.totalChunks} chunks, status=${result.status}`
     );
+    return { collectionName, temporary: true, createdNow: true };
 }
 
 function projectCompletedSuccessfully(resultsPath: string, project: ResolvedBenchmarkProject): boolean {
@@ -922,9 +1071,14 @@ async function clearCompletedProjectIndex(
     statePath: string,
     runId: string,
     project: ResolvedBenchmarkProject,
-    options: RunnerOptions
+    options: RunnerOptions,
+    indexStatus: ProjectIndexStatus
 ): Promise<void> {
     if (options.keepIndex) {
+        return;
+    }
+    if (!indexStatus.temporary) {
+        console.log(`Keeping existing index for ${project.name}: ${indexStatus.collectionName}`);
         return;
     }
     if (!projectCompletedSuccessfully(resultsPath, project)) {
@@ -932,8 +1086,8 @@ async function clearCompletedProjectIndex(
         return;
     }
 
-    const collectionName = context.getCollectionName(project.projectRoot);
-    writeJson(statePath, {
+    const collectionName = indexStatus.collectionName;
+    writeBenchmarkState(statePath, {
         runId,
         status: "clearing-index",
         project: project.name,
@@ -942,6 +1096,14 @@ async function clearCompletedProjectIndex(
     });
     console.log(`Clearing completed project index for ${project.name}: ${collectionName}`);
     await context.clearIndex(project.projectRoot);
+    const temporaryIndexes = removeTemporaryIndex(statePath, project.projectRoot);
+    writeBenchmarkState(statePath, {
+        runId,
+        status: "index-cleared",
+        project: project.name,
+        collectionName,
+        updatedAt: new Date().toISOString(),
+    }, temporaryIndexes);
     console.log(`Cleared completed project index for ${project.name}: ${collectionName}`);
 }
 
@@ -951,6 +1113,7 @@ function createEmptyTaxonomyCounts(): Record<FailureTaxonomy, number> {
         search_miss: 0,
         empty_result: 0,
         search_error: 0,
+        invalid_fixture: 0,
     };
 }
 
@@ -968,20 +1131,37 @@ function createEmptyFreshnessSummary(): ProjectFreshnessSummary {
     return {
         missingExpectedPathCases: 0,
         missingExpectedPathCount: 0,
+        missingPrimaryPathCases: 0,
+        missingPrimaryPathCount: 0,
+        missingAcceptablePathCases: 0,
+        missingAcceptablePathCount: 0,
         staleResultPathCases: 0,
         staleResultPathCount: 0,
+        unscorableCases: [],
         missingExpectedPaths: [],
+        missingPrimaryPaths: [],
+        missingAcceptablePaths: [],
         staleResultPaths: [],
     };
 }
 
-function ensureResultTaxonomy(result: LegacyCaseResult): Pick<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons"> {
-    const freshness = result.freshness ?? {
-        missingExpectedPaths: [],
-        staleResultPaths: [],
+function normalizeFreshness(freshness: Partial<CaseFreshness> | undefined): CaseFreshness {
+    return {
+        missingExpectedPaths: freshness?.missingExpectedPaths ?? [],
+        missingPrimaryPaths: freshness?.missingPrimaryPaths ?? [],
+        missingAcceptablePaths: freshness?.missingAcceptablePaths ?? [],
+        staleResultPaths: freshness?.staleResultPaths ?? [],
+        scorable: freshness?.scorable ?? true,
+        ...(freshness?.scoreExclusionReason ? { scoreExclusionReason: freshness.scoreExclusionReason } : {}),
     };
+}
+
+function ensureResultTaxonomy(result: LegacyCaseResult): Pick<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons"> {
+    const freshness = normalizeFreshness(result.freshness);
     const fallbackTaxonomy: FailureTaxonomy =
-        result.status === "error"
+        freshness.scorable === false
+            ? "invalid_fixture"
+            : result.status === "error"
             ? "search_error"
             : result.topResults.length === 0
                 ? "empty_result"
@@ -1037,6 +1217,8 @@ function rewriteResultWithAudit(result: LegacyCaseResult, lookup: CaseLookup | u
         return {
             ...result,
             ...taxonomy,
+            scoreExcluded: taxonomy.freshness.scorable === false,
+            ...(taxonomy.freshness.scoreExclusionReason ? { scoreExclusionReason: taxonomy.freshness.scoreExclusionReason } : {}),
             queryAnchors: result.queryAnchors ?? anchorCoverage.extracted,
             anchorCoverage,
             scoreVersion: result.scoreVersion ?? SCORE_VERSION,
@@ -1055,8 +1237,10 @@ function rewriteResultWithAudit(result: LegacyCaseResult, lookup: CaseLookup | u
         return {
             ...result,
             topResults,
+            scoreExcluded: !freshness.scorable,
+            ...(freshness.scoreExclusionReason ? { scoreExclusionReason: freshness.scoreExclusionReason } : {}),
             freshness,
-            failureTaxonomy: result.status === "error" ? "search_error" : "empty_result",
+            failureTaxonomy: freshness.scorable ? (result.status === "error" ? "search_error" : "empty_result") : "invalid_fixture",
             failureDiagnostics: [...new Set(failureDiagnostics)],
             failureReasons: [...new Set(failureDiagnostics)],
             queryAnchors: anchorCoverage.extracted,
@@ -1073,6 +1257,8 @@ function rewriteResultWithAudit(result: LegacyCaseResult, lookup: CaseLookup | u
     return {
         ...result,
         ...scoring,
+        scoreExcluded: !freshness.scorable,
+        ...(freshness.scoreExclusionReason ? { scoreExclusionReason: freshness.scoreExclusionReason } : {}),
         freshness,
         ...classification,
         queryAnchors: anchorCoverage.extracted,
@@ -1081,10 +1267,19 @@ function rewriteResultWithAudit(result: LegacyCaseResult, lookup: CaseLookup | u
     };
 }
 
-function writeReport(resultsPath: string, reportPath: string): void {
-    const results = Array.from(getLatestResults(resultsPath).values());
+function getActiveCaseKeys(projects: ResolvedBenchmarkProject[]): Set<string> {
+    return new Set(
+        projects.flatMap((project) => project.cases.map((benchmarkCase) => resultKey(project.name, benchmarkCase.id)))
+    );
+}
+
+function writeReport(resultsPath: string, reportPath: string, activeCaseKeys?: Set<string>): void {
+    const results = Array.from(getLatestResults(resultsPath).values())
+        .filter((result) => activeCaseKeys === undefined || activeCaseKeys.has(resultKey(result.project, result.caseId)));
     const byProject = new Map<string, {
         total: number;
+        scorableTotal: number;
+        scoreExcluded: number;
         completed: number;
         errors: number;
         suggestedScore: number;
@@ -1103,6 +1298,8 @@ function writeReport(resultsPath: string, reportPath: string): void {
     for (const result of results) {
         const summary = byProject.get(result.project) ?? {
             total: 0,
+            scorableTotal: 0,
+            scoreExcluded: 0,
             completed: 0,
             errors: 0,
             suggestedScore: 0,
@@ -1131,6 +1328,28 @@ function writeReport(resultsPath: string, reportPath: string): void {
                 paths: taxonomy.freshness.missingExpectedPaths,
             });
         }
+        if (taxonomy.freshness.missingPrimaryPaths.length > 0) {
+            summary.freshness.missingPrimaryPathCases += 1;
+            summary.freshness.missingPrimaryPathCount += taxonomy.freshness.missingPrimaryPaths.length;
+            summary.freshness.missingPrimaryPaths.push({
+                caseId: result.caseId,
+                paths: taxonomy.freshness.missingPrimaryPaths,
+            });
+        }
+        if (taxonomy.freshness.missingAcceptablePaths.length > 0) {
+            summary.freshness.missingAcceptablePathCases += 1;
+            summary.freshness.missingAcceptablePathCount += taxonomy.freshness.missingAcceptablePaths.length;
+            summary.freshness.missingAcceptablePaths.push({
+                caseId: result.caseId,
+                paths: taxonomy.freshness.missingAcceptablePaths,
+            });
+        }
+        if (!taxonomy.freshness.scorable) {
+            summary.freshness.unscorableCases.push({
+                caseId: result.caseId,
+                missingPrimaryPaths: taxonomy.freshness.missingPrimaryPaths,
+            });
+        }
         if (taxonomy.freshness.staleResultPaths.length > 0) {
             summary.freshness.staleResultPathCases += 1;
             summary.freshness.staleResultPathCount += taxonomy.freshness.staleResultPaths.length;
@@ -1141,6 +1360,12 @@ function writeReport(resultsPath: string, reportPath: string): void {
         }
         if (result.status === "completed") {
             summary.completed += 1;
+            if (result.scoreExcluded) {
+                summary.scoreExcluded += 1;
+                byProject.set(result.project, summary);
+                continue;
+            }
+            summary.scorableTotal += 1;
             summary.suggestedScore += result.suggestedScore;
             if (result.firstPrimaryRank !== null && result.firstPrimaryRank <= 5) {
                 summary.primaryTop5 += 1;
@@ -1182,7 +1407,10 @@ function writeReport(resultsPath: string, reportPath: string): void {
         projects: Array.from(byProject.entries()).map(([project, summary]) => ({
             project,
             ...summary,
-            maxScore: summary.total * 5,
+            maxScore: summary.scorableTotal * 5,
+            scorePercent: summary.scorableTotal > 0
+                ? Math.round((summary.suggestedScore / (summary.scorableTotal * 5)) * 1000) / 10
+                : null,
         })),
     });
 }
@@ -1231,6 +1459,28 @@ function auditProjectsForPlan(
                     paths: freshness.missingExpectedPaths,
                 });
             }
+            if (freshness.missingPrimaryPaths.length > 0) {
+                summary.missingPrimaryPathCases += 1;
+                summary.missingPrimaryPathCount += freshness.missingPrimaryPaths.length;
+                summary.missingPrimaryPaths.push({
+                    caseId: benchmarkCase.id,
+                    paths: freshness.missingPrimaryPaths,
+                });
+            }
+            if (freshness.missingAcceptablePaths.length > 0) {
+                summary.missingAcceptablePathCases += 1;
+                summary.missingAcceptablePathCount += freshness.missingAcceptablePaths.length;
+                summary.missingAcceptablePaths.push({
+                    caseId: benchmarkCase.id,
+                    paths: freshness.missingAcceptablePaths,
+                });
+            }
+            if (!freshness.scorable) {
+                summary.unscorableCases.push({
+                    caseId: benchmarkCase.id,
+                    missingPrimaryPaths: freshness.missingPrimaryPaths,
+                });
+            }
             if (freshness.staleResultPaths.length > 0) {
                 summary.staleResultPathCases += 1;
                 summary.staleResultPathCount += freshness.staleResultPaths.length;
@@ -1248,32 +1498,136 @@ function auditProjectsForPlan(
 
 function printFreshnessPlanSummary(summaryByProject: Map<string, ProjectFreshnessSummary>): void {
     let missingExpectedPathCount = 0;
+    let missingPrimaryPathCount = 0;
+    let missingAcceptablePathCount = 0;
     let staleResultPathCount = 0;
+    let unscorableCaseCount = 0;
     for (const summary of summaryByProject.values()) {
         missingExpectedPathCount += summary.missingExpectedPathCount;
+        missingPrimaryPathCount += summary.missingPrimaryPathCount;
+        missingAcceptablePathCount += summary.missingAcceptablePathCount;
         staleResultPathCount += summary.staleResultPathCount;
+        unscorableCaseCount += summary.unscorableCases.length;
     }
 
     console.log(`Freshness missing expected paths: ${missingExpectedPathCount}`);
+    console.log(`Freshness missing primary paths: ${missingPrimaryPathCount}`);
+    console.log(`Freshness missing acceptable paths: ${missingAcceptablePathCount}`);
     console.log(`Freshness stale result paths: ${staleResultPathCount}`);
+    console.log(`Freshness unscorable cases: ${unscorableCaseCount}`);
     for (const [project, summary] of summaryByProject.entries()) {
-        if (summary.missingExpectedPathCount === 0 && summary.staleResultPathCount === 0) {
+        if (
+            summary.missingExpectedPathCount === 0 &&
+            summary.staleResultPathCount === 0 &&
+            summary.unscorableCases.length === 0
+        ) {
             continue;
         }
         console.log(
-            `- ${project} freshness: ${summary.missingExpectedPathCount} missing expected, ${summary.staleResultPathCount} stale result paths`
+            `- ${project} freshness: ${summary.missingExpectedPathCount} missing expected, ${summary.staleResultPathCount} stale result paths, ${summary.unscorableCases.length} unscorable cases`
         );
+        for (const item of summary.unscorableCases) {
+            console.log(`  scorable=false ${item.caseId}: missingPrimaryPaths=${item.missingPrimaryPaths.join(", ")}`);
+        }
+        for (const item of summary.missingPrimaryPaths) {
+            console.log(`  missingPrimaryPaths ${item.caseId}: ${item.paths.join(", ")}`);
+        }
+        for (const item of summary.missingAcceptablePaths) {
+            console.log(`  missingAcceptablePaths ${item.caseId}: ${item.paths.join(", ")}`);
+        }
+        for (const item of summary.staleResultPaths) {
+            console.log(`  staleResultPaths ${item.caseId}: ${item.paths.join(", ")}`);
+        }
     }
+}
+
+function getUnscorableBenchmarkCases(summaryByProject: Map<string, ProjectFreshnessSummary>): Array<{
+    project: string;
+    caseId: string;
+    missingPrimaryPaths: string[];
+}> {
+    return Array.from(summaryByProject.entries()).flatMap(([project, summary]) =>
+        summary.unscorableCases.map((item) => ({
+            project,
+            caseId: item.caseId,
+            missingPrimaryPaths: item.missingPrimaryPaths,
+        }))
+    );
+}
+
+function assertBenchmarkPreflightAllowsRun(summaryByProject: Map<string, ProjectFreshnessSummary>): void {
+    const unscorableCases = getUnscorableBenchmarkCases(summaryByProject);
+    if (unscorableCases.length === 0) {
+        return;
+    }
+
+    const details = unscorableCases
+        .map((item) => `${item.project}/${item.caseId} missing primary paths: ${item.missingPrimaryPaths.join(", ")}`)
+        .join("; ");
+    throw new Error(
+        `Benchmark preflight failed: ${unscorableCases.length} active case(s) are scorable=false. ` +
+        `Run --plan to generate the audit report, then fix the fixture or remove invalid cases before --run. ${details}`
+    );
 }
 
 function resultNeedsAuditRefresh(result: CaseResult): boolean {
     return result.scoreVersion !== SCORE_VERSION ||
         result.freshness === undefined ||
+        result.freshness.scorable === undefined ||
+        result.freshness.missingPrimaryPaths === undefined ||
+        result.freshness.missingAcceptablePaths === undefined ||
+        result.scoreExcluded === undefined ||
         result.failureTaxonomy === undefined ||
         result.failureDiagnostics === undefined ||
         result.queryAnchors === undefined ||
         result.anchorCoverage === undefined ||
         result.topResults.some((topResult) => topResult.anchorHits === undefined);
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+    if (left.length !== right.length) {
+        return false;
+    }
+
+    return left.every((value, index) => value === right[index]);
+}
+
+function freshnessEquals(left: CaseFreshness, right: CaseFreshness): boolean {
+    return stringArraysEqual(left.missingExpectedPaths, right.missingExpectedPaths) &&
+        stringArraysEqual(left.missingPrimaryPaths, right.missingPrimaryPaths) &&
+        stringArraysEqual(left.missingAcceptablePaths, right.missingAcceptablePaths) &&
+        stringArraysEqual(left.staleResultPaths, right.staleResultPaths) &&
+        left.scorable === right.scorable &&
+        left.scoreExclusionReason === right.scoreExclusionReason;
+}
+
+function resultNeedsFreshnessRefresh(result: CaseResult, lookup: CaseLookup): boolean {
+    const projectRoot = result.projectRoot || lookup.projectRoot;
+    const topResults = rematchTopResults(lookup.benchmarkCase, getResultTopResults(result));
+    const liveFreshness = auditFreshness(projectRoot, lookup.benchmarkCase, topResults);
+    return !freshnessEquals(normalizeFreshness(result.freshness), liveFreshness);
+}
+
+function getAuditRefreshNeededRecords(
+    latest: Map<string, CaseResult>,
+    projects: ResolvedBenchmarkProject[]
+): Array<{ project: string; caseId: string }> {
+    const caseLookup = buildCaseLookup(projects);
+    const staleRecords: Array<{ project: string; caseId: string }> = [];
+    for (const [key, lookup] of caseLookup.entries()) {
+        const result = latest.get(key);
+        if (!result) {
+            continue;
+        }
+        if (resultNeedsAuditRefresh(result) || resultNeedsFreshnessRefresh(result, lookup)) {
+            staleRecords.push({
+                project: result.project,
+                caseId: result.caseId,
+            });
+        }
+    }
+
+    return staleRecords;
 }
 
 function backupFilePath(filePath: string): string {
@@ -1303,17 +1657,21 @@ function rescoreExistingResults(
     const selectedProjectNames = new Set(selectedProjects.map((project) => project.name));
     const caseLookup = buildCaseLookup(resolveAllProjects(fixture, options));
     const latest = Array.from(getLatestResults(resultsPath).values());
-    const rescored = latest.map((result) => {
+    const rescored = latest.flatMap((result): CaseResult[] => {
         if (!selectedProjectNames.has(result.project)) {
-            return result;
+            return [result as CaseResult];
         }
-        return rewriteResultWithAudit(result, caseLookup.get(resultKey(result.project, result.caseId)));
+        const lookup = caseLookup.get(resultKey(result.project, result.caseId));
+        if (!lookup) {
+            return [];
+        }
+        return [rewriteResultWithAudit(result, lookup)];
     });
 
     const backupPath = backupFilePath(resultsPath);
     fs.copyFileSync(resultsPath, backupPath);
     writeJsonl(resultsPath, rescored);
-    writeJson(statePath, {
+    writeBenchmarkState(statePath, {
         runId: `rescore-${new Date().toISOString().replaceAll(":", "-")}`,
         status: "rescored",
         updatedAt: new Date().toISOString(),
@@ -1321,7 +1679,7 @@ function rescoreExistingResults(
         backupPath,
         note: "Rescored latest benchmark records without rerunning search.",
     });
-    writeReport(resultsPath, reportPath);
+    writeReport(resultsPath, reportPath, getActiveCaseKeys(projects));
     console.log(`Backed up previous results to ${backupPath}`);
     console.log(`Rewrote rescored results to ${resultsPath}`);
     console.log(`Wrote report to ${reportPath}`);
@@ -1335,7 +1693,8 @@ async function main(): Promise<void> {
     const reportPath = path.join(options.outDir, "report.json");
     const projects = validateFixture(fixture, options);
     const latest = getLatestResults(resultsPath);
-    printFreshnessPlanSummary(auditProjectsForPlan(projects, latest));
+    const preflightSummary = auditProjectsForPlan(projects, latest);
+    printFreshnessPlanSummary(preflightSummary);
     if (options.rescoreExisting) {
         rescoreExistingResults(fixture, options, projects, resultsPath, reportPath, statePath);
         return;
@@ -1343,9 +1702,7 @@ async function main(): Promise<void> {
 
     const totalCases = projects.reduce((total, project) => total + project.cases.length, 0);
     const completedKeys = readCompletedKeys(resultsPath, options);
-    const selectedCaseKeys = new Set(
-        projects.flatMap((project) => project.cases.map((benchmarkCase) => resultKey(project.name, benchmarkCase.id)))
-    );
+    const selectedCaseKeys = getActiveCaseKeys(projects);
     const recordedSelectedCases = [...completedKeys].filter((key) => selectedCaseKeys.has(key)).length;
     const pendingCases = projects.reduce(
         (total, project) => total + project.cases.filter((benchmarkCase) => !completedKeys.has(resultKey(project.name, benchmarkCase.id))).length,
@@ -1368,6 +1725,7 @@ async function main(): Promise<void> {
     if (!options.run) {
         return;
     }
+    assertBenchmarkPreflightAllowsRun(preflightSummary);
     const missingProjectRoots = projects.filter((project) => !project.projectRootExists);
     if (missingProjectRoots.length > 0) {
         throw new Error(
@@ -1378,20 +1736,29 @@ async function main(): Promise<void> {
         throw new Error("No benchmark cases defined. Refusing to run an empty benchmark.");
     }
     const runId = new Date().toISOString().replaceAll(":", "-");
-    if (pendingCases === 0) {
-        const staleAuditRecords = Array.from(latest.values()).filter(resultNeedsAuditRefresh).length;
-        if (staleAuditRecords > 0) {
-            throw new Error(
-                `No pending cases, but ${staleAuditRecords} existing records need refreshed scoring/audit fields. Run with --rescore-existing --run.`
-            );
-        }
-        writeJson(statePath, {
+    const staleAuditRecords = getAuditRefreshNeededRecords(latest, projects);
+    if (staleAuditRecords.length > 0) {
+        const sample = staleAuditRecords
+            .slice(0, 10)
+            .map((record) => `${record.project}/${record.caseId}`)
+            .join(", ");
+        throw new Error(
+            `${staleAuditRecords.length} existing active record(s) need refreshed scoring/audit fields before benchmark run. ` +
+            `Run with --rescore-existing --run. Stale records: ${sample}${staleAuditRecords.length > 10 ? ", ..." : ""}`
+        );
+    }
+    const temporaryCleanupProjects = projects.flatMap((project) => {
+        const temporaryIndex = findTemporaryIndex(statePath, project.projectRoot);
+        return temporaryIndex ? [{ project, temporaryIndex }] : [];
+    });
+    if (pendingCases === 0 && (options.keepIndex || temporaryCleanupProjects.length === 0)) {
+        writeBenchmarkState(statePath, {
             runId,
             status: "completed",
             updatedAt: new Date().toISOString(),
             note: "No pending cases.",
         });
-        writeReport(resultsPath, reportPath);
+        writeReport(resultsPath, reportPath, selectedCaseKeys);
         console.log("No pending cases.");
         console.log(`Wrote report to ${reportPath}`);
         return;
@@ -1423,13 +1790,41 @@ async function main(): Promise<void> {
         },
     });
 
+    if (pendingCases === 0) {
+        for (const { project, temporaryIndex } of temporaryCleanupProjects) {
+            await clearCompletedProjectIndex(
+                context,
+                resultsPath,
+                statePath,
+                runId,
+                project,
+                options,
+                {
+                    collectionName: temporaryIndex.collectionName,
+                    temporary: true,
+                    createdNow: false,
+                }
+            );
+        }
+        writeBenchmarkState(statePath, {
+            runId,
+            status: "completed",
+            updatedAt: new Date().toISOString(),
+            note: "No pending cases. Cleared temporary indexes.",
+        });
+        writeReport(resultsPath, reportPath, selectedCaseKeys);
+        console.log("No pending cases.");
+        console.log(`Wrote report to ${reportPath}`);
+        return;
+    }
+
     for (const project of projects) {
         const pendingInProject = project.cases.some((benchmarkCase) => !completedKeys.has(resultKey(project.name, benchmarkCase.id)));
         if (!pendingInProject) {
             continue;
         }
 
-        await ensureProjectIndex(context, project);
+        const indexStatus = await ensureProjectIndex(context, project, statePath, runId);
 
         for (const benchmarkCase of project.cases) {
             const key = resultKey(project.name, benchmarkCase.id);
@@ -1437,7 +1832,7 @@ async function main(): Promise<void> {
                 continue;
             }
 
-            writeJson(statePath, {
+            writeBenchmarkState(statePath, {
                 runId,
                 status: "running",
                 project: project.name,
@@ -1450,16 +1845,36 @@ async function main(): Promise<void> {
             completedKeys.add(key);
         }
 
-        writeReport(resultsPath, reportPath);
-        await clearCompletedProjectIndex(context, resultsPath, statePath, runId, project, options);
+        writeReport(resultsPath, reportPath, selectedCaseKeys);
+        await clearCompletedProjectIndex(context, resultsPath, statePath, runId, project, options, indexStatus);
     }
 
-    writeJson(statePath, {
+    for (const project of projects) {
+        const temporaryIndex = findTemporaryIndex(statePath, project.projectRoot);
+        if (!temporaryIndex) {
+            continue;
+        }
+        await clearCompletedProjectIndex(
+            context,
+            resultsPath,
+            statePath,
+            runId,
+            project,
+            options,
+            {
+                collectionName: temporaryIndex.collectionName,
+                temporary: true,
+                createdNow: false,
+            }
+        );
+    }
+
+    writeBenchmarkState(statePath, {
         runId,
         status: "completed",
         updatedAt: new Date().toISOString(),
     });
-    writeReport(resultsPath, reportPath);
+    writeReport(resultsPath, reportPath, selectedCaseKeys);
     console.log(`Wrote results to ${resultsPath}`);
     console.log(`Wrote report to ${reportPath}`);
 }
@@ -1476,8 +1891,15 @@ if (isMainModule) {
 
 export {
     SCORE_VERSION,
+    assertBenchmarkPreflightAllowsRun,
     auditFreshness,
+    auditProjectsForPlan,
     classifyFailure,
+    clearCompletedProjectIndex,
+    ensureProjectIndex,
+    getAuditRefreshNeededRecords,
+    getUnscorableBenchmarkCases,
+    readTemporaryIndexes,
     type RecordedTopResult,
     resultNeedsAuditRefresh,
     rewriteResultWithAudit,

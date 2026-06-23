@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import { promises as fsp } from "fs";
 import * as path from "path";
 import * as os from "os";
 import {
@@ -20,6 +21,7 @@ export class SnapshotManager {
     private codebaseFileCount: Map<string, number> = new Map(); // Map of codebase path to indexed file count
     private codebaseInfoMap: Map<string, CodebaseInfo> = new Map(); // Map of codebase path to complete info
     private recentlyRemoved: Set<string> = new Set(); // Tracks codebases removed since last save
+    private removedCodebases: Map<string, string> = new Map(); // Cross-process deletion tombstones
 
     constructor() {
         // Initialize snapshot file path
@@ -77,6 +79,7 @@ export class SnapshotManager {
         this.indexedCodebases = validCodebases;
         this.indexingCodebases = new Map(); // Reset indexing codebases since they were interrupted
         this.codebaseFileCount = new Map(); // No file count info in v1 format
+        this.removedCodebases = new Map();
 
         // Populate codebaseInfoMap for v1 indexed codebases (with minimal info)
         this.codebaseInfoMap = new Map();
@@ -102,8 +105,18 @@ export class SnapshotManager {
         const validIndexedCodebases: string[] = [];
         const validFileCount = new Map<string, number>();
         const validCodebaseInfoMap = new Map<string, CodebaseInfo>();
+        const removedCodebases = this.normalizeRemovedCodebases(snapshot.removedCodebases);
 
         for (const [codebasePath, info] of Object.entries(snapshot.codebases)) {
+            const removedAt = removedCodebases.get(codebasePath);
+            const removedAtMs = removedAt ? Date.parse(removedAt) : NaN;
+            const infoUpdatedAtMs = Date.parse(info.lastUpdated);
+            if (
+                Number.isFinite(removedAtMs) &&
+                (!Number.isFinite(infoUpdatedAtMs) || removedAtMs >= infoUpdatedAtMs)
+            ) {
+                continue;
+            }
             if (!fs.existsSync(codebasePath)) {
                 console.warn(`[SNAPSHOT-DEBUG] Codebase no longer exists, removing: ${codebasePath}`);
                 this.recentlyRemoved.add(codebasePath);
@@ -141,6 +154,7 @@ export class SnapshotManager {
         this.indexingCodebases = new Map(); // Reset indexing codebases since they were interrupted
         this.codebaseFileCount = validFileCount;
         this.codebaseInfoMap = validCodebaseInfoMap;
+        this.removedCodebases = removedCodebases;
     }
 
     public getIndexedCodebases(): string[] {
@@ -408,6 +422,8 @@ export class SnapshotManager {
         this.codebaseFileCount.delete(codebasePath);
 
         const resolvedIndexOptions = this.resolveIndexOptions(codebasePath, indexOptions);
+        this.removedCodebases.delete(codebasePath);
+        this.recentlyRemoved.delete(codebasePath);
 
         // Update info map
         const info: CodebaseInfoIndexing = {
@@ -449,6 +465,8 @@ export class SnapshotManager {
         this.codebaseFileCount.set(codebasePath, stats.indexedFiles);
 
         const resolvedIndexOptions = this.resolveIndexOptions(codebasePath, indexOptions);
+        this.removedCodebases.delete(codebasePath);
+        this.recentlyRemoved.delete(codebasePath);
 
         const info: CodebaseInfoIndexed = {
             status: 'indexed',
@@ -477,6 +495,8 @@ export class SnapshotManager {
         this.codebaseFileCount.delete(codebasePath);
 
         const resolvedIndexOptions = this.resolveIndexOptions(codebasePath, indexOptions);
+        this.removedCodebases.delete(codebasePath);
+        this.recentlyRemoved.delete(codebasePath);
 
         // Update info map
         const info: CodebaseInfoIndexFailed = {
@@ -511,6 +531,26 @@ export class SnapshotManager {
         const { syncWarning: _syncWarning, ...cleanInfo } = info;
         this.codebaseInfoMap.set(codebasePath, {
             ...cleanInfo,
+            lastUpdated: new Date().toISOString()
+        });
+    }
+
+    public markCodebaseSynced(
+        codebasePath: string,
+        stats?: { added: number; removed: number; modified: number }
+    ): void {
+        const info = this.codebaseInfoMap.get(codebasePath);
+        if (!info || info.status !== 'indexed') {
+            return;
+        }
+
+        const fileDelta = stats ? stats.added - stats.removed : 0;
+        const indexedFiles = Math.max(0, info.indexedFiles + fileDelta);
+        const { syncWarning: _syncWarning, statsSource: _statsSource, ...cleanInfo } = info;
+        this.codebaseFileCount.set(codebasePath, indexedFiles);
+        this.codebaseInfoMap.set(codebasePath, {
+            ...cleanInfo,
+            indexedFiles,
             lastUpdated: new Date().toISOString()
         });
     }
@@ -552,6 +592,7 @@ export class SnapshotManager {
 
         // Track removal so mergeExternalEntry won't re-add it from disk
         this.recentlyRemoved.add(codebasePath);
+        this.removedCodebases.set(codebasePath, new Date().toISOString());
 
         console.log(`[SNAPSHOT-DEBUG] Completely removed codebase from snapshot: ${codebasePath}`);
     }
@@ -585,24 +626,41 @@ export class SnapshotManager {
         }
     }
 
-    private acquireLock(maxRetries = 5, retryInterval = 100): boolean {
+    private acquireLock(): boolean {
+        const lockPath = this.snapshotFilePath + '.lock';
+        try {
+            fs.mkdirSync(lockPath);
+            return true;
+        } catch {
+            try {
+                const stat = fs.statSync(lockPath);
+                if (Date.now() - stat.mtimeMs > 10000) {
+                    fs.rmdirSync(lockPath);
+                    fs.mkdirSync(lockPath);
+                    return true;
+                }
+            } catch { /* lock was removed by another process */ }
+        }
+        return false;
+    }
+
+    private async acquireLockAsync(maxRetries = 5, retryInterval = 100): Promise<boolean> {
         const lockPath = this.snapshotFilePath + '.lock';
         for (let i = 0; i < maxRetries; i++) {
             try {
-                fs.mkdirSync(lockPath);
+                await fsp.mkdir(lockPath);
                 return true;
             } catch {
-                // Check for stale lock (> 10 seconds old)
                 try {
-                    const stat = fs.statSync(lockPath);
+                    const stat = await fsp.stat(lockPath);
                     if (Date.now() - stat.mtimeMs > 10000) {
-                        fs.rmdirSync(lockPath);
-                        continue; // retry after removing stale lock
+                        await fsp.rmdir(lockPath);
+                        continue;
                     }
                 } catch { /* lock was removed by another process */ }
-                // Busy wait and retry
-                const waitUntil = Date.now() + retryInterval;
-                while (Date.now() < waitUntil) { /* busy wait */ }
+                if (i < maxRetries - 1) {
+                    await new Promise((resolve) => setTimeout(resolve, retryInterval));
+                }
             }
         }
         return false;
@@ -614,9 +672,16 @@ export class SnapshotManager {
         } catch { /* already released */ }
     }
 
+    private async releaseLockAsync(): Promise<void> {
+        try {
+            await fsp.rmdir(this.snapshotFilePath + '.lock');
+        } catch { /* already released */ }
+    }
+
     private mergeExternalEntry(codebasePath: string, info: CodebaseInfo): void {
         if (this.codebaseInfoMap.has(codebasePath)) return; // we already know about it
         if (this.recentlyRemoved.has(codebasePath)) return; // explicitly removed, don't re-add from disk
+        if (this.isRemovedAfter(codebasePath, info.lastUpdated)) return; // another process deleted it
         this.applyExternalEntry(codebasePath, info);
     }
 
@@ -645,6 +710,7 @@ export class SnapshotManager {
 
     private shouldApplyDiskEntry(codebasePath: string, diskInfo: CodebaseInfo): boolean {
         if (this.recentlyRemoved.has(codebasePath)) return false;
+        if (this.isRemovedAfter(codebasePath, diskInfo.lastUpdated)) return false;
 
         const currentInfo = this.codebaseInfoMap.get(codebasePath);
         if (!currentInfo) return true;
@@ -658,6 +724,49 @@ export class SnapshotManager {
         return diskUpdated > currentUpdated;
     }
 
+    private normalizeRemovedCodebases(removedCodebases?: Record<string, string>): Map<string, string> {
+        const normalized = new Map<string, string>();
+        if (!removedCodebases) return normalized;
+        const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        for (const [codebasePath, removedAt] of Object.entries(removedCodebases)) {
+            const removedAtMs = Date.parse(removedAt);
+            if (!Number.isFinite(removedAtMs) || removedAtMs < cutoffMs) {
+                continue;
+            }
+            normalized.set(codebasePath, removedAt);
+        }
+        return normalized;
+    }
+
+    private isRemovedAfter(codebasePath: string, updatedAt?: string): boolean {
+        const removedAt = this.removedCodebases.get(codebasePath);
+        if (!removedAt) return false;
+        const removedAtMs = Date.parse(removedAt);
+        const updatedAtMs = updatedAt ? Date.parse(updatedAt) : NaN;
+        if (!Number.isFinite(removedAtMs)) return false;
+        if (!Number.isFinite(updatedAtMs)) return true;
+        return removedAtMs >= updatedAtMs;
+    }
+
+    private applyRemovedCodebase(codebasePath: string, removedAt: string): void {
+        const currentRemovedAt = this.removedCodebases.get(codebasePath);
+        const currentRemovedAtMs = currentRemovedAt ? Date.parse(currentRemovedAt) : NaN;
+        const nextRemovedAtMs = Date.parse(removedAt);
+        if (!Number.isFinite(nextRemovedAtMs)) return;
+        if (Number.isFinite(currentRemovedAtMs) && currentRemovedAtMs > nextRemovedAtMs) {
+            return;
+        }
+
+        this.removedCodebases.set(codebasePath, removedAt);
+        const info = this.codebaseInfoMap.get(codebasePath);
+        if (!info || this.isRemovedAfter(codebasePath, info.lastUpdated)) {
+            this.indexedCodebases = this.indexedCodebases.filter(path => path !== codebasePath);
+            this.indexingCodebases.delete(codebasePath);
+            this.codebaseFileCount.delete(codebasePath);
+            this.codebaseInfoMap.delete(codebasePath);
+        }
+    }
+
     public refreshFromDiskForRead(): void {
         try {
             if (!fs.existsSync(this.snapshotFilePath)) {
@@ -668,6 +777,9 @@ export class SnapshotManager {
             const snapshot: CodebaseSnapshot = JSON.parse(snapshotData);
 
             if (this.isV2Format(snapshot)) {
+                for (const [removedPath, removedAt] of this.normalizeRemovedCodebases(snapshot.removedCodebases)) {
+                    this.applyRemovedCodebase(removedPath, removedAt);
+                }
                 for (const [diskPath, diskInfo] of Object.entries(snapshot.codebases)) {
                     if (!fs.existsSync(diskPath)) continue;
                     if (this.shouldApplyDiskEntry(diskPath, diskInfo)) {
@@ -694,6 +806,86 @@ export class SnapshotManager {
         }
     }
 
+    private buildSnapshot(): CodebaseSnapshotV2 {
+        const codebases: Record<string, CodebaseInfo> = {};
+
+        for (const [codebasePath, info] of this.codebaseInfoMap) {
+            codebases[codebasePath] = info;
+        }
+
+        return {
+            formatVersion: 'v2',
+            codebases,
+            removedCodebases: Object.fromEntries(this.removedCodebases),
+            lastUpdated: new Date().toISOString()
+        };
+    }
+
+    private mergeDiskSnapshot(diskSnapshot: unknown): void {
+        if (!this.isV2Format(diskSnapshot)) return;
+        for (const [removedPath, removedAt] of this.normalizeRemovedCodebases(diskSnapshot.removedCodebases)) {
+            this.applyRemovedCodebase(removedPath, removedAt);
+        }
+        for (const [diskPath, diskInfo] of Object.entries(diskSnapshot.codebases)) {
+            this.mergeExternalEntry(diskPath, diskInfo as CodebaseInfo);
+        }
+    }
+
+    public async saveCodebaseSnapshotAsync(): Promise<boolean> {
+        console.log('[SNAPSHOT-DEBUG] Saving codebase snapshot to:', this.snapshotFilePath);
+
+        try {
+            const snapshotDir = path.dirname(this.snapshotFilePath);
+            try {
+                await fsp.access(snapshotDir);
+            } catch {
+                await fsp.mkdir(snapshotDir, { recursive: true });
+                console.log('[SNAPSHOT-DEBUG] Created snapshot directory:', snapshotDir);
+            }
+        } catch (error: any) {
+            console.error('[SNAPSHOT-DEBUG] Error preparing snapshot directory:', error);
+            return false;
+        }
+
+        const locked = await this.acquireLockAsync();
+        if (!locked) {
+            console.warn('[SNAPSHOT-DEBUG] Failed to acquire lock, skipping snapshot save');
+            return false;
+        }
+
+        try {
+            try {
+                if (fs.existsSync(this.snapshotFilePath)) {
+                    const diskData = await fsp.readFile(this.snapshotFilePath, 'utf8');
+                    const diskSnapshot = JSON.parse(diskData);
+                    this.mergeDiskSnapshot(diskSnapshot);
+                }
+            } catch (mergeError) {
+                console.warn('[SNAPSHOT-DEBUG] Error reading disk snapshot for merge, continuing with in-memory state:', mergeError);
+            }
+
+            const snapshot = this.buildSnapshot();
+            const tempPath = `${this.snapshotFilePath}.tmp-${process.pid}-${Date.now()}`;
+            await fsp.writeFile(tempPath, JSON.stringify(snapshot, null, 2), 'utf8');
+            await fsp.rename(tempPath, this.snapshotFilePath);
+
+            this.recentlyRemoved.clear();
+
+            const indexedCount = this.indexedCodebases.length;
+            const indexingCount = this.indexingCodebases.size;
+            const failedCount = this.getFailedCodebases().length;
+
+            console.log(`[SNAPSHOT-DEBUG] Snapshot saved successfully in v2 format. Indexed: ${indexedCount}, Indexing: ${indexingCount}, Failed: ${failedCount}`);
+            return true;
+
+        } catch (error: any) {
+            console.error('[SNAPSHOT-DEBUG] Error saving snapshot:', error);
+            return false;
+        } finally {
+            await this.releaseLockAsync();
+        }
+    }
+
     public saveCodebaseSnapshot(): boolean {
         console.log('[SNAPSHOT-DEBUG] Saving codebase snapshot to:', this.snapshotFilePath);
 
@@ -715,38 +907,21 @@ export class SnapshotManager {
         }
 
         try {
-            // Read-merge: merge entries from disk that we don't have in memory
             try {
                 if (fs.existsSync(this.snapshotFilePath)) {
                     const diskData = fs.readFileSync(this.snapshotFilePath, 'utf8');
                     const diskSnapshot = JSON.parse(diskData);
-                    if (this.isV2Format(diskSnapshot)) {
-                        for (const [diskPath, diskInfo] of Object.entries(diskSnapshot.codebases)) {
-                            this.mergeExternalEntry(diskPath, diskInfo as CodebaseInfo);
-                        }
-                    }
+                    this.mergeDiskSnapshot(diskSnapshot);
                 }
             } catch (mergeError) {
                 console.warn('[SNAPSHOT-DEBUG] Error reading disk snapshot for merge, continuing with in-memory state:', mergeError);
             }
 
-            // Build v2 format snapshot using the complete info map
-            const codebases: Record<string, CodebaseInfo> = {};
+            const snapshot = this.buildSnapshot();
+            const tempPath = `${this.snapshotFilePath}.tmp-${process.pid}-${Date.now()}`;
+            fs.writeFileSync(tempPath, JSON.stringify(snapshot, null, 2));
+            fs.renameSync(tempPath, this.snapshotFilePath);
 
-            // Add all codebases from the info map
-            for (const [codebasePath, info] of this.codebaseInfoMap) {
-                codebases[codebasePath] = info;
-            }
-
-            const snapshot: CodebaseSnapshotV2 = {
-                formatVersion: 'v2',
-                codebases: codebases,
-                lastUpdated: new Date().toISOString()
-            };
-
-            fs.writeFileSync(this.snapshotFilePath, JSON.stringify(snapshot, null, 2));
-
-            // Clear recently removed set after successful save
             this.recentlyRemoved.clear();
 
             const indexedCount = this.indexedCodebases.length;

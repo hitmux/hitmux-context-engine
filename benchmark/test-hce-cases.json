@@ -1490,8 +1490,7 @@
               "src/core/math/circle.ts"
             ],
             "acceptablePaths": [
-              "src/bullets/bullet.ts",
-              "src/core/math/circle.test.ts"
+              "src/bullets/bullet.ts"
             ],
             "primarySymbols": [
               "Circle",
@@ -1909,8 +1908,7 @@
               "modules/caddyhttp/headers/headers.go"
             ],
             "acceptablePaths": [
-              "modules/caddyhttp/headers/caddyfile.go",
-              "modules/caddyhttp/reverseproxy/headers_test.go"
+              "modules/caddyhttp/headers/caddyfile.go"
             ],
             "primarySymbols": [
               "Handler",
@@ -1975,8 +1973,7 @@
               "modules/caddyhttp/reverseproxy/selectionpolicies.go"
             ],
             "acceptablePaths": [
-              "modules/caddyhttp/reverseproxy/upstreams.go",
-              "modules/caddyhttp/reverseproxy/selectionpolicies_test.go"
+              "modules/caddyhttp/reverseproxy/upstreams.go"
             ],
             "primarySymbols": [
               "RandomSelection",
@@ -2518,11 +2515,6 @@
             "primaryPaths": [
               "packages/core/src/config/config.ts"
             ],
-            "acceptablePaths": [
-              "packages/core/src/tools/tool-registry.ts",
-              "packages/core/src/tools/tool-names.ts",
-              "packages/core/src/tools/definitions/coreTools.ts"
-            ],
             "primarySymbols": [
               "Config",
               "registerTool",
@@ -2531,27 +2523,6 @@
               "McpClientManager"
             ],
             "evidence": "packages/core/src/config/config.ts 构造核心运行配置，并在工具注册流程中实例化和注册各类内置工具。"
-          }
-        },
-        {
-          "id": "gemini-cli-005",
-          "question": "How does the tool registry store tools, handle discovered tools and legacy aliases, and create tool invocations by name?",
-          "expected": {
-            "primaryPaths": [
-              "packages/core/src/tools/tool-registry.ts"
-            ],
-            "acceptablePaths": [
-              "packages/core/src/tools/tools.ts",
-              "packages/core/src/tools/tool-names.ts",
-              "packages/core/src/tools/mcp-tool.ts"
-            ],
-            "primarySymbols": [
-              "ToolRegistry",
-              "DiscoveredTool",
-              "DiscoveredToolInvocation",
-              "registerTool"
-            ],
-            "evidence": "packages/core/src/tools/tool-registry.ts 定义 ToolRegistry 和 DiscoveredTool，负责工具名称映射、注册、发现工具封装和调用分发。"
           }
         },
         {
@@ -2633,110 +2604,6 @@
               "SchedulerOptions"
             ],
             "evidence": "packages/core/src/scheduler/scheduler.ts 是事件驱动工具执行编排器，维护队列和状态并协调 policy、confirmation、hooks、executor 与进度事件。"
-          }
-        },
-        {
-          "id": "gemini-cli-010",
-          "question": "How does the shell tool parse commands, handle background execution, buffer output, sandbox permissions, directory arguments, and command confirmation descriptions?",
-          "expected": {
-            "primaryPaths": [
-              "packages/core/src/tools/shell.ts"
-            ],
-            "acceptablePaths": [
-              "packages/core/src/services/shellExecutionService.ts",
-              "packages/core/src/utils/shell-utils.ts",
-              "packages/core/src/tools/shellBackgroundTools.ts"
-            ],
-            "primarySymbols": [
-              "ShellToolInvocation",
-              "ShellToolParams",
-              "OUTPUT_UPDATE_INTERVAL_MS",
-              "LIVE_OUTPUT_MAX_BUFFER_CHARS"
-            ],
-            "evidence": "packages/core/src/tools/shell.ts 定义 ShellToolInvocation，负责 shell 命令参数、展示描述、权限建议、后台 PID 包装和执行结果处理。"
-          }
-        },
-        {
-          "id": "gemini-cli-011",
-          "question": "How does the read_many_files tool expand globs, apply default exclusions, honor ignore configuration, and concatenate multi-file content?",
-          "expected": {
-            "primaryPaths": [
-              "packages/core/src/tools/read-many-files.ts"
-            ],
-            "acceptablePaths": [
-              "packages/core/src/utils/fileUtils.ts",
-              "packages/core/src/utils/ignorePatterns.ts",
-              "packages/core/src/tools/jit-context.ts"
-            ],
-            "primarySymbols": [
-              "ReadManyFilesParams",
-              "ReadManyFilesToolInvocation",
-              "getDefaultExcludes"
-            ],
-            "evidence": "packages/core/src/tools/read-many-files.ts 实现 include/exclude glob 处理、默认过滤规则、文件读取和多文件输出格式化。"
-          }
-        },
-        {
-          "id": "gemini-cli-012",
-          "question": "How does the file edit tool generate patches, handle diffs, confirm changes, and write files back?",
-          "expected": {
-            "primaryPaths": [
-              "packages/core/src/tools/edit.ts"
-            ],
-            "acceptablePaths": [
-              "packages/core/src/tools/diff-utils.ts",
-              "packages/core/src/tools/write-file.ts",
-              "packages/core/src/ide/ide-client.ts"
-            ],
-            "primarySymbols": [
-              "EditTool",
-              "EditToolInvocation"
-            ],
-            "evidence": "packages/core/src/tools/edit.ts 是 edit 工具的主实现，负责读取目标文件、生成和应用变更、构建确认信息并与 diff 相关工具协作。"
-          }
-        },
-        {
-          "id": "gemini-cli-013",
-          "question": "Where is connection handling for a single MCP server implemented, including transport selection, tool/resource/prompt discovery, OAuth, and progress token routing?",
-          "expected": {
-            "primaryPaths": [
-              "packages/core/src/tools/mcp-client.ts"
-            ],
-            "acceptablePaths": [
-              "packages/core/src/tools/mcp-client-manager.ts",
-              "packages/core/src/tools/mcp-tool.ts",
-              "packages/core/src/mcp/oauth-provider.ts",
-              "packages/core/src/mcp/oauth-token-storage.ts"
-            ],
-            "primarySymbols": [
-              "McpClient",
-              "MCPServerStatus",
-              "MCPDiscoveryState",
-              "connectToMcpServer",
-              "McpProgressReporter"
-            ],
-            "evidence": "packages/core/src/tools/mcp-client.ts 封装单个 MCP server client，负责连接、认证、发现工具资源 prompt，并把 progress notification 映射回工具调用。"
-          }
-        },
-        {
-          "id": "gemini-cli-014",
-          "question": "Where are multiple MCP server lifecycle management, diagnostic deduplication, extension MCP unloading, and main registry maintenance implemented?",
-          "expected": {
-            "primaryPaths": [
-              "packages/core/src/tools/mcp-client-manager.ts"
-            ],
-            "acceptablePaths": [
-              "packages/core/src/tools/mcp-client.ts",
-              "packages/cli/src/commands/mcp.ts",
-              "packages/cli/src/config/mcp/mcpServerEnablement.ts"
-            ],
-            "primarySymbols": [
-              "McpClientManager",
-              "emitDiagnostic",
-              "setMainRegistries",
-              "stopExtension"
-            ],
-            "evidence": "packages/core/src/tools/mcp-client-manager.ts 管理多个 McpClient 的发现状态、诊断展示、资源查找、extension 停用和 registry 同步。"
           }
         },
         {
@@ -3607,75 +3474,6 @@
             ],
             "evidence": "documentMap.cpp 实现 DocumentMap 的缩略视图装载、换行映射、滚动位置同步和折叠状态同步。"
           }
-        },
-        {
-          "id": "notepad-plus-plus-018",
-          "question": "Where are Scintilla text buffer insertion, deletion, line indexing, read-only state, and undo/redo stack implemented?",
-          "expected": {
-            "primaryPaths": [
-              "scintilla/src/CellBuffer.cxx"
-            ],
-            "acceptablePaths": [
-              "scintilla/src/CellBuffer.h",
-              "scintilla/src/UndoHistory.cxx",
-              "scintilla/src/Document.cxx"
-            ],
-            "primarySymbols": [
-              "CellBuffer",
-              "InsertString",
-              "DeleteChars",
-              "LineFromPosition",
-              "SetReadOnly",
-              "PerformUndoStep",
-              "PerformRedoStep"
-            ],
-            "evidence": "CellBuffer.cxx 是 Scintilla 底层文本存储实现，包含插入删除、行定位、只读标志和 undo/redo 操作。"
-          }
-        },
-        {
-          "id": "notepad-plus-plus-019",
-          "question": "How do Lexilla lexer modules wrap language lexing, folding functions, and WordList descriptions, and where is the common module code?",
-          "expected": {
-            "primaryPaths": [
-              "lexilla/lexlib/LexerModule.cxx"
-            ],
-            "acceptablePaths": [
-              "lexilla/lexlib/LexerModule.h",
-              "lexilla/lexlib/WordList.cxx",
-              "lexilla/lexers/LexJSON.cxx"
-            ],
-            "primarySymbols": [
-              "LexerModule",
-              "LexerModule::Create",
-              "LexerModule::Lex",
-              "LexerModule::Fold",
-              "LexerModule::GetWordListDescription"
-            ],
-            "evidence": "LexerModule.cxx 定义 LexerModule 对语言 lexer 的工厂、Lex/Fold 调用和 word list 元数据访问。"
-          }
-        },
-        {
-          "id": "notepad-plus-plus-020",
-          "question": "How does Boost-based regex search perform forward and backward searches and replacement-text generation on UTF-8 and ANSI documents?",
-          "expected": {
-            "primaryPaths": [
-              "boostregex/BoostRegExSearch.cxx"
-            ],
-            "acceptablePaths": [
-              "boostregex/UTF8DocumentIterator.cxx",
-              "boostregex/UTF8DocumentIterator.h",
-              "boostregex/AnsiDocumentIterator.h"
-            ],
-            "primarySymbols": [
-              "BoostRegexSearch",
-              "CreateRegexSearch",
-              "FindText",
-              "FindTextForward",
-              "FindTextBackward",
-              "SubstituteByPosition"
-            ],
-            "evidence": "BoostRegExSearch.cxx 实现 BoostRegexSearch，按文档编码选择 UTF8DocumentIterator 或 AnsiDocumentIterator 来执行正则查找和替换。"
-          }
         }
       ]
     },
@@ -4365,8 +4163,7 @@
               "crates/uv-python/src/downloads.rs"
             ],
             "acceptablePaths": [
-              "crates/uv-python/src/installation.rs",
-              "crates/uv-python/download-metadata.json"
+              "crates/uv-python/src/installation.rs"
             ],
             "primarySymbols": [
               "ManagedPythonDownload",

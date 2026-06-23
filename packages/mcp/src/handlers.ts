@@ -10,6 +10,8 @@ import {
     IncrementalIndexTooLargeError,
     configManager,
     normalizeCodebaseIdentityPath,
+    REMOTE_INDEX_MANIFEST_VERSION,
+    type RemoteIndexManifest,
     type SearchTargetRole,
     type SymbolTraceEvidence,
     type SymbolTraceResult,
@@ -18,6 +20,7 @@ import { SnapshotManager } from "./snapshot.js";
 import {
     getBooleanFromConfig,
     type CodebaseIndexOptions,
+    type CodebaseInfoIndexing,
     type CodebaseInfoIndexed,
     type RequestSplitterType,
 } from "./config.js";
@@ -32,11 +35,13 @@ import {
     searchResultsAreFallbackMatches,
 } from "./search-filename-query.js";
 import {
-    ensureAbsolutePath,
+    requireAbsolutePath,
     truncateContent,
     trackCodebasePath,
 } from "./utils.js";
-import { queryCollectionStats } from "./collection-stats.js";
+import {
+    queryCollectionStats,
+} from "./collection-stats.js";
 import type {
     CodebaseSyncStats,
     CodebaseSyncStatus,
@@ -47,13 +52,21 @@ import {
     acquireMcpWriterLock,
     formatMcpWriterLockBusyMessage,
     McpWriterLock,
+    type McpWriterLockScope,
 } from "./sync-lock.js";
+import {
+    IndexingJobStateManager,
+    type IndexingJobProgress,
+    type IndexingJobState,
+} from "./indexing-job-state.js";
+import {
+    IndexingWorkerCancelledError,
+    startIndexingWorkerJob,
+} from "./indexing-worker-runner.js";
 
 const DEFAULT_SEARCH_RESULT_LIMIT = 20;
 const SOURCE_CONTEXT_WINDOW_LINES = 4;
 const SEARCH_CONTEXT_MAX_CHARS = 5000;
-const SEARCH_TRACE_FOLLOWUP_RESULT_LIMIT = 5;
-const SEARCH_TRACE_FOLLOWUP_SYMBOL_LIMIT = 3;
 const SEARCH_TRACE_EVIDENCE_RESULT_LIMIT = 3;
 const SEARCH_TRACE_EVIDENCE_SYMBOL_LIMIT = 1;
 const SEARCH_TRACE_EVIDENCE_MAX_FILES = 500;
@@ -62,6 +75,31 @@ const DEFAULT_VECTOR_DATABASE_SYNC_TIMEOUT_MS = 5_000;
 const MAX_SNAPSHOT_RECOVERY_ANCESTOR_PROBES = 32;
 const NOT_INDEXED_INDEXING_HINT =
     "Please index it first using the index_codebase tool. Before first indexing, create a project ignore file such as .hceignore when you need to exclude generated, large, or private paths. The indexer automatically loads .*ignore files it finds in the project tree, so files like .hceignore, .gitignore, and .cursorignore are applied without passing ignoreFiles.";
+
+interface RemoteCollectionProbe {
+    collectionName: string;
+    exists: boolean;
+    description?: string;
+    rowCount?: number;
+    descriptionError?: string;
+    rowCountError?: string;
+}
+
+interface RemoteManifestRead {
+    available: boolean;
+    manifest: RemoteIndexManifest | null;
+    error?: string;
+}
+
+interface ManifestRepairStatus {
+    phase: string;
+    current: number;
+    total: number;
+    percentage: number;
+    startedAtMs: number;
+    updatedAtMs: number;
+    error?: string;
+}
 
 type SourceFileCache = Map<string, string | Error>;
 
@@ -104,6 +142,16 @@ export class ToolHandlers {
     > = new Map();
     private indexingStateLocks: Map<string, Promise<void>> = new Map();
     private vectorDatabaseSyncTimeoutMs: number;
+    private remoteCollectionProbeTasks = new Map<
+        string,
+        Promise<RemoteCollectionProbe>
+    >();
+    private remoteManifestReadTasks = new Map<
+        string,
+        Promise<RemoteManifestRead>
+    >();
+    private manifestRepairStatuses = new Map<string, ManifestRepairStatus>();
+    private indexingJobStates = new IndexingJobStateManager();
     private syncManager?: Pick<
         SyncManager,
         "getSyncStatus" | "syncCodebaseForSearch" | "trackCodebase"
@@ -135,6 +183,23 @@ export class ToolHandlers {
             ],
             isError: true,
         };
+    }
+
+    private getSnapshotPathsForCollection(
+        absolutePath: string,
+        indexedCodebases: string[],
+        indexingCodebases: string[],
+    ): string[] {
+        const collectionName = this.context.getCollectionName(absolutePath);
+        const paths = new Set([absolutePath]);
+
+        for (const candidatePath of [...indexedCodebases, ...indexingCodebases]) {
+            if (this.context.getCollectionName(candidatePath) === collectionName) {
+                paths.add(candidatePath);
+            }
+        }
+
+        return Array.from(paths);
     }
 
     private notIndexedResponse(absolutePath: string) {
@@ -186,16 +251,95 @@ export class ToolHandlers {
         return status ? this.formatSyncStatus(status) : "";
     }
 
+    private getManifestRepairStatusMessage(codebasePath: string): string {
+        const status = this.manifestRepairStatuses.get(codebasePath);
+        if (!status) {
+            return "";
+        }
+
+        const elapsed = this.formatElapsedMs(Date.now() - status.startedAtMs);
+        const progress = Number.isFinite(status.percentage)
+            ? `${Math.max(0, Math.min(100, status.percentage)).toFixed(1)}%`
+            : "unknown";
+        const step =
+            status.total > 0 ? ` (${status.current}/${status.total})` : "";
+        const suffix = status.error ? ` Last error: ${status.error}` : "";
+        return ` Manifest repair in progress for '${codebasePath}'. Elapsed: ${elapsed}. Progress: ${progress}${step}. Phase: ${status.phase}.${suffix}`;
+    }
+
+    private isIndexingJobStale(job: IndexingJobState): boolean {
+        if (job.status !== "running") return false;
+        if (this.indexingTasks.has(job.codebasePath)) return false;
+        const updatedAtMs = Date.parse(job.updatedAt);
+        return !Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs > 30_000;
+    }
+
+    private getIndexingJobStatusMessage(
+        codebasePath: string,
+        job?: IndexingJobState,
+    ): string {
+        const latestJob = job ?? this.indexingJobStates.findLatestForCodebase(codebasePath);
+        if (!latestJob) return "";
+
+        const elapsed = this.formatElapsedMs(
+            Date.now() - Date.parse(latestJob.startedAt),
+        );
+        const progress = Number.isFinite(latestJob.progress.percentage)
+            ? `${Math.max(0, Math.min(100, latestJob.progress.percentage)).toFixed(1)}%`
+            : "unknown";
+        const step =
+            latestJob.progress.total > 0
+                ? ` (${latestJob.progress.current}/${latestJob.progress.total})`
+                : "";
+        const staleSuffix = this.isIndexingJobStale(latestJob)
+            ? " The worker job appears stale; retry indexing if this status does not change."
+            : "";
+        const errorSuffix = latestJob.errorMessage
+            ? ` Error: ${latestJob.errorMessage}`
+            : "";
+        return ` Indexing job '${latestJob.jobId}' is ${latestJob.status}. Elapsed: ${elapsed}. Progress: ${progress}${step}. Phase: ${latestJob.progress.phase}.${errorSuffix}${staleSuffix}`;
+    }
+
+    private setManifestRepairStatus(
+        codebasePath: string,
+        status: Omit<ManifestRepairStatus, "startedAtMs" | "updatedAtMs"> & {
+            startedAtMs?: number;
+        },
+    ): void {
+        const previous = this.manifestRepairStatuses.get(codebasePath);
+        const startedAtMs = status.startedAtMs ?? previous?.startedAtMs ?? Date.now();
+        this.manifestRepairStatuses.set(codebasePath, {
+            ...status,
+            startedAtMs,
+            updatedAtMs: Date.now(),
+        });
+    }
+
     private acquireManualWriterLock(
         action: string,
+        scope: McpWriterLockScope,
     ): McpWriterLock | ReturnType<ToolHandlers["errorResponse"]> {
-        const lock = acquireMcpWriterLock(action);
+        const lock = acquireMcpWriterLock(action, scope);
         return (
             lock ??
             this.errorResponse(
-                `Error: ${formatMcpWriterLockBusyMessage(action)}`,
+                `Error: ${formatMcpWriterLockBusyMessage(action, scope)}`,
             )
         );
+    }
+
+    private getCollectionWriterLockScope(codebasePath: string): McpWriterLockScope {
+        const context = this.context as unknown as {
+            getCollectionName?: (path: string) => string;
+        };
+        const collectionName =
+            typeof context.getCollectionName === "function"
+                ? context.getCollectionName(codebasePath)
+                : `codebase_${codebasePath.replace(/[^A-Za-z0-9]/g, "_")}`;
+        return {
+            kind: "collection",
+            collectionName,
+        };
     }
 
     private validateRequiredStringArgs(
@@ -426,50 +570,6 @@ export class ToolHandlers {
         return { extensions: cleaned };
     }
 
-    private normalizeOptionalTraceNumber(
-        toolName: string,
-        field: string,
-        value: unknown,
-    ): { value?: number; error?: ReturnType<ToolHandlers["errorResponse"]> } {
-        if (value === undefined || value === null) {
-            return {};
-        }
-
-        if (
-            typeof value !== "number" ||
-            !Number.isFinite(value) ||
-            value <= 0
-        ) {
-            return {
-                error: this.errorResponse(
-                    `Error: ${toolName} argument '${field}' must be a positive number when provided.`,
-                ),
-            };
-        }
-
-        return { value: Math.floor(value) };
-    }
-
-    private normalizeOptionalTraceBoolean(
-        toolName: string,
-        field: string,
-        value: unknown,
-    ): { value?: boolean; error?: ReturnType<ToolHandlers["errorResponse"]> } {
-        if (value === undefined || value === null) {
-            return {};
-        }
-
-        if (typeof value !== "boolean") {
-            return {
-                error: this.errorResponse(
-                    `Error: ${toolName} argument '${field}' must be a boolean when provided.`,
-                ),
-            };
-        }
-
-        return { value };
-    }
-
     private normalizeOptionalBooleanArg(
         toolName: string,
         field: string,
@@ -574,71 +674,6 @@ export class ToolHandlers {
             default:
                 return "Other matches";
         }
-    }
-
-    private formatSymbolTraceSection(
-        title: string,
-        entries: SymbolTraceEvidence[],
-    ): string {
-        if (entries.length === 0) {
-            return `## ${title}\n\nNone found.`;
-        }
-
-        return (
-            `## ${title}\n\n` +
-            entries
-                .map((entry, index) => {
-                    const matchedText = entry.matchedText
-                        ? `\n Matched: ${entry.matchedText}`
-                        : "";
-                    const moduleLink = entry.resolvedPath
-                        ? `\n Module: ${entry.moduleSpecifier ?? ""} -> ${entry.resolvedPath}`
-                        : "";
-                    const caller = entry.enclosingSymbol
-                        ? `\n Caller: ${entry.enclosingSymbol}`
-                        : "";
-                    const callee = entry.callTarget
-                        ? `\n Callee: ${entry.callTarget}`
-                        : "";
-                    return `${index + 1}. ${entry.relativePath}:${entry.line}${matchedText}${moduleLink}${caller}${callee}\n ${entry.preview}`;
-                })
-                .join("\n\n")
-        );
-    }
-
-    private formatSearchTraceFollowup(
-        result: any,
-        resultIndex: number,
-        codebasePath: string,
-        contextText: string,
-    ): string {
-        if (
-            resultIndex >= SEARCH_TRACE_FOLLOWUP_RESULT_LIMIT ||
-            typeof result?.relativePath !== "string"
-        ) {
-            return "";
-        }
-        if (
-            result?.resultGroup !== undefined &&
-            result.resultGroup !== "implementation" &&
-            result.resultGroup !== "entry_exports"
-        ) {
-            return "";
-        }
-
-        const symbols = this.extractTraceFollowupSymbols(contextText);
-        if (symbols.length === 0) {
-            return "";
-        }
-
-        const suggestions = symbols
-            .slice(0, SEARCH_TRACE_FOLLOWUP_SYMBOL_LIMIT)
-            .map(
-                (symbol) =>
-                    `trace_symbol({ path: "${codebasePath}", symbol: "${symbol}", startPath: "${result.relativePath}" })`,
-            );
-
-        return ` Structure follow-up: ${suggestions.join("; ")}\n`;
     }
 
     private async formatSearchTraceEvidence(
@@ -1201,23 +1236,40 @@ export class ToolHandlers {
 
             const recoveryCodebasePath =
                 await this.resolveSnapshotRecoveryCodebasePath(candidatePath);
-            const stats = await this.queryCollectionStats(recoveryCodebasePath);
-            if (!stats) {
+            const collectionName =
+                this.context.getCollectionName(recoveryCodebasePath);
+            let manifestRead = await this.readRemoteIndexManifest(
+                collectionName,
+                recoveryCodebasePath,
+            );
+            let manifestCodebasePath = recoveryCodebasePath;
+            if (
+                !manifestRead.manifest &&
+                recoveryCodebasePath !== candidatePath
+            ) {
+                manifestRead = await this.readRemoteIndexManifest(
+                    this.context.getCollectionName(candidatePath),
+                    candidatePath,
+                );
+                manifestCodebasePath = candidatePath;
+            }
+            if (!manifestRead.manifest) {
                 console.warn(
-                    `[SEARCH] Snapshot missing but VectorDB stats are unavailable for '${recoveryCodebasePath}', skipping recovery`,
+                    `[SEARCH] Snapshot missing but remote manifest is unavailable for '${recoveryCodebasePath}', skipping implicit legacy recovery. Run repair_index_manifest for old collections.`,
                 );
                 return null;
             }
 
             console.warn(
-                `[SEARCH] Snapshot missing but VectorDB has index for '${recoveryCodebasePath}', recovering snapshot (rows=${stats.totalChunks})`,
+                `[SEARCH] Snapshot missing but remote manifest exists for '${manifestCodebasePath}', recovering snapshot (chunks=${manifestRead.manifest.totalChunks})`,
             );
-            this.snapshotManager.setCodebaseIndexed(recoveryCodebasePath, {
-                ...stats,
-                status: "completed" as const,
+            this.snapshotManager.setCodebaseIndexed(manifestCodebasePath, {
+                indexedFiles: manifestRead.manifest.indexedFiles,
+                totalChunks: manifestRead.manifest.totalChunks,
+                status: manifestRead.manifest.status,
             });
-            this.snapshotManager.saveCodebaseSnapshot();
-            return recoveryCodebasePath;
+            await this.snapshotManager.saveCodebaseSnapshotAsync();
+            return manifestCodebasePath;
         }
 
         return null;
@@ -1242,6 +1294,7 @@ export class ToolHandlers {
 
         const writerLock = this.acquireManualWriterLock(
             `search_code sync for '${codebasePath}'`,
+            this.getCollectionWriterLockScope(codebasePath),
         );
         if (!(writerLock instanceof McpWriterLock)) {
             if (consistencyMode === "low_latency") {
@@ -1264,7 +1317,7 @@ export class ToolHandlers {
                     const stats = this.syncManager?.syncCodebaseForSearch
                         ? await this.syncManager.syncCodebaseForSearch(
                               codebasePath,
-                              { consistencyMode },
+                              { consistencyMode, writerLockHeld: true },
                           )
                         : await this.refreshCodebaseIndexBeforeSearchWithoutSyncManager(
                               codebasePath,
@@ -1277,27 +1330,16 @@ export class ToolHandlers {
                         stats.removed > 0 ||
                         stats.modified > 0
                     ) {
-                        const collectionStats =
-                            await this.queryCollectionStats(codebasePath);
-                        if (collectionStats) {
-                            this.snapshotManager.setCodebaseIndexed(
-                                codebasePath,
-                                {
-                                    ...collectionStats,
-                                    status: "completed" as const,
-                                },
-                            );
-                        } else {
-                            this.snapshotManager.clearCodebaseSyncWarning(
-                                codebasePath,
-                            );
-                        }
+                        this.snapshotManager.markCodebaseSynced(
+                            codebasePath,
+                            stats,
+                        );
                     } else {
                         this.snapshotManager.clearCodebaseSyncWarning(
                             codebasePath,
                         );
                     }
-                    this.snapshotManager.saveCodebaseSnapshot();
+                    await this.snapshotManager.saveCodebaseSnapshotAsync();
                     return stats.warning ? { warning: stats.warning } : null;
                 } catch (error) {
                     if (error instanceof IncrementalIndexTooLargeError) {
@@ -1307,7 +1349,7 @@ export class ToolHandlers {
                             codebasePath,
                             warning,
                         );
-                        this.snapshotManager.saveCodebaseSnapshot();
+                        await this.snapshotManager.saveCodebaseSnapshotAsync();
                         if (consistencyMode === "low_latency") {
                             return { warning };
                         }
@@ -1460,6 +1502,194 @@ export class ToolHandlers {
         }
     }
 
+    private async getRemoteCollectionProbe(
+        collectionName: string,
+    ): Promise<RemoteCollectionProbe> {
+        const existingTask = this.remoteCollectionProbeTasks.get(collectionName);
+        if (existingTask) {
+            return existingTask;
+        }
+
+        const task = this.readRemoteCollectionProbe(collectionName).finally(
+            () => {
+                if (this.remoteCollectionProbeTasks.get(collectionName) === task) {
+                    this.remoteCollectionProbeTasks.delete(collectionName);
+                }
+            },
+        );
+        this.remoteCollectionProbeTasks.set(collectionName, task);
+        return task;
+    }
+
+    private async readRemoteCollectionProbe(
+        collectionName: string,
+    ): Promise<RemoteCollectionProbe> {
+        const vectorDatabase = this.context.getVectorDatabase();
+        const exists = await this.withVectorDatabaseSyncTimeout(
+            `Milvus hasCollection(${collectionName}) during remote status probe`,
+            vectorDatabase.hasCollection(collectionName),
+        );
+        if (!exists) {
+            return { collectionName, exists: false };
+        }
+
+        const probe: RemoteCollectionProbe = { collectionName, exists: true };
+        try {
+            probe.description = await this.withVectorDatabaseSyncTimeout(
+                `Milvus getCollectionDescription(${collectionName}) during remote status probe`,
+                vectorDatabase.getCollectionDescription(collectionName),
+            );
+        } catch (error) {
+            probe.descriptionError =
+                error instanceof Error ? error.message : String(error);
+        }
+
+        try {
+            probe.rowCount = await this.withVectorDatabaseSyncTimeout(
+                `Milvus getCollectionRowCount(${collectionName}) during remote status probe`,
+                vectorDatabase.getCollectionRowCount(collectionName),
+            );
+        } catch (error) {
+            probe.rowCountError =
+                error instanceof Error ? error.message : String(error);
+        }
+
+        return probe;
+    }
+
+    private async readRemoteIndexManifest(
+        collectionName: string,
+        codebasePath: string,
+    ): Promise<RemoteManifestRead> {
+        const taskKey = `${collectionName}\0${codebasePath}`;
+        const existingTask = this.remoteManifestReadTasks.get(taskKey);
+        if (existingTask) {
+            return existingTask;
+        }
+
+        const vectorDatabase = this.context.getVectorDatabase();
+        if (typeof vectorDatabase.readIndexManifest !== "function") {
+            return { available: false, manifest: null };
+        }
+
+        const task = (async (): Promise<RemoteManifestRead> => {
+            try {
+                const manifest = await this.withVectorDatabaseSyncTimeout(
+                    `remote index manifest read(${collectionName})`,
+                    vectorDatabase.readIndexManifest!(collectionName, codebasePath),
+                );
+                return { available: true, manifest };
+            } catch (error) {
+                return {
+                    available: true,
+                    manifest: null,
+                    error: error instanceof Error ? error.message : String(error),
+                };
+            }
+        })().finally(() => {
+            if (this.remoteManifestReadTasks.get(taskKey) === task) {
+                this.remoteManifestReadTasks.delete(taskKey);
+            }
+        });
+        this.remoteManifestReadTasks.set(taskKey, task);
+        return task;
+    }
+
+    private async writeRemoteIndexManifest(
+        manifest: RemoteIndexManifest,
+    ): Promise<void> {
+        const vectorDatabase = this.context.getVectorDatabase();
+        if (typeof vectorDatabase.writeIndexManifest !== "function") {
+            throw new Error(
+                "Current vector database implementation does not support remote index manifests.",
+            );
+        }
+        await this.withVectorDatabaseSyncTimeout(
+            `remote index manifest write(${manifest.collectionName})`,
+            vectorDatabase.writeIndexManifest(manifest),
+        );
+    }
+
+    private async deleteRemoteIndexManifest(
+        collectionName: string,
+        codebasePath: string,
+    ): Promise<void> {
+        if (typeof (this.context as any).getVectorDatabase !== "function") {
+            return;
+        }
+        const vectorDatabase = this.context.getVectorDatabase();
+        if (typeof vectorDatabase.deleteIndexManifest !== "function") {
+            return;
+        }
+        await this.withVectorDatabaseSyncTimeout(
+            `remote index manifest delete(${collectionName})`,
+            vectorDatabase.deleteIndexManifest(collectionName, codebasePath),
+        );
+    }
+
+    private formatRemoteStatusDiagnostics(
+        codebasePath: string,
+        probe: RemoteCollectionProbe | null,
+        manifestRead: RemoteManifestRead | null,
+    ): string {
+        if (!probe) {
+            return "";
+        }
+
+        const lines: string[] = [];
+        if (!probe.exists) {
+            lines.push(`Remote collection: missing (${probe.collectionName})`);
+            return lines.join("\n");
+        }
+
+        lines.push(`Remote collection: exists (${probe.collectionName})`);
+        if (probe.rowCount !== undefined) {
+            lines.push(`Remote collection rows: ${probe.rowCount}`);
+        } else if (probe.rowCountError) {
+            lines.push(`Remote collection rows: unknown (${probe.rowCountError})`);
+        }
+
+        const describedCodebasePath =
+            this.parseCollectionDescriptionCodebasePath(probe.description);
+        if (describedCodebasePath && describedCodebasePath !== codebasePath) {
+            lines.push(
+                `Remote warning: collection description codebasePath is '${describedCodebasePath}', not '${codebasePath}'.`,
+            );
+        } else if (!describedCodebasePath && probe.descriptionError) {
+            lines.push(
+                `Remote warning: collection description unavailable (${probe.descriptionError}).`,
+            );
+        }
+
+        if (!manifestRead || !manifestRead.available) {
+            lines.push(
+                "Remote manifest: unavailable. This vector database implementation cannot report precise remote file-level status without legacy repair support.",
+            );
+        } else if (manifestRead.error) {
+            lines.push(`Remote manifest: read failed (${manifestRead.error}).`);
+        } else if (!manifestRead.manifest) {
+            lines.push(
+                "Remote manifest: missing. Run repair_index_manifest for this codebase to migrate legacy remote status; status will not scan chunk metadata automatically.",
+            );
+        } else {
+            const manifest = manifestRead.manifest;
+            lines.push(
+                `Remote manifest: ${manifest.status}, ${manifest.indexedFiles} files, ${manifest.totalChunks} chunks, generation ${manifest.generation}, updated ${manifest.updatedAt}.`,
+            );
+            if (
+                probe.rowCount !== undefined &&
+                probe.rowCount >= 0 &&
+                probe.rowCount !== manifest.totalChunks
+            ) {
+                lines.push(
+                    `Remote warning: collection row count ${probe.rowCount} does not match manifest totalChunks ${manifest.totalChunks}.`,
+                );
+            }
+        }
+
+        return lines.join("\n");
+    }
+
     /**
      * One-shot startup validation: find any legacy 0/0+completed entries on disk
      * (left over from old MCP versions, v1 snapshot migrations, or pre-fix recovery
@@ -1469,9 +1699,22 @@ export class ToolHandlers {
      * Safe to call multiple times but intended to run once per server start after
      * loadCodebaseSnapshot(). Errors are caught and logged; never throws.
      */
-    public async validateLegacyZeroEntries(): Promise<void> {
+    private getIndexedCodebasesForValidation(targetCodebasePath?: string): string[] {
+        if (!targetCodebasePath) {
+            return this.snapshotManager.getIndexedCodebases();
+        }
+
+        const indexedCodebasePath =
+            this.snapshotManager.findIndexedCodebasePath(targetCodebasePath);
+        return indexedCodebasePath ? [indexedCodebasePath] : [];
+    }
+
+    public async validateLegacyZeroEntries(
+        targetCodebasePath?: string,
+    ): Promise<void> {
         try {
-            const indexedCodebases = this.snapshotManager.getIndexedCodebases();
+            const indexedCodebases =
+                this.getIndexedCodebasesForValidation(targetCodebasePath);
             let healed = 0,
                 removed = 0,
                 skipped = 0,
@@ -1535,18 +1778,25 @@ export class ToolHandlers {
                 }
 
                 if (rowCount > 0) {
-                    const stats = await this.queryCollectionStats(codebasePath);
+                    const manifestRead = await this.readRemoteIndexManifest(
+                        collectionName,
+                        codebasePath,
+                    );
+                    if (!manifestRead.manifest) {
+                        skipped++;
+                        console.warn(
+                            `[SNAPSHOT-VALIDATE] Collection '${collectionName}' has rows, but remote manifest is missing for '${codebasePath}'. Run repair_index_manifest to migrate legacy status.`,
+                        );
+                        continue;
+                    }
                     this.snapshotManager.setCodebaseIndexed(codebasePath, {
-                        indexedFiles: stats?.indexedFiles ?? 0,
-                        totalChunks: stats?.totalChunks ?? rowCount,
-                        status: "completed" as const,
-                        statsSource:
-                            stats?.statsSource ??
-                            ("collection_row_count" as const),
+                        indexedFiles: manifestRead.manifest.indexedFiles,
+                        totalChunks: manifestRead.manifest.totalChunks,
+                        status: manifestRead.manifest.status,
                     });
                     healed++;
                     console.log(
-                        `[SNAPSHOT-VALIDATE] Healed legacy 0/0 entry '${codebasePath}' → rows=${rowCount}`,
+                        `[SNAPSHOT-VALIDATE] Healed legacy 0/0 entry '${codebasePath}' from remote manifest → chunks=${manifestRead.manifest.totalChunks}`,
                     );
                 } else if (rowCount === 0) {
                     // Collection exists but truly empty — the 0/0+completed entry
@@ -1568,7 +1818,7 @@ export class ToolHandlers {
             }
 
             if (healed > 0 || removed > 0) {
-                this.snapshotManager.saveCodebaseSnapshot();
+                await this.snapshotManager.saveCodebaseSnapshotAsync();
             }
             if (checked > 0) {
                 console.log(
@@ -1588,9 +1838,12 @@ export class ToolHandlers {
      * A restart can load stale local state after the remote collection was
      * deleted; remove those entries before clients can report them searchable.
      */
-    public async validateIndexedCollections(): Promise<void> {
+    public async validateIndexedCollections(
+        targetCodebasePath?: string,
+    ): Promise<void> {
         try {
-            const indexedCodebases = this.snapshotManager.getIndexedCodebases();
+            const indexedCodebases =
+                this.getIndexedCodebasesForValidation(targetCodebasePath);
             let removed = 0,
                 skipped = 0,
                 checked = 0;
@@ -1627,7 +1880,7 @@ export class ToolHandlers {
             }
 
             if (removed > 0) {
-                this.snapshotManager.saveCodebaseSnapshot();
+                await this.snapshotManager.saveCodebaseSnapshotAsync();
             }
             if (checked > 0) {
                 console.log(
@@ -1680,6 +1933,8 @@ export class ToolHandlers {
             }
 
             const vectorDatabaseCodebases = new Set<string>();
+            const collectionsWithIncompletePathExtraction = new Set<string>();
+            const remoteManifestsByCodebase = new Map<string, RemoteIndexManifest>();
             let codeCollectionsChecked = 0;
             let successfulExtractions = 0;
 
@@ -1702,8 +1957,11 @@ export class ToolHandlers {
                         `[SYNC-VDB] Checking collection: ${collectionName}`,
                     );
 
-                    // Try to extract codebasePath from collection description first (new format)
-                    let extracted = false;
+                    let describedCodebasePath: string | null = null;
+
+                    // Try to extract codebasePath from collection description.
+                    // Legacy row metadata scans are intentionally not run here;
+                    // old collections without manifests require repair_index_manifest.
                     try {
                         const description =
                             await this.withVectorDatabaseSyncTimeout(
@@ -1712,22 +1970,19 @@ export class ToolHandlers {
                                     collectionName,
                                 ),
                             );
-                        if (
-                            description &&
-                            description.startsWith("codebasePath:")
-                        ) {
-                            const codebasePath = description
-                                .split(/\r?\n/, 1)[0]
-                                .substring("codebasePath:".length);
-                            if (codebasePath.length > 0) {
-                                console.log(
-                                    `[SYNC-VDB] Found codebase path from description: ${codebasePath} in collection: ${collectionName}`,
-                                );
-                                vectorDatabaseCodebases.add(codebasePath);
-                                successfulExtractions++;
-                                extracted = true;
-                            }
-                        }
+	                        if (
+	                            description &&
+	                            description.startsWith("codebasePath:")
+	                        ) {
+	                            describedCodebasePath = description
+	                                .split(/\r?\n/, 1)[0]
+	                                .substring("codebasePath:".length);
+	                            if (describedCodebasePath.length > 0) {
+	                                console.log(
+	                                    `[SYNC-VDB] Found codebase path from description: ${describedCodebasePath} in collection: ${collectionName}`,
+	                                );
+	                            }
+	                        }
                     } catch (descError: any) {
                         console.warn(
                             `[SYNC-VDB] Failed to get description for collection ${collectionName}:`,
@@ -1735,64 +1990,34 @@ export class ToolHandlers {
                         );
                     }
 
-                    // Fallback: query document metadata for old collections without new description format
-                    if (!extracted) {
-                        console.log(
-                            `[SYNC-VDB] Falling back to query-based extraction for collection: ${collectionName}`,
+                    if (describedCodebasePath) {
+                        vectorDatabaseCodebases.add(describedCodebasePath);
+                        const manifestRead = await this.readRemoteIndexManifest(
+                            collectionName,
+                            describedCodebasePath,
                         );
-                        try {
-                            const results =
-                                await this.withVectorDatabaseSyncTimeout(
-                                    `Milvus metadata query(${collectionName}) during vector database sync`,
-                                    vectorDb.query(
-                                        collectionName,
-                                        undefined as any, // Don't pass empty filter
-                                        ["metadata"], // Only fetch metadata field
-                                        1, // Only need one result to extract codebasePath
-                                    ),
-                                );
-
-                            if (results && results.length > 0) {
-                                const firstResult = results[0];
-                                const metadataStr = firstResult.metadata;
-
-                                if (metadataStr) {
-                                    const metadata = JSON.parse(metadataStr);
-                                    const codebasePath = metadata.codebasePath;
-
-                                    if (
-                                        codebasePath &&
-                                        typeof codebasePath === "string"
-                                    ) {
-                                        console.log(
-                                            `[SYNC-VDB] Found codebase path from query: ${codebasePath} in collection: ${collectionName}`,
-                                        );
-                                        vectorDatabaseCodebases.add(
-                                            codebasePath,
-                                        );
-                                        successfulExtractions++;
-                                    } else {
-                                        console.warn(
-                                            `[SYNC-VDB] No codebasePath found in metadata for collection: ${collectionName}`,
-                                        );
-                                    }
-                                } else {
-                                    console.warn(
-                                        `[SYNC-VDB] No metadata found in collection: ${collectionName}`,
-                                    );
-                                }
-                            } else {
-                                console.log(
-                                    `[SYNC-VDB] Collection ${collectionName} is empty`,
-                                );
-                            }
-                        } catch (queryError: any) {
-                            console.warn(
-                                `[SYNC-VDB] Fallback query failed for collection ${collectionName}:`,
-                                queryError.message || queryError,
+                        if (manifestRead.manifest) {
+                            remoteManifestsByCodebase.set(
+                                describedCodebasePath,
+                                manifestRead.manifest,
                             );
+                            successfulExtractions++;
+                            continue;
                         }
+
+                        collectionsWithIncompletePathExtraction.add(
+                            collectionName,
+                        );
+                        console.warn(
+                            `[SYNC-VDB] Remote manifest missing for '${describedCodebasePath}' in '${collectionName}'. Skipping implicit legacy metadata scan; run repair_index_manifest to migrate.`,
+                        );
+                        continue;
                     }
+
+                    collectionsWithIncompletePathExtraction.add(collectionName);
+                    console.warn(
+                        `[SYNC-VDB] Collection '${collectionName}' has no description codebasePath. Skipping implicit legacy metadata scan; run repair_index_manifest with the owning path if this is an old collection.`,
+                    );
                 } catch (collectionError: any) {
                     console.warn(
                         `[SYNC-VDB] Error checking collection ${collectionName}:`,
@@ -1829,6 +2054,19 @@ export class ToolHandlers {
             // Remove local codebases that don't exist in the vector database.
             for (const localCodebase of localCodebases) {
                 if (!vectorDatabaseCodebases.has(localCodebase)) {
+                    const localCollectionName =
+                        this.context.getCollectionName(localCodebase);
+                    if (
+                        collectionsWithIncompletePathExtraction.has(
+                            localCollectionName,
+                        )
+                    ) {
+                        console.warn(
+                            `[SYNC-VDB] Keeping local codebase '${localCodebase}' because collection '${localCollectionName}' could not be fully enumerated`,
+                        );
+                        continue;
+                    }
+
                     this.snapshotManager.removeCodebaseCompletely(
                         localCodebase,
                     );
@@ -1865,31 +2103,31 @@ export class ToolHandlers {
                         continue;
                     }
 
-                    const stats = await this.queryCollectionStats(
-                        vectorDatabaseCodebase,
-                    );
-                    if (stats) {
+                    const manifest =
+                        remoteManifestsByCodebase.get(vectorDatabaseCodebase);
+                    if (manifest) {
                         this.snapshotManager.setCodebaseIndexed(
                             vectorDatabaseCodebase,
                             {
-                                ...stats,
-                                status: "completed" as const,
+                                indexedFiles: manifest.indexedFiles,
+                                totalChunks: manifest.totalChunks,
+                                status: manifest.status,
                             },
                         );
                         hasChanges = true;
                         console.log(
-                            `[SYNC-VDB] Recovered codebase from vector database: ${vectorDatabaseCodebase} (rows=${stats.totalChunks})`,
+                            `[SYNC-VDB] Recovered codebase from remote manifest: ${vectorDatabaseCodebase} (chunks=${manifest.totalChunks})`,
                         );
                     } else {
                         console.log(
-                            `[SYNC-VDB] Skipped recovery for ${vectorDatabaseCodebase} (row count unknown or zero)`,
+                            `[SYNC-VDB] Skipped recovery for ${vectorDatabaseCodebase} (remote manifest missing)`,
                         );
                     }
                 }
             }
 
             if (hasChanges) {
-                this.snapshotManager.saveCodebaseSnapshot();
+                await this.snapshotManager.saveCodebaseSnapshotAsync();
                 console.log(
                     `[SYNC-VDB] Updated snapshot to match vector database state`,
                 );
@@ -1908,6 +2146,119 @@ export class ToolHandlers {
                 error.message || error,
             );
             // Don't throw - this is not critical for the main functionality
+        }
+    }
+
+    private async syncTargetCodebaseFromVectorDatabase(
+        codebasePath: string,
+    ): Promise<RemoteCollectionProbe | null> {
+        try {
+            if (
+                typeof (this.context as any).getCollectionName !== "function" ||
+                typeof (this.context as any).getVectorDatabase !== "function"
+            ) {
+                return null;
+            }
+            const collectionName = this.context.getCollectionName(codebasePath);
+            const vectorDatabase = this.context.getVectorDatabase();
+            if (
+                typeof vectorDatabase?.hasCollection !== "function" ||
+                typeof vectorDatabase?.getCollectionDescription !== "function" ||
+                typeof vectorDatabase?.getCollectionRowCount !== "function"
+            ) {
+                return null;
+            }
+
+            console.log(
+                `[SYNC-VDB] Syncing target codebase '${codebasePath}' from collection '${collectionName}'...`,
+            );
+
+            let probe: RemoteCollectionProbe;
+            try {
+                probe = await this.getRemoteCollectionProbe(collectionName);
+            } catch (error: any) {
+                console.warn(
+                    `[SYNC-VDB] Failed to check target collection '${collectionName}':`,
+                    error.message || error,
+                );
+                return null;
+            }
+
+            const trackedCodebasePath =
+                this.snapshotManager.findTrackedCodebasePath(codebasePath);
+            if (!probe.exists) {
+                if (trackedCodebasePath) {
+                    this.snapshotManager.removeCodebaseCompletely(
+                        trackedCodebasePath,
+                    );
+                    await this.snapshotManager.saveCodebaseSnapshotAsync();
+                    try {
+                        await FileSynchronizer.deleteSnapshot(
+                            trackedCodebasePath,
+                        );
+                    } catch (error: any) {
+                        console.warn(
+                            `[SYNC-VDB] Failed to delete local merkle snapshot for removed codebase '${trackedCodebasePath}':`,
+                            error?.message || error,
+                        );
+                    }
+                    console.warn(
+                        `[SYNC-VDB] Removed stale local codebase '${trackedCodebasePath}' because collection '${collectionName}' is missing`,
+                    );
+                }
+                return probe;
+            }
+
+            const describedCodebasePath =
+                this.parseCollectionDescriptionCodebasePath(probe.description);
+            if (
+                trackedCodebasePath &&
+                describedCodebasePath &&
+                describedCodebasePath !== trackedCodebasePath &&
+                this.snapshotManager.getCodebaseStatus(trackedCodebasePath) ===
+                    "indexed"
+            ) {
+                console.warn(
+                    `[SYNC-VDB] Collection '${collectionName}' description points at '${describedCodebasePath}', not tracked codebase '${trackedCodebasePath}'. Keeping local status until explicit repair.`,
+                );
+                return probe;
+            }
+
+            const manifestRead = await this.readRemoteIndexManifest(
+                collectionName,
+                codebasePath,
+            );
+            if (!manifestRead.manifest) {
+                if (manifestRead.error) {
+                    console.warn(
+                        `[SYNC-VDB] Remote manifest read failed for '${codebasePath}': ${manifestRead.error}`,
+                    );
+                } else {
+                console.warn(
+                        `[SYNC-VDB] Remote manifest missing for '${codebasePath}'. Skipping implicit legacy metadata scan; run repair_index_manifest if this is an old collection.`,
+                    );
+                }
+                return probe;
+            }
+
+            if (
+                this.snapshotManager.findTrackedCodebasePath(codebasePath) ===
+                undefined
+            ) {
+                this.snapshotManager.setCodebaseIndexed(codebasePath, {
+                    indexedFiles: manifestRead.manifest.indexedFiles,
+                    totalChunks: manifestRead.manifest.totalChunks,
+                    status: manifestRead.manifest.status,
+                });
+                await this.snapshotManager.saveCodebaseSnapshotAsync();
+            }
+            return probe;
+        } catch (error: any) {
+            console.error(
+                `[SYNC-VDB] Error syncing target codebase from vector database:`,
+                error.message || error,
+            );
+            return null;
         }
     }
 
@@ -2023,8 +2374,7 @@ export class ToolHandlers {
                     isError: true,
                 };
             }
-            // Force absolute path resolution - warn if relative path provided
-            const absolutePath = ensureAbsolutePath(codebasePath);
+            const absolutePath = requireAbsolutePath(codebasePath);
 
             // Validate path exists
             if (!fs.existsSync(absolutePath)) {
@@ -2130,6 +2480,7 @@ export class ToolHandlers {
 
             const writerLock = this.acquireManualWriterLock(
                 `index_codebase for '${absolutePath}'`,
+                this.getCollectionWriterLockScope(absolutePath),
             );
             if (!(writerLock instanceof McpWriterLock)) {
                 return writerLock;
@@ -2138,7 +2489,7 @@ export class ToolHandlers {
 
             try {
                 // Sync indexed codebases from the vector database first.
-                await this.syncIndexedCodebasesFromVectorDatabase();
+                await this.syncTargetCodebaseFromVectorDatabase(absolutePath);
 
                 return await this.withIndexingStateLock(
                     absolutePath,
@@ -2168,7 +2519,7 @@ export class ToolHandlers {
                                 this.snapshotManager.removeCodebaseCompletely(
                                     absolutePath,
                                 );
-                                this.snapshotManager.saveCodebaseSnapshot();
+                                await this.snapshotManager.saveCodebaseSnapshotAsync();
                             } else {
                                 return {
                                     content: [
@@ -2190,28 +2541,31 @@ export class ToolHandlers {
                             await this.context.hasIndex(absolutePath);
                         if (snapshotHasIndex !== vectorDbHasIndex) {
                             if (vectorDbHasIndex && !snapshotHasIndex) {
-                                // Query Milvus for real row count. If unknown/empty, log and move on
-                                // without writing 0/0+completed (which would trigger the force-reindex
-                                // loop in Issue #295). The user is about to (re)index anyway.
-                                const stats =
-                                    await this.queryCollectionStats(
+                                const collectionName =
+                                    this.context.getCollectionName(absolutePath);
+                                const manifestRead =
+                                    await this.readRemoteIndexManifest(
+                                        collectionName,
                                         absolutePath,
                                     );
-                                if (stats) {
+                                if (manifestRead.manifest) {
                                     console.warn(
-                                        `[INDEX-VALIDATION] Recovering missing snapshot for '${absolutePath}' (rows=${stats.totalChunks})`,
+                                        `[INDEX-VALIDATION] Recovering missing snapshot for '${absolutePath}' from remote manifest (chunks=${manifestRead.manifest.totalChunks})`,
                                     );
                                     this.snapshotManager.setCodebaseIndexed(
                                         absolutePath,
                                         {
-                                            ...stats,
-                                            status: "completed" as const,
+                                            indexedFiles:
+                                                manifestRead.manifest.indexedFiles,
+                                            totalChunks:
+                                                manifestRead.manifest.totalChunks,
+                                            status: manifestRead.manifest.status,
                                         },
                                     );
-                                    this.snapshotManager.saveCodebaseSnapshot();
+                                    await this.snapshotManager.saveCodebaseSnapshotAsync();
                                 } else {
                                     console.warn(
-                                        `[INDEX-VALIDATION] VectorDB reports index for '${absolutePath}' but row count unknown/zero — not writing snapshot entry`,
+                                        `[INDEX-VALIDATION] VectorDB reports index for '${absolutePath}' but remote manifest is missing — not running implicit legacy metadata scan. Run repair_index_manifest if this is an old collection.`,
                                     );
                                 }
                             } else if (!vectorDbHasIndex && snapshotHasIndex) {
@@ -2221,7 +2575,7 @@ export class ToolHandlers {
                                 this.snapshotManager.removeCodebaseCompletely(
                                     absolutePath,
                                 );
-                                this.snapshotManager.saveCodebaseSnapshot();
+                                await this.snapshotManager.saveCodebaseSnapshotAsync();
                             }
                         }
 
@@ -2267,7 +2621,7 @@ export class ToolHandlers {
                             this.snapshotManager.removeCodebaseCompletely(
                                 absolutePath,
                             );
-                            this.snapshotManager.saveCodebaseSnapshot();
+                            await this.snapshotManager.saveCodebaseSnapshotAsync();
                             console.log(
                                 `[FORCE-REINDEX] Clearing index for '${absolutePath}'`,
                             );
@@ -2347,7 +2701,7 @@ export class ToolHandlers {
                             0,
                             indexOptions,
                         );
-                        this.snapshotManager.saveCodebaseSnapshot();
+                        await this.snapshotManager.saveCodebaseSnapshotAsync();
 
                         // Track the codebase path for syncing
                         trackCodebasePath(absolutePath);
@@ -2486,20 +2840,11 @@ export class ToolHandlers {
         );
 
         if (stats.added > 0 || stats.removed > 0 || stats.modified > 0) {
-            const collectionStats =
-                await this.queryCollectionStats(absolutePath);
-            if (collectionStats) {
-                this.snapshotManager.setCodebaseIndexed(absolutePath, {
-                    ...collectionStats,
-                    status: "completed" as const,
-                });
-            } else {
-                this.snapshotManager.clearCodebaseSyncWarning(absolutePath);
-            }
+            this.snapshotManager.markCodebaseSynced(absolutePath, stats);
         } else {
             this.snapshotManager.clearCodebaseSyncWarning(absolutePath);
         }
-        this.snapshotManager.saveCodebaseSnapshot();
+        await this.snapshotManager.saveCodebaseSnapshotAsync();
         this.trackIndexedCodebase(absolutePath);
 
         const pathInfo =
@@ -2543,6 +2888,45 @@ export class ToolHandlers {
         indexOptions?: CodebaseIndexOptions,
         signal?: AbortSignal,
     ): Promise<void> {
+        if (this.context instanceof Context) {
+            await this.startWorkerBackgroundIndexing(
+                codebasePath,
+                forceReindex,
+                splitterType,
+                customIgnorePatterns,
+                customFileExtensions,
+                customIgnoreFiles,
+                requestMaxDepth,
+                indexOptions,
+                signal,
+            );
+            return;
+        }
+
+        await this.startInlineBackgroundIndexing(
+            codebasePath,
+            forceReindex,
+            splitterType,
+            customIgnorePatterns,
+            customFileExtensions,
+            customIgnoreFiles,
+            requestMaxDepth,
+            indexOptions,
+            signal,
+        );
+    }
+
+    private async startInlineBackgroundIndexing(
+        codebasePath: string,
+        forceReindex: boolean,
+        splitterType: RequestSplitterType,
+        customIgnorePatterns: string[] = [],
+        customFileExtensions: string[] = [],
+        customIgnoreFiles: string[] = [],
+        requestMaxDepth?: number,
+        indexOptions?: CodebaseIndexOptions,
+        signal?: AbortSignal,
+    ): Promise<void> {
         const absolutePath = codebasePath;
         let lastSaveTime = 0; // Track last save timestamp
 
@@ -2569,11 +2953,6 @@ export class ToolHandlers {
                     customIgnorePatterns,
                     customIgnoreFiles,
                 );
-            const supportedExtensions =
-                this.context.getEffectiveSupportedExtensions(
-                    customFileExtensions,
-                );
-
             // Initialize file synchronizer with proper ignore patterns (including project-specific patterns)
             console.log(
                 `[BACKGROUND-INDEX] Using ignore patterns: ${ignorePatterns.join(", ")}`,
@@ -2593,20 +2972,6 @@ export class ToolHandlers {
                     `[BACKGROUND-INDEX] Limiting traversal to maxDepth=${requestMaxDepth}`,
                 );
             }
-            const synchronizer = new FileSynchronizer(
-                absolutePath,
-                ignorePatterns,
-                supportedExtensions,
-                { maxDepth: requestMaxDepth },
-            );
-            await synchronizer.initialize();
-
-            // Store synchronizer in the context (let context manage collection names).
-            // indexCodebase prepares the collection for this run; pre-creating it
-            // would make an ordinary full index look like it is appending to an
-            // existing collection.
-            const collectionName = this.context.getCollectionName(absolutePath);
-            this.context.setSynchronizer(collectionName, synchronizer);
 
             console.log(
                 `[BACKGROUND-INDEX] Starting indexing with ${splitterType} splitter for: ${absolutePath}`,
@@ -2672,7 +3037,7 @@ export class ToolHandlers {
             };
 
             // Save snapshot after updating codebase lists
-            this.snapshotManager.saveCodebaseSnapshot();
+            await this.snapshotManager.saveCodebaseSnapshotAsync();
             this.trackIndexedCodebase(absolutePath);
 
             let message = `Background indexing completed for '${absolutePath}' using ${splitterType.toUpperCase()} splitter.\nIndexed ${stats.indexedFiles} files, ${stats.totalChunks} chunks.`;
@@ -2710,7 +3075,7 @@ export class ToolHandlers {
                 lastProgress,
                 indexOptions,
             );
-            this.snapshotManager.saveCodebaseSnapshot();
+            await this.snapshotManager.saveCodebaseSnapshotAsync();
 
             // Log error but don't crash MCP service - indexing errors are handled gracefully
             console.error(
@@ -2719,152 +3084,121 @@ export class ToolHandlers {
         }
     }
 
-    public async handleTraceSymbol(args: any): Promise<any> {
-        const validation = this.validateRequiredStringArgs(
-            "trace_symbol",
-            args,
-            ["path", "symbol"],
-        );
-        if (validation.error) {
-            return validation.error;
-        }
-
-        const {
-            path: codebasePath,
-            symbol,
-            startPath,
-            startLine,
-            endLine,
-            maxFiles,
-            maxReferences,
-            includeTests,
-        } = args;
-        if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(symbol.trim())) {
-            return this.errorResponse(
-                "Error: trace_symbol argument 'symbol' must be a single identifier.",
-            );
-        }
-        if (
-            startPath !== undefined &&
-            (typeof startPath !== "string" || startPath.trim().length === 0)
-        ) {
-            return this.errorResponse(
-                "Error: trace_symbol argument 'startPath' must be a non-empty string when provided.",
-            );
-        }
-        const normalizedStartLine = this.normalizeOptionalTraceNumber(
-            "trace_symbol",
-            "startLine",
-            startLine,
-        );
-        if (normalizedStartLine.error) {
-            return normalizedStartLine.error;
-        }
-        const normalizedEndLine = this.normalizeOptionalTraceNumber(
-            "trace_symbol",
-            "endLine",
-            endLine,
-        );
-        if (normalizedEndLine.error) {
-            return normalizedEndLine.error;
-        }
-        if (
-            normalizedStartLine.value !== undefined &&
-            normalizedEndLine.value !== undefined &&
-            normalizedEndLine.value < normalizedStartLine.value
-        ) {
-            return this.errorResponse(
-                "Error: trace_symbol argument 'endLine' must be greater than or equal to 'startLine'.",
-            );
-        }
-
-        const normalizedMaxFiles = this.normalizeOptionalTraceNumber(
-            "trace_symbol",
-            "maxFiles",
-            maxFiles,
-        );
-        if (normalizedMaxFiles.error) {
-            return normalizedMaxFiles.error;
-        }
-        const normalizedMaxReferences = this.normalizeOptionalTraceNumber(
-            "trace_symbol",
-            "maxReferences",
-            maxReferences,
-        );
-        if (normalizedMaxReferences.error) {
-            return normalizedMaxReferences.error;
-        }
-        const normalizedIncludeTests = this.normalizeOptionalTraceBoolean(
-            "trace_symbol",
-            "includeTests",
-            includeTests,
-        );
-        if (normalizedIncludeTests.error) {
-            return normalizedIncludeTests.error;
-        }
+    private async startWorkerBackgroundIndexing(
+        codebasePath: string,
+        forceReindex: boolean,
+        splitterType: RequestSplitterType,
+        customIgnorePatterns: string[] = [],
+        customFileExtensions: string[] = [],
+        customIgnoreFiles: string[] = [],
+        requestMaxDepth?: number,
+        indexOptions?: CodebaseIndexOptions,
+        signal?: AbortSignal,
+    ): Promise<void> {
+        const absolutePath = codebasePath;
+        const jobId = this.indexingJobStates.createJobId(absolutePath);
+        const collectionName = this.context.getCollectionName(absolutePath);
+        let lastProgress: IndexingJobProgress | undefined;
 
         try {
-            const absolutePath = ensureAbsolutePath(codebasePath);
-            if (!fs.existsSync(absolutePath)) {
-                return this.errorResponse(
-                    `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`,
+            console.log(
+                `[BACKGROUND-INDEX] Starting indexing worker ${jobId} for: ${absolutePath}`,
+            );
+            if (forceReindex) {
+                console.log(
+                    `[BACKGROUND-INDEX] Force reindex mode - collection was already cleared during validation`,
                 );
             }
 
-            const stat = fs.statSync(absolutePath);
-            if (!stat.isDirectory()) {
-                return this.errorResponse(
-                    `Error: Path '${absolutePath}' is not a directory`,
-                );
-            }
+            await this.indexingJobStates.createRunningJob({
+                jobId,
+                codebasePath: absolutePath,
+                collectionName,
+                splitterType,
+                indexOptions,
+            });
 
-            trackCodebasePath(absolutePath);
-
-            const trace = await this.context.traceSymbol(
-                absolutePath,
-                symbol.trim(),
+            const stats = await startIndexingWorkerJob(
                 {
-                    startPath:
-                        typeof startPath === "string"
-                            ? startPath.trim()
-                            : undefined,
-                    startLine: normalizedStartLine.value,
-                    endLine: normalizedEndLine.value,
-                    maxFiles: normalizedMaxFiles.value,
-                    maxReferences: normalizedMaxReferences.value,
-                    includeTests: normalizedIncludeTests.value,
+                    jobId,
+                    codebasePath: absolutePath,
+                    splitterType,
+                    customIgnorePatterns,
+                    customFileExtensions,
+                    customIgnoreFiles,
+                    requestMaxDepth,
+                    indexOptions,
+                },
+                signal ?? new AbortController().signal,
+                {
+                    onReady: (workerThreadId) => {
+                        void this.indexingJobStates.updateWorkerThreadId(
+                            jobId,
+                            workerThreadId,
+                        );
+                    },
+                    onProgress: (progress) => {
+                        lastProgress = progress;
+                        this.snapshotManager.setCodebaseIndexing(
+                            absolutePath,
+                            progress.percentage,
+                            indexOptions,
+                        );
+                        void this.indexingJobStates.updateProgress(
+                            jobId,
+                            progress,
+                        );
+                        console.log(
+                            `[BACKGROUND-INDEX] Worker ${jobId} progress: ${progress.phase} - ${progress.percentage}% (${progress.current}/${progress.total})`,
+                        );
+                    },
                 },
             );
 
-            const sections = [
-                this.formatSymbolTraceSection("Definitions", trace.definitions),
-                this.formatSymbolTraceSection("References", trace.references),
-                this.formatSymbolTraceSection("Imports", trace.imports),
-                this.formatSymbolTraceSection("Exports", trace.exports),
-                this.formatSymbolTraceSection(
-                    "Related tests",
-                    trace.relatedTests,
-                ),
-            ];
-            const warnings =
-                trace.warnings.length > 0
-                    ? `\n\nWarnings:\n${trace.warnings.map((warning: string) => `- ${warning}`).join("\n")}`
-                    : "";
-            const truncated = trace.truncated
-                ? "\nTrace truncated by maxFiles or maxReferences."
-                : "";
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Trace for symbol '${trace.symbol}' in codebase '${trace.codebasePath}'. Scanned ${trace.scannedFiles} files.${truncated}\n\n${sections.join("\n\n")}${warnings}`,
-                    },
-                ],
+            await this.indexingJobStates.markCompleted(jobId, stats);
+            this.snapshotManager.setCodebaseIndexed(
+                absolutePath,
+                stats,
+                indexOptions,
+            );
+            this.indexingStats = {
+                indexedFiles: stats.indexedFiles,
+                totalChunks: stats.totalChunks,
             };
-        } catch (error) {
-            return this.errorResponse(
-                `Error tracing symbol: ${error instanceof Error ? error.message : String(error)}`,
+            await this.snapshotManager.saveCodebaseSnapshotAsync();
+            this.trackIndexedCodebase(absolutePath);
+
+            let message = `Background indexing worker ${jobId} completed for '${absolutePath}' using ${splitterType.toUpperCase()} splitter.\nIndexed ${stats.indexedFiles} files, ${stats.totalChunks} chunks.`;
+            if (stats.status === "limit_reached") {
+                message += `\n Warning: Indexing stopped because the chunk limit (450,000) was reached. The index may be incomplete.`;
+            }
+            console.log(`[BACKGROUND-INDEX] ${message}`);
+        } catch (error: any) {
+            if (error instanceof IndexAbortError || error instanceof IndexingWorkerCancelledError) {
+                const message = error.message || "Indexing was cancelled";
+                await this.indexingJobStates.markCancelled(jobId, message);
+                console.log(
+                    `[BACKGROUND-INDEX] Indexing worker ${jobId} for ${absolutePath} was cancelled: ${message}`,
+                );
+                return;
+            }
+
+            const errorMessage = error.message || String(error);
+            console.error(
+                `[BACKGROUND-INDEX] Error during indexing worker ${jobId} for ${absolutePath}:`,
+                error,
+            );
+            await this.indexingJobStates.markFailed(jobId, errorMessage);
+            this.snapshotManager.setCodebaseIndexFailed(
+                absolutePath,
+                errorMessage,
+                lastProgress?.percentage ??
+                    this.snapshotManager.getIndexingProgress(absolutePath),
+                indexOptions,
+            );
+            await this.snapshotManager.saveCodebaseSnapshotAsync();
+            console.error(
+                `[BACKGROUND-INDEX] Indexing failed for ${absolutePath}: ${errorMessage}`,
             );
         }
     }
@@ -2932,8 +3266,7 @@ export class ToolHandlers {
         try {
             this.snapshotManager.refreshFromDiskForRead();
 
-            // Force absolute path resolution - warn if relative path provided
-            const absolutePath = ensureAbsolutePath(codebasePath);
+            const absolutePath = requireAbsolutePath(codebasePath);
 
             // Validate path exists
             if (!fs.existsSync(absolutePath)) {
@@ -3191,12 +3524,7 @@ export class ToolHandlers {
                               searchCodebasePath,
                               sourceContext.context,
                           )
-                        : this.formatSearchTraceFollowup(
-                              result,
-                              index,
-                              searchCodebasePath,
-                              sourceContext.context,
-                          );
+                        : "";
 
                 const formattedResult =
                     `${index + 1}. ${resultLabel} (${result.language}) [${codebaseInfo}]\n` +
@@ -3300,8 +3628,7 @@ export class ToolHandlers {
         const { path: codebasePath } = args;
 
         try {
-            // Force absolute path resolution - warn if relative path provided
-            const absolutePath = ensureAbsolutePath(codebasePath);
+            const absolutePath = requireAbsolutePath(codebasePath);
 
             const indexedCodebases = this.snapshotManager.getIndexedCodebases();
             const indexingCodebases =
@@ -3367,37 +3694,60 @@ export class ToolHandlers {
             }
 
             console.log(`[CLEAR] Clearing codebase: ${absolutePath}`);
+            const pathsToRemoveFromSnapshot = this.getSnapshotPathsForCollection(
+                absolutePath,
+                indexedCodebases,
+                indexingCodebases,
+            );
 
             // Cancel any in-flight background indexing for this codebase and
             // wait for it to wind down before we drop the collection.
             // Otherwise the background task keeps embedding chunks and writes
             // them into the just-cleared collection (issue #199).
-            const activeTask = this.indexingTasks.get(absolutePath);
-            if (activeTask) {
-                console.log(
-                    `[CLEAR] Cancelling in-flight background indexing for: ${absolutePath}`,
-                );
-                activeTask.controller.abort();
-                try {
-                    await activeTask.promise;
-                } catch (waitError: any) {
-                    // startBackgroundIndexing already logs and never re-throws,
-                    // so this catch only guards against future refactors.
-                    console.warn(
-                        `[CLEAR] Background indexing wind-down reported: ${waitError?.message || waitError}`,
+            const cancelledIndexingPaths: string[] = [];
+            for (const pathToRemove of pathsToRemoveFromSnapshot) {
+                const activeTask = this.indexingTasks.get(pathToRemove);
+                if (activeTask) {
+                    console.log(
+                        `[CLEAR] Cancelling in-flight background indexing for: ${pathToRemove}`,
                     );
+                    activeTask.controller.abort();
+                    try {
+                        await activeTask.promise;
+                    } catch (waitError: any) {
+                        // startBackgroundIndexing already logs and never re-throws,
+                        // so this catch only guards against future refactors.
+                        console.warn(
+                            `[CLEAR] Background indexing wind-down reported: ${waitError?.message || waitError}`,
+                        );
+                    }
+                    this.indexingTasks.delete(pathToRemove);
+                    cancelledIndexingPaths.push(pathToRemove);
                 }
-                this.indexingTasks.delete(absolutePath);
             }
 
             const writerLock = this.acquireManualWriterLock(
                 `clear_index for '${absolutePath}'`,
+                this.getCollectionWriterLockScope(absolutePath),
             );
             if (!(writerLock instanceof McpWriterLock)) {
+                if (cancelledIndexingPaths.length > 0) {
+                    const errorMessage =
+                        "Indexing was cancelled by clear_index, but clear_index could not acquire the collection writer lock. Retry clear_index after the active writer finishes.";
+                    for (const cancelledPath of cancelledIndexingPaths) {
+                        this.snapshotManager.setCodebaseIndexFailed(
+                            cancelledPath,
+                            errorMessage,
+                            this.snapshotManager.getIndexingProgress(cancelledPath),
+                        );
+                    }
+                    await this.snapshotManager.saveCodebaseSnapshotAsync();
+                }
                 return writerLock;
             }
 
             try {
+                const cleanupWarnings: string[] = [];
                 try {
                     await this.context.clearIndex(absolutePath);
                     console.log(
@@ -3417,14 +3767,38 @@ export class ToolHandlers {
                     };
                 }
 
-                // Completely remove the cleared codebase from snapshot
-                this.snapshotManager.removeCodebaseCompletely(absolutePath);
+                // Completely remove every snapshot entry backed by the dropped
+                // collection. Shared identity modes map multiple paths to one
+                // collection, so leaving sibling paths indexed would point them
+                // at a collection that no longer exists.
+                for (const pathToRemove of pathsToRemoveFromSnapshot) {
+                    try {
+                        await this.deleteRemoteIndexManifest(
+                            this.context.getCollectionName(pathToRemove),
+                            pathToRemove,
+                        );
+                    } catch (manifestError: any) {
+                        const warning = `Failed to delete remote manifest for '${pathToRemove}': ${manifestError?.message || manifestError}`;
+                        cleanupWarnings.push(warning);
+                        console.warn(`[CLEAR] ${warning}`);
+                    }
+                    if (pathToRemove !== absolutePath) {
+                        try {
+                            await FileSynchronizer.deleteSnapshot(pathToRemove);
+                        } catch (snapshotError: any) {
+                            const warning = `Failed to delete Merkle snapshot for '${pathToRemove}': ${snapshotError?.message || snapshotError}`;
+                            cleanupWarnings.push(warning);
+                            console.warn(`[CLEAR] ${warning}`);
+                        }
+                    }
+                    this.snapshotManager.removeCodebaseCompletely(pathToRemove);
+                }
 
                 // Reset indexing stats if this was the active codebase
                 this.indexingStats = null;
 
                 // Save snapshot after clearing index
-                this.snapshotManager.saveCodebaseSnapshot();
+                await this.snapshotManager.saveCodebaseSnapshotAsync();
 
                 let resultText = `Successfully cleared codebase '${absolutePath}'`;
 
@@ -3435,6 +3809,10 @@ export class ToolHandlers {
 
                 if (remainingIndexed > 0 || remainingIndexing > 0) {
                     resultText += `\n${remainingIndexed} other indexed codebase(s) and ${remainingIndexing} indexing codebase(s) remain`;
+                }
+
+                if (cleanupWarnings.length > 0) {
+                    resultText += `\nWarning: ${cleanupWarnings.join("; ")}`;
                 }
 
                 return {
@@ -3486,6 +3864,151 @@ export class ToolHandlers {
         }
     }
 
+    public async handleRepairIndexManifest(args: any): Promise<any> {
+        const validation = this.validateRequiredStringArgs(
+            "repair_index_manifest",
+            args,
+            ["path"],
+        );
+        if (validation.error) {
+            return validation.error;
+        }
+
+        const { path: codebasePath } = args;
+
+        try {
+            const absolutePath = requireAbsolutePath(codebasePath);
+            if (!fs.existsSync(absolutePath)) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+            if (!fs.statSync(absolutePath).isDirectory()) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Error: Path '${absolutePath}' is not a directory`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+
+            const writerLock = this.acquireManualWriterLock(
+                `repair_index_manifest for '${absolutePath}'`,
+                this.getCollectionWriterLockScope(absolutePath),
+            );
+            if (!(writerLock instanceof McpWriterLock)) {
+                return writerLock;
+            }
+
+            try {
+                const startedAtMs = Date.now();
+                this.setManifestRepairStatus(absolutePath, {
+                    phase: "Checking remote collection",
+                    current: 1,
+                    total: 4,
+                    percentage: 10,
+                    startedAtMs,
+                });
+                const collectionName = this.context.getCollectionName(absolutePath);
+                const probe = await this.getRemoteCollectionProbe(collectionName);
+                if (!probe.exists) {
+                    return this.errorResponse(
+                        `Error: Cannot repair remote manifest because collection '${collectionName}' does not exist for '${absolutePath}'.`,
+                    );
+                }
+
+                this.setManifestRepairStatus(absolutePath, {
+                    phase: "Scanning legacy chunk metadata",
+                    current: 2,
+                    total: 4,
+                    percentage: 40,
+                });
+                const stats = await this.queryCollectionStats(absolutePath);
+                if (!stats) {
+                    return this.errorResponse(
+                        `Error: Cannot repair remote manifest for '${absolutePath}' because legacy row metadata scan returned no usable file/chunk stats.`,
+                    );
+                }
+
+                this.setManifestRepairStatus(absolutePath, {
+                    phase: "Writing remote manifest",
+                    current: 3,
+                    total: 4,
+                    percentage: 75,
+                });
+                const existingManifest = await this.readRemoteIndexManifest(
+                    collectionName,
+                    absolutePath,
+                );
+                const generation = existingManifest.manifest
+                    ? existingManifest.manifest.generation + 1
+                    : 1;
+                const manifest: RemoteIndexManifest = {
+                    manifestVersion: REMOTE_INDEX_MANIFEST_VERSION,
+                    codebasePath: absolutePath,
+                    collectionName,
+                    status: "completed",
+                    indexedFiles: stats.indexedFiles,
+                    totalChunks: stats.totalChunks,
+                    schemaVersion: 2,
+                    metadataVersion: 2,
+                    generation,
+                    updatedAt: new Date().toISOString(),
+                };
+                await this.writeRemoteIndexManifest(manifest);
+
+                this.setManifestRepairStatus(absolutePath, {
+                    phase: "Updating local snapshot",
+                    current: 4,
+                    total: 4,
+                    percentage: 95,
+                });
+                if (
+                    this.snapshotManager.findIndexingCodebasePath(absolutePath) ===
+                    undefined
+                ) {
+                    this.snapshotManager.setCodebaseIndexed(absolutePath, {
+                        indexedFiles: manifest.indexedFiles,
+                        totalChunks: manifest.totalChunks,
+                        status: manifest.status,
+                    });
+                    await this.snapshotManager.saveCodebaseSnapshotAsync();
+                }
+
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Repaired remote index manifest for '${absolutePath}'. Collection: ${collectionName}. Stats: ${manifest.indexedFiles} files, ${manifest.totalChunks} chunks. Generation: ${manifest.generation}.`,
+                        },
+                    ],
+                };
+            } finally {
+                this.manifestRepairStatuses.delete(absolutePath);
+                writerLock.release();
+            }
+        } catch (error: any) {
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Error repairing index manifest: ${error.message || error}`,
+                    },
+                ],
+                isError: true,
+            };
+        }
+    }
+
     public async handleGetIndexingStatus(args: any): Promise<any> {
         const validation = this.validateRequiredStringArgs(
             "get_indexing_status",
@@ -3499,8 +4022,7 @@ export class ToolHandlers {
         const { path: codebasePath } = args;
 
         try {
-            // Force absolute path resolution
-            const absolutePath = ensureAbsolutePath(codebasePath);
+            const absolutePath = requireAbsolutePath(codebasePath);
 
             // Validate path exists
             if (!fs.existsSync(absolutePath)) {
@@ -3529,7 +4051,11 @@ export class ToolHandlers {
                 };
             }
 
-            await this.syncIndexedCodebasesFromVectorDatabase();
+            const syncCodebasePath =
+                this.snapshotManager.findTrackedCodebasePath(absolutePath) ||
+                absolutePath;
+            let remoteProbe =
+                await this.syncTargetCodebaseFromVectorDatabase(syncCodebasePath);
             this.snapshotManager.refreshFromDiskForRead();
 
             // Check indexing status using new status system
@@ -3542,6 +4068,49 @@ export class ToolHandlers {
                 this.snapshotManager.getCodebaseInfo(statusCodebasePath);
             const syncStatusMessage =
                 this.getSyncStatusMessage(statusCodebasePath);
+            const manifestRepairStatusMessage =
+                this.getManifestRepairStatusMessage(statusCodebasePath);
+            const indexingJob =
+                this.indexingJobStates.findLatestForCodebase(statusCodebasePath);
+            const indexingJobStatusMessage = this.getIndexingJobStatusMessage(
+                statusCodebasePath,
+                indexingJob,
+            );
+            let remoteDiagnostics = "";
+            if (
+                typeof (this.context as any).getCollectionName === "function" &&
+                typeof (this.context as any).getVectorDatabase === "function"
+            ) {
+                const collectionName =
+                    this.context.getCollectionName(statusCodebasePath);
+                if (!remoteProbe || remoteProbe.collectionName !== collectionName) {
+                    try {
+                        remoteProbe = await this.getRemoteCollectionProbe(
+                            collectionName,
+                        );
+                    } catch (error) {
+                        remoteProbe = {
+                            collectionName,
+                            exists: false,
+                            rowCountError:
+                                error instanceof Error
+                                    ? error.message
+                                    : String(error),
+                        };
+                    }
+                }
+                const remoteManifestRead = remoteProbe.exists
+                    ? await this.readRemoteIndexManifest(
+                          collectionName,
+                          statusCodebasePath,
+                      )
+                    : null;
+                remoteDiagnostics = this.formatRemoteStatusDiagnostics(
+                    statusCodebasePath,
+                    remoteProbe,
+                    remoteManifestRead,
+                );
+            }
 
             let statusMessage = "";
 
@@ -3558,20 +4127,37 @@ export class ToolHandlers {
                         if (syncStatusMessage.length > 0) {
                             statusMessage += `\n${syncStatusMessage}`;
                         }
+                        if (manifestRepairStatusMessage.length > 0) {
+                            statusMessage += `\n${manifestRepairStatusMessage}`;
+                        }
+                        if (remoteDiagnostics.length > 0) {
+                            statusMessage += `\n${remoteDiagnostics}`;
+                        }
                         statusMessage += `\n Last updated: ${new Date(indexedInfo.lastUpdated).toLocaleString()}`;
                     } else {
                         statusMessage = ` Codebase '${statusCodebasePath}' is fully indexed and ready for search.`;
                         if (syncStatusMessage.length > 0) {
                             statusMessage += `\n${syncStatusMessage}`;
                         }
+                        if (manifestRepairStatusMessage.length > 0) {
+                            statusMessage += `\n${manifestRepairStatusMessage}`;
+                        }
+                        if (remoteDiagnostics.length > 0) {
+                            statusMessage += `\n${remoteDiagnostics}`;
+                        }
                     }
                     break;
 
                 case "indexing":
-                    if (info && "indexingPercentage" in info) {
-                        const indexingInfo = info as any;
+                    if (
+                        indexingJob?.status === "running" ||
+                        (info && "indexingPercentage" in info)
+                    ) {
+                        const indexingInfo = info as CodebaseInfoIndexing;
                         const progressPercentage =
-                            indexingInfo.indexingPercentage || 0;
+                            indexingJob?.status === "running"
+                                ? indexingJob.progress.percentage
+                                : indexingInfo.indexingPercentage || 0;
                         statusMessage = ` Codebase '${statusCodebasePath}' is currently being indexed. Progress: ${progressPercentage.toFixed(1)}%`;
 
                         // Add more detailed status based on progress
@@ -3582,12 +4168,25 @@ export class ToolHandlers {
                             statusMessage +=
                                 " (Processing files and generating embeddings...)";
                         }
-                        statusMessage += `\n Last updated: ${new Date(indexingInfo.lastUpdated).toLocaleString()}`;
+                        const lastUpdated =
+                            indexingJob?.status === "running"
+                                ? indexingJob.updatedAt
+                                : indexingInfo.lastUpdated;
+                        statusMessage += `\n Last updated: ${new Date(lastUpdated).toLocaleString()}`;
                     } else {
                         statusMessage = ` Codebase '${statusCodebasePath}' is currently being indexed.`;
                     }
+                    if (indexingJobStatusMessage.length > 0) {
+                        statusMessage += `\n${indexingJobStatusMessage}`;
+                    }
                     if (syncStatusMessage.length > 0) {
                         statusMessage += `\n${syncStatusMessage}`;
+                    }
+                    if (manifestRepairStatusMessage.length > 0) {
+                        statusMessage += `\n${manifestRepairStatusMessage}`;
+                    }
+                    if (remoteDiagnostics.length > 0) {
+                        statusMessage += `\n${remoteDiagnostics}`;
                     }
                     break;
 
@@ -3604,11 +4203,37 @@ export class ToolHandlers {
                     } else {
                         statusMessage = ` Codebase '${statusCodebasePath}' indexing failed. You can retry indexing.`;
                     }
+                    if (remoteDiagnostics.length > 0) {
+                        statusMessage += `\n${remoteDiagnostics}`;
+                    }
+                    if (
+                        indexingJobStatusMessage.length > 0 &&
+                        indexingJob?.status !== "completed"
+                    ) {
+                        statusMessage += `\n${indexingJobStatusMessage}`;
+                    }
+                    if (manifestRepairStatusMessage.length > 0) {
+                        statusMessage += `\n${manifestRepairStatusMessage}`;
+                    }
                     break;
 
                 case "not_found":
                 default:
-                    statusMessage = ` Codebase '${absolutePath}' is not indexed. ${NOT_INDEXED_INDEXING_HINT}`;
+                    if (
+                        indexingJobStatusMessage.length > 0 &&
+                        indexingJob?.status !== "completed"
+                    ) {
+                        statusMessage = ` Codebase '${absolutePath}' is not recorded in the global snapshot, but an indexing job exists.`;
+                        statusMessage += `\n${indexingJobStatusMessage}`;
+                    } else {
+                        statusMessage = ` Codebase '${absolutePath}' is not indexed. ${NOT_INDEXED_INDEXING_HINT}`;
+                    }
+                    if (manifestRepairStatusMessage.length > 0) {
+                        statusMessage += `\n${manifestRepairStatusMessage}`;
+                    }
+                    if (remoteDiagnostics.length > 0) {
+                        statusMessage += `\n${remoteDiagnostics}`;
+                    }
                     break;
             }
 

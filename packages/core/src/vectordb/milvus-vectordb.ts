@@ -10,6 +10,14 @@ import {
     DEFAULT_SEARCH_OUTPUT_FIELDS,
     InsertOptions,
 } from './types';
+import {
+    REMOTE_INDEX_MANIFEST_COLLECTION,
+    createRemoteIndexManifestDocument,
+    getRemoteIndexManifestDocumentId,
+    getRemoteIndexManifestKey,
+    parseRemoteIndexManifestRow,
+    type RemoteIndexManifest,
+} from './remote-index-manifest';
 import { ClusterManager } from './zilliz-utils';
 import { formatErrorDetails, milvusOperationError } from '../utils/error-format';
 import { isUnsupportedSparseVectorError, milvusHybridCompatibilityError } from './milvus-compatibility';
@@ -57,6 +65,11 @@ function createStructuredFieldSchemas() {
 function isMissingStructuredFieldError(error: unknown): boolean {
     const message = formatErrorDetails(error);
     return isMissingStructuredFieldMessage(message);
+}
+
+function isCollectionAlreadyExistsError(error: unknown): boolean {
+    const message = formatErrorDetails(error);
+    return /collection.*(already.*exist|exist|duplicate)|already.*exist|duplicate.*collection/i.test(message);
 }
 
 export class MilvusVectorDatabase implements VectorDatabase {
@@ -517,6 +530,63 @@ export class MilvusVectorDatabase implements VectorDatabase {
         // Handle the response format - cast to any to avoid type errors
         const collections = (result as any).collection_names || (result as any).collections || [];
         return Array.isArray(collections) ? collections : [];
+    }
+
+    private async ensureIndexManifestCollection(): Promise<void> {
+        const exists = await this.hasCollection(REMOTE_INDEX_MANIFEST_COLLECTION);
+        if (exists) {
+            return;
+        }
+
+        try {
+            await this.createCollection(
+                REMOTE_INDEX_MANIFEST_COLLECTION,
+                1,
+                'Hitmux Context Engine remote index status manifests'
+            );
+        } catch (error) {
+            if (!isCollectionAlreadyExistsError(error) || !(await this.hasCollection(REMOTE_INDEX_MANIFEST_COLLECTION))) {
+                throw error;
+            }
+        }
+    }
+
+    async readIndexManifest(collectionName: string, codebasePath: string): Promise<RemoteIndexManifest | null> {
+        const exists = await this.hasCollection(REMOTE_INDEX_MANIFEST_COLLECTION);
+        if (!exists) {
+            return null;
+        }
+
+        const relativePath = getRemoteIndexManifestKey(collectionName, codebasePath);
+        const rows = await this.query(
+            REMOTE_INDEX_MANIFEST_COLLECTION,
+            `relativePath == "${relativePath}"`,
+            ['content'],
+            1
+        );
+        return rows.length > 0 ? parseRemoteIndexManifestRow(rows[0]) : null;
+    }
+
+    async writeIndexManifest(manifest: RemoteIndexManifest): Promise<void> {
+        await this.ensureIndexManifestCollection();
+        const documentId = getRemoteIndexManifestDocumentId(manifest.collectionName, manifest.codebasePath);
+        try {
+            await this.delete(REMOTE_INDEX_MANIFEST_COLLECTION, [documentId]);
+        } catch (error) {
+            console.warn(`[MilvusDB] Failed to delete previous index manifest '${documentId}', continuing with upsert insert:`, error);
+        }
+        await this.insert(REMOTE_INDEX_MANIFEST_COLLECTION, [createRemoteIndexManifestDocument(manifest)]);
+    }
+
+    async deleteIndexManifest(collectionName: string, codebasePath: string): Promise<void> {
+        const exists = await this.hasCollection(REMOTE_INDEX_MANIFEST_COLLECTION);
+        if (!exists) {
+            return;
+        }
+        await this.delete(
+            REMOTE_INDEX_MANIFEST_COLLECTION,
+            [getRemoteIndexManifestDocumentId(collectionName, codebasePath)]
+        );
     }
 
     async insert(collectionName: string, documents: VectorDocument[], options: InsertOptions = {}): Promise<void> {
@@ -1118,7 +1188,6 @@ export class MilvusVectorDatabase implements VectorDatabase {
             const result = await this.client.query({
                 collection_name: collectionName,
                 output_fields: ['count(*)'],
-                expr: '',
             });
             if (result.status.error_code !== 'Success') {
                 console.warn(`[MilvusDB] count(*) query failed for '${collectionName}': ${result.status.reason}`);

@@ -63,6 +63,23 @@ class RecordingSplitter implements Splitter {
     setChunkOverlap(): void { }
 }
 
+const createCollectionDescription = (codebasePath = 'test-project'): string => [
+    `codebasePath:${codebasePath}`,
+    `hitmuxContext:${JSON.stringify({
+        version: 1,
+        codebasePath,
+        embedding: {
+            provider: 'test',
+            model: 'unknown',
+            dimension: 3,
+        },
+        schemaVersion: 2,
+        metadataVersion: 2,
+        splitterType: 'test',
+        createdAt: '2026-01-01T00:00:00.000Z',
+    })}`,
+].join('\n');
+
 const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     createCollection: jest.fn().mockResolvedValue(undefined),
     createHybridCollection: jest.fn().mockResolvedValue(undefined),
@@ -76,7 +93,7 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     hybridSearch: jest.fn().mockResolvedValue([]),
     delete: jest.fn().mockResolvedValue(undefined),
     query: jest.fn().mockResolvedValue([]),
-    getCollectionDescription: jest.fn().mockResolvedValue(''),
+    getCollectionDescription: jest.fn().mockResolvedValue(createCollectionDescription()),
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
     getCollectionRowCount: jest.fn().mockResolvedValue(999),
 });
@@ -132,12 +149,12 @@ describe('Context request-scoped splitters', () => {
             fileName: 'index.ts',
             basename: 'index',
             pathTokens: ['index', 'ts'],
-            symbols: ['value'],
-            definitionIdentifiers: ['value'],
+            symbols: [],
+            definitionIdentifiers: [],
             chunkKind: 'code',
         });
         expect(insertedDocuments[0]).toMatchObject({
-            primarySymbol: 'value',
+            primarySymbol: '',
             chunkKind: 'code',
             isDefinition: false,
             fileRole: 'barrel',
@@ -458,6 +475,64 @@ describe('Context request-scoped splitters', () => {
             isDefinition: true,
         });
         expect(insertedDocument.metadata.definitionIdentifiers).toEqual(['RegisterRoom']);
+    });
+
+    it('indexes fallback definition identifiers for C, CMake, and TOML chunks', async () => {
+        const project = path.join(tempRoot, 'project-fallback-symbol-metadata');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'commands.c'), [
+            'static void lrangeCommand(client *c) {',
+            '    replyToClient(c);',
+            '}',
+            '{ .handler = xreadCommand },',
+        ].join('\n'));
+        await fs.writeFile(path.join(project, 'CMakeLists.txt'), [
+            'function(register_valkey_sources)',
+            'endfunction()',
+        ].join('\n'));
+        await fs.writeFile(path.join(project, 'pyproject.toml'), [
+            '[dependency-groups]',
+            'dev = ["pytest"]',
+        ].join('\n'));
+
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: {
+                async split(code: string, language: string, filePath?: string): Promise<CodeChunk[]> {
+                    return [{
+                        content: code,
+                        metadata: {
+                            startLine: 1,
+                            endLine: code.split('\n').length,
+                            language,
+                            filePath,
+                        },
+                    }];
+                },
+                setChunkSize(): void { },
+                setChunkOverlap(): void { },
+            },
+        });
+
+        await context.indexCodebase(project);
+
+        const documentsByPath = new Map(vectorDatabase.insert.mock.calls
+            .flatMap(([, documents]) => documents)
+            .map(document => [document.relativePath, document]));
+
+        expect(documentsByPath.get('commands.c')?.metadata.definitionIdentifiers).toEqual(expect.arrayContaining([
+            'lrangeCommand',
+            'xreadCommand',
+        ]));
+        expect(documentsByPath.get('CMakeLists.txt')?.metadata.definitionIdentifiers).toEqual(expect.arrayContaining([
+            'register_valkey_sources',
+        ]));
+        expect(documentsByPath.get('pyproject.toml')?.metadata.definitionIdentifiers).toEqual(expect.arrayContaining([
+            'dependency-groups',
+        ]));
     });
 
     it('indexes TSX, JSX, Markdown, Elixir, Lua, and Luau files by default with language metadata', async () => {

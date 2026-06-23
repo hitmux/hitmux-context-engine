@@ -70,7 +70,7 @@ main() {
     pnpm install --frozen-lockfile
 
     log "Building ${PACKAGE_NAME} and dependencies"
-    pnpm --filter "${PACKAGE_NAME}..." build
+    pnpm build:mcp
 
     [[ -f "${MCP_DIST}" ]] || fail "Build output not found: ${MCP_DIST}"
     chmod 0755 "${MCP_DIST}"

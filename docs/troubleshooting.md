@@ -25,7 +25,7 @@ Common checks:
 - The active `embeddingProvider` has its matching API key field, such as `openrouterApiKey`, `openaiApiKey`, `voyageaiApiKey`, or `geminiApiKey`.
 - Local Milvus uses `milvusAddress = localhost:19530`.
 - Self-hosted remote Milvus uses a reachable host and port as `milvusAddress`; set `milvusToken` only when the server requires authentication.
-- Zilliz Cloud uses the cloud public endpoint as `milvusAddress`, with the Personal Key in `milvusToken`.
+- Zilliz Cloud can be created from the free signup page at https://cloud.zilliz.com/signup, then uses the cloud public endpoint as `milvusAddress`, with the Personal Key in `milvusToken`.
 - SQLite, Chroma, Qdrant, LanceDB, and other database backends cannot be selected through `config.conf`.
 - The project-level `.hitmux-context-engine/config.conf` is not overriding a global secret with an empty value.
 
@@ -110,19 +110,19 @@ This error is thrown by the MCP client before Hitmux Context Engine starts. Chec
 Test-Path "$env:SystemRoot\System32\cmd.exe"
 Get-Command node
 Get-Command npm
-Get-Command npx
+Get-Command hce
 ```
 
-If `cmd.exe` is missing, repair Windows or restore `ComSpec` to `%SystemRoot%\System32\cmd.exe`. If `npx` is missing, reinstall Node.js from the official Windows installer and restart the MCP client.
+If `cmd.exe` is missing, repair Windows or restore `ComSpec` to `%SystemRoot%\System32\cmd.exe`. If `hce` is missing, run `npm install -g @hitmux/hce@latest` and restart the MCP client.
 
-Clients that cannot resolve the npm shim correctly can use `npx.cmd`:
+Clients that cannot resolve the global npm shim correctly can use `hce.cmd`:
 
 ```json
 {
   "mcpServers": {
     "hitmux-context-engine": {
-      "command": "npx.cmd",
-      "args": ["-y", "@hitmux/hce@latest"]
+      "command": "hce.cmd",
+      "args": []
     }
   }
 }
