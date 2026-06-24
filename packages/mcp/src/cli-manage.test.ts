@@ -8,6 +8,7 @@ import {
     Context,
     Embedding,
     EmbeddingVector,
+    REMOTE_INDEX_MANIFEST_COLLECTION,
     VectorDatabase,
 } from "@hitmux/hitmux-context-engine-core";
 
@@ -259,6 +260,41 @@ test("runCliManageCommand list target prints collection details", async () => {
     assert.match(output.join(""), /Chunks: 42/);
     assert.match(output.join(""), /Embedding: OpenAI\/text-embedding-3-small/);
     assert.match(output.join(""), /Splitter: ast/);
+});
+
+test("runCliManageCommand list ignores remote manifest collection", async () => {
+    const output: string[] = [];
+    const vectorDatabase = createFakeVectorDatabase({
+        [REMOTE_INDEX_MANIFEST_COLLECTION]: {
+            queryRows: [
+                {
+                    metadata: {
+                        codebasePath: "/repo/app",
+                        collectionName: "hybrid_code_chunks_app",
+                    },
+                },
+            ],
+            rowCount: 1,
+        },
+        hybrid_code_chunks_app: {
+            description:
+                'codebasePath:/repo/app\nhitmuxContext:{"version":1,"codebasePath":"/repo/app","embedding":{"provider":"OpenAI","model":"text-embedding-3-small","dimension":1536},"schemaVersion":2,"metadataVersion":2,"splitterType":"ast","createdAt":"2026-06-18T00:00:00.000Z"}',
+            rowCount: 42,
+        },
+    });
+
+    const exitCode = await runCliManageCommand(["list", "/repo/app"], {
+        createConfig: () => fakeConfig,
+        createEmbedding: () => new FakeEmbedding(),
+        createVectorDatabase: () => vectorDatabase,
+        createContext: () => new FakeContext() as unknown as Context,
+        createSnapshotManager: () => new FakeSnapshotManager() as unknown as SnapshotManager,
+        stdout: (message) => output.push(message),
+    });
+
+    assert.equal(exitCode, 0);
+    assert.match(output.join(""), /Collection: hybrid_code_chunks_app/);
+    assert.doesNotMatch(output.join(""), new RegExp(REMOTE_INDEX_MANIFEST_COLLECTION));
 });
 
 test("runCliManageCommand rm drops collection and removes snapshot entry", async () => {

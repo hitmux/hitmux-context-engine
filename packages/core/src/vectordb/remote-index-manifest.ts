@@ -3,6 +3,7 @@ import { VectorDocument } from './types';
 
 export const REMOTE_INDEX_MANIFEST_COLLECTION = 'hitmux_index_manifests';
 export const REMOTE_INDEX_MANIFEST_VERSION = 1;
+export const REMOTE_INDEX_MANIFEST_VECTOR_DIMENSION = 2;
 
 export type RemoteIndexManifestStatus = 'completed' | 'limit_reached';
 
@@ -39,7 +40,7 @@ export function createRemoteIndexManifestDocument(manifest: RemoteIndexManifest)
     const content = JSON.stringify(manifest);
     return {
         id: getRemoteIndexManifestDocumentId(manifest.collectionName, manifest.codebasePath),
-        vector: [0],
+        vector: [0, 0],
         content,
         relativePath: getRemoteIndexManifestKey(manifest.collectionName, manifest.codebasePath),
         startLine: 1,

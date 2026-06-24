@@ -1,12 +1,14 @@
 import * as fs from 'fs/promises';
+import * as crypto from 'crypto';
 import * as nodeFs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Context, ExistingCollectionFullIndexError } from './context';
 import { Embedding, EmbeddingVector } from './embedding';
+import { getNormalizedContentHash } from './search/result-dedupe';
 import { FileSynchronizer } from './sync/synchronizer';
 import { Splitter, CodeChunk } from './splitter';
-import { VectorDatabase } from './vectordb';
+import { VectorDatabase, VectorDocument } from './vectordb';
 
 class TestEmbedding extends Embedding {
     protected maxTokens = 8192;
@@ -79,6 +81,22 @@ class SlowTrackingEmbedding extends TestEmbedding {
         } finally {
             this.activeRequests -= 1;
         }
+    }
+}
+
+class TrackingEmbedding extends TestEmbedding {
+    public batchTexts: string[][] = [];
+
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        this.batchTexts.push([...texts]);
+        return super.embedBatch(texts);
+    }
+}
+
+class DelayedTrackingEmbedding extends TrackingEmbedding {
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        await sleep(25);
+        return super.embedBatch(texts);
     }
 }
 
@@ -867,6 +885,114 @@ describe('Context indexing lifecycle', () => {
 
         expect(embedding.maxActiveRequests).toBeGreaterThan(1);
         expect(embedding.maxActiveRequests).toBeLessThanOrEqual(2);
+    });
+
+    it('embeds duplicate chunk content once per indexing batch and still inserts every document', async () => {
+        const project = path.join(tempRoot, 'duplicate-batch-project');
+        await fs.mkdir(project, { recursive: true });
+        const content = 'export function sharedThing() { return 1; }\n';
+        await fs.writeFile(path.join(project, 'a.ts'), content);
+        await fs.writeFile(path.join(project, 'b.ts'), content);
+        await writeProjectConfig(project, {
+            embeddingBatchSize: 10,
+        });
+        const embedding = new TrackingEmbedding();
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        const context = new Context({
+            hybridMode: false,
+            embedding,
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(context.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 2,
+            totalChunks: 2,
+            status: 'completed',
+        });
+
+        expect(embedding.batchTexts).toEqual([[content]]);
+        expect(vectorDatabase.insert).toHaveBeenCalledTimes(1);
+        const documents = vectorDatabase.insert.mock.calls[0][1] as VectorDocument[];
+        expect(documents).toHaveLength(2);
+        expect(documents.map(document => document.relativePath).sort()).toEqual(['a.ts', 'b.ts']);
+        for (const document of documents) {
+            expect(document.metadata.symbols).toEqual(expect.arrayContaining(['sharedThing']));
+            expect(document.metadata.definitionIdentifiers).toEqual(expect.arrayContaining(['sharedThing']));
+            expect(document.metadata.primarySymbol).toBe('sharedThing');
+            expect(document.metadata.contentHash).toBe(crypto.createHash('sha1').update(content).digest('hex'));
+            expect(document.metadata.normalizedContentHash).toBe(getNormalizedContentHash(content));
+        }
+    });
+
+    it('does not reuse definition metadata for chunks with only matching normalized content', async () => {
+        const project = path.join(tempRoot, 'normalized-metadata-cache-project');
+        await fs.mkdir(project, { recursive: true });
+        const definitionContent = 'foo\nexport const sharedThing = 1;\n';
+        const nonDefinitionContent = 'foo export const sharedThing = 1;\n';
+        expect(getNormalizedContentHash(definitionContent)).toBe(getNormalizedContentHash(nonDefinitionContent));
+        await fs.writeFile(path.join(project, 'a.ts'), definitionContent);
+        await fs.writeFile(path.join(project, 'b.ts'), nonDefinitionContent);
+        await writeProjectConfig(project, {
+            embeddingBatchSize: 10,
+        });
+        const embedding = new TrackingEmbedding();
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        const context = new Context({
+            hybridMode: false,
+            embedding,
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(context.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 2,
+            totalChunks: 2,
+            status: 'completed',
+        });
+
+        expect(embedding.batchTexts).toHaveLength(1);
+        expect(embedding.batchTexts[0]).toHaveLength(1);
+        expect(getNormalizedContentHash(embedding.batchTexts[0][0])).toBe(getNormalizedContentHash(definitionContent));
+        const documents = vectorDatabase.insert.mock.calls[0][1] as VectorDocument[];
+        const byPath = new Map(documents.map(document => [document.relativePath, document]));
+        expect(byPath.get('a.ts')?.metadata.definitionIdentifiers).toEqual(expect.arrayContaining(['sharedThing']));
+        expect(byPath.get('a.ts')?.metadata.primarySymbol).toBe('sharedThing');
+        expect(byPath.get('b.ts')?.metadata.definitionIdentifiers).not.toEqual(expect.arrayContaining(['sharedThing']));
+        expect(byPath.get('b.ts')?.metadata.primarySymbol).toBe('');
+    });
+
+    it('shares in-flight embedding work for duplicate content across concurrent batches', async () => {
+        const project = path.join(tempRoot, 'duplicate-concurrent-project');
+        await fs.mkdir(project, { recursive: true });
+        const content = 'export const sharedValue = 1;\n';
+        await fs.writeFile(path.join(project, 'a.ts'), content);
+        await fs.writeFile(path.join(project, 'b.ts'), content);
+        await writeProjectConfig(project, {
+            embeddingBatchSize: 1,
+            embeddingConcurrency: 2,
+            fileProcessingConcurrency: 1,
+        });
+        const embedding = new DelayedTrackingEmbedding();
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        const context = new Context({
+            hybridMode: false,
+            embedding,
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(context.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 2,
+            totalChunks: 2,
+            status: 'completed',
+        });
+
+        expect(embedding.batchTexts).toEqual([[content]]);
+        expect(vectorDatabase.insert).toHaveBeenCalledTimes(2);
     });
 
     it('processes file read/split work with configured bounded concurrency', async () => {

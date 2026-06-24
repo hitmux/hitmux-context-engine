@@ -136,6 +136,12 @@ interface ChunkBatchInsertOptions extends InsertOptions {
     ensureCollectionBeforeInsert?: (dimension: number) => Promise<void>;
 }
 
+interface IndexingRunCache {
+    embeddings: Map<string, EmbeddingVector>;
+    inFlightEmbeddings: Map<string, Promise<EmbeddingVector>>;
+    definitionIdentifiers: Map<string, string[]>;
+}
+
 interface PrepareCollectionOptions {
     rejectExistingFullIndex?: boolean;
     createIfMissing?: boolean;
@@ -3707,6 +3713,11 @@ export class Context {
         let chunkLimitWarningLogged = false;
         type BatchResult = { ok: true } | { ok: false; error: unknown };
         const activeBatches = new Set<Promise<BatchResult>>();
+        const runCache: IndexingRunCache = {
+            embeddings: new Map(),
+            inFlightEmbeddings: new Map(),
+            definitionIdentifiers: new Map()
+        };
 
         const throwBatchError = (error: unknown, context: string): never => {
             if (error instanceof EmbeddingError) {
@@ -3769,7 +3780,7 @@ export class Context {
             const task: Promise<BatchResult> = this.processChunkBuffer(batch, timingMetrics, {
                 deferFlushLoad: options.deferVectorFlushLoad === true,
                 ensureCollectionBeforeInsert: options.ensureCollectionBeforeInsert
-            })
+            }, runCache)
                 .then(() => ({ ok: true as const }))
                 .catch((error) => ({ ok: false as const, error }))
                 .finally(() => {
@@ -4064,7 +4075,8 @@ export class Context {
     private async processChunkBuffer(
         chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }>,
         timingMetrics?: IndexingTimingMetrics,
-        insertOptions: ChunkBatchInsertOptions = {}
+        insertOptions: ChunkBatchInsertOptions = {},
+        runCache?: IndexingRunCache
     ): Promise<void> {
         if (chunkBuffer.length === 0) return;
 
@@ -4078,7 +4090,7 @@ export class Context {
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid' : 'regular';
         console.log(`[Context] 🔄 Processing batch of ${chunks.length} chunks (~${estimatedTokens} tokens) for ${searchType}`);
-        await this.processChunkBatch(chunks, codebasePath, timingMetrics, insertOptions);
+        await this.processChunkBatch(chunks, codebasePath, timingMetrics, insertOptions, runCache);
     }
 
     private async verifyIndexedCollection(codebasePath: string, totalChunks: number): Promise<void> {
@@ -4181,7 +4193,8 @@ export class Context {
         chunks: CodeChunk[],
         codebasePath: string,
         timingMetrics?: IndexingTimingMetrics,
-        insertOptions: ChunkBatchInsertOptions = {}
+        insertOptions: ChunkBatchInsertOptions = {},
+        runCache?: IndexingRunCache
     ): Promise<void> {
         const isHybrid = this.getIsHybrid();
 
@@ -4191,10 +4204,13 @@ export class Context {
         let embeddings: EmbeddingVector[];
         const embeddingStartedAt = this.getMonotonicMs();
         try {
-            embeddings = await this.embedding.embedBatch(chunkContents);
+            embeddings = await this.embedChunkContents(chunkContents, runCache);
         } catch (error) {
             if (timingMetrics) {
                 this.drainVectorDatabasePerformanceMetrics(timingMetrics);
+            }
+            if (error instanceof EmbeddingError) {
+                throw error;
             }
             const errorMessage = error instanceof Error ? error.message : String(error);
             // Include batch size in the log/error message so operators can
@@ -4212,7 +4228,7 @@ export class Context {
 
         if (isHybrid === true) {
             // Create hybrid vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index));
+            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index, runCache));
 
             // Store to vector database
             const insertStartedAt = this.getMonotonicMs();
@@ -4227,7 +4243,7 @@ export class Context {
             }
         } else {
             // Create regular vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index));
+            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index, runCache));
 
             // Store to vector database
             const insertStartedAt = this.getMonotonicMs();
@@ -4243,7 +4259,103 @@ export class Context {
         }
     }
 
-    private createVectorDocument(chunk: CodeChunk, embedding: EmbeddingVector, codebasePath: string, chunkIndex: number): VectorDocument {
+    private async embedChunkContents(
+        chunkContents: string[],
+        runCache?: IndexingRunCache
+    ): Promise<EmbeddingVector[]> {
+        if (!runCache) {
+            return this.embedding.embedBatch(chunkContents);
+        }
+
+        const embeddings = new Array<EmbeddingVector>(chunkContents.length);
+        const waitForInFlight: Promise<void>[] = [];
+        const missingByKey = new Map<string, { content: string; indexes: number[] }>();
+
+        for (let index = 0; index < chunkContents.length; index++) {
+            const content = chunkContents[index];
+            const key = this.createEmbeddingCacheKey(content);
+            const cached = runCache.embeddings.get(key);
+            if (cached) {
+                embeddings[index] = cached;
+                continue;
+            }
+
+            const inFlight = runCache.inFlightEmbeddings.get(key);
+            if (inFlight) {
+                const wait = inFlight.then((embedding) => {
+                    embeddings[index] = embedding;
+                });
+                wait.catch(() => undefined);
+                waitForInFlight.push(wait);
+                continue;
+            }
+
+            const missing = missingByKey.get(key);
+            if (missing) {
+                missing.indexes.push(index);
+            } else {
+                missingByKey.set(key, { content, indexes: [index] });
+            }
+        }
+
+        const missingEntries = [...missingByKey.entries()];
+        if (missingEntries.length > 0) {
+            const deferredByKey = new Map<string, {
+                promise: Promise<EmbeddingVector>;
+                resolve: (embedding: EmbeddingVector) => void;
+                reject: (error: unknown) => void;
+            }>();
+
+            for (const [key] of missingEntries) {
+                let resolve!: (embedding: EmbeddingVector) => void;
+                let reject!: (error: unknown) => void;
+                const promise = new Promise<EmbeddingVector>((promiseResolve, promiseReject) => {
+                    resolve = promiseResolve;
+                    reject = promiseReject;
+                });
+                promise.catch(() => undefined);
+                deferredByKey.set(key, { promise, resolve, reject });
+                runCache.inFlightEmbeddings.set(key, promise);
+            }
+
+            try {
+                const uniqueContents = missingEntries.map(([, entry]) => entry.content);
+                const uniqueEmbeddings = await this.embedding.embedBatch(uniqueContents);
+                this.validateEmbeddings(uniqueEmbeddings, uniqueContents.length);
+
+                missingEntries.forEach(([key, entry], uniqueIndex) => {
+                    const embedding = uniqueEmbeddings[uniqueIndex];
+                    runCache.embeddings.set(key, embedding);
+                    deferredByKey.get(key)?.resolve(embedding);
+                    for (const originalIndex of entry.indexes) {
+                        embeddings[originalIndex] = embedding;
+                    }
+                });
+            } catch (error) {
+                for (const [key] of missingEntries) {
+                    deferredByKey.get(key)?.reject(error);
+                }
+                throw error;
+            } finally {
+                for (const [key] of missingEntries) {
+                    runCache.inFlightEmbeddings.delete(key);
+                }
+            }
+        }
+
+        await Promise.all(waitForInFlight);
+        return embeddings;
+    }
+
+    private createEmbeddingCacheKey(content: string): string {
+        return [
+            this.embedding.getProvider(),
+            this.embedding.getModel(),
+            getNormalizedContentHash(content)
+        ].join(':');
+    }
+
+    private createVectorDocument(chunk: CodeChunk, embedding: EmbeddingVector, codebasePath: string, chunkIndex: number, runCache?: IndexingRunCache): VectorDocument {
         if (!chunk.metadata.filePath) {
             throw new Error(`Missing filePath in chunk metadata at index ${chunkIndex}`);
         }
@@ -4254,7 +4366,7 @@ export class Context {
         const { filePath: _filePath, startLine: _startLine, endLine: _endLine, ...restMetadata } = chunk.metadata;
         const sourceStartLine = chunk.metadata.startLine || 0;
         const sourceEndLine = chunk.metadata.endLine || 0;
-        const searchMetadata = this.createSearchMetadata(normalizedRelativePath, chunk.content, restMetadata);
+        const searchMetadata = this.createSearchMetadata(normalizedRelativePath, chunk.content, restMetadata, runCache);
         const structuredFields = this.createStructuredDocumentFields(searchMetadata);
 
         return {
@@ -4279,12 +4391,19 @@ export class Context {
         };
     }
 
-    private createSearchMetadata(relativePath: string, content: string, chunkMetadata: Record<string, unknown>): QueryRow {
+    private createSearchMetadata(relativePath: string, content: string, chunkMetadata: Record<string, unknown>, runCache?: IndexingRunCache): QueryRow {
         const fileName = path.posix.basename(relativePath);
         const extension = path.posix.extname(fileName);
         const basename = path.posix.basename(fileName, extension);
         const pathTokens = extractPathTokens(relativePath);
-        const definitionIdentifierSet = new Set<string>(extractDefinitionIdentifiers(content));
+        const contentHash = crypto.createHash('sha1').update(content).digest('hex');
+        const normalizedContentHash = getNormalizedContentHash(content);
+        let definitionIdentifiers = runCache?.definitionIdentifiers.get(contentHash);
+        if (!definitionIdentifiers) {
+            definitionIdentifiers = extractDefinitionIdentifiers(content);
+            runCache?.definitionIdentifiers.set(contentHash, definitionIdentifiers);
+        }
+        const definitionIdentifierSet = new Set<string>(definitionIdentifiers);
         const symbols = new Set<string>(definitionIdentifierSet);
         const isDefinition = chunkMetadata.isDefinition === true;
         const symbolName = typeof chunkMetadata.symbolName === 'string' ? chunkMetadata.symbolName : '';
@@ -4296,8 +4415,8 @@ export class Context {
             }
         }
 
-        const definitionIdentifiers = [...definitionIdentifierSet];
-        const primarySymbol = symbolName || definitionIdentifiers[0] || '';
+        const finalDefinitionIdentifiers = [...definitionIdentifierSet];
+        const primarySymbol = symbolName || finalDefinitionIdentifiers[0] || '';
         const pathSegments = this.extractPathSegments(relativePath);
 
         return {
@@ -4305,13 +4424,13 @@ export class Context {
             basename,
             pathTokens,
             symbols: [...symbols],
-            definitionIdentifiers,
+            definitionIdentifiers: finalDefinitionIdentifiers,
             primarySymbol,
             symbolKind: typeof chunkMetadata.symbolKind === 'string' ? chunkMetadata.symbolKind : '',
             chunkKind: typeof chunkMetadata.chunkKind === 'string' ? chunkMetadata.chunkKind : 'code',
             isDefinition,
-            contentHash: crypto.createHash('sha1').update(content).digest('hex'),
-            normalizedContentHash: getNormalizedContentHash(content),
+            contentHash,
+            normalizedContentHash,
             chunkRole: typeof chunkMetadata.chunkRole === 'string' ? chunkMetadata.chunkRole : 'reference',
             fileRole: classifyFileRole(relativePath, extension, content),
             pathSegment0: pathSegments[0] || '',

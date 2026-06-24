@@ -457,6 +457,12 @@ This tool is versatile and can be used before completing various tasks to retrie
                                     type: "string",
                                     description: `ABSOLUTE path to the codebase directory to check status for.`,
                                 },
+                                refresh: {
+                                    type: "boolean",
+                                    description:
+                                        "Optional. Defaults to false for fast local snapshot/job status. Set true to probe the vector database and recover remote collection/manifest state.",
+                                    default: false,
+                                },
                             },
                             required: ["path"],
                         },

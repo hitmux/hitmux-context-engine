@@ -4,6 +4,7 @@ import {
     Embedding,
     FileSynchronizer,
     MilvusVectorDatabase,
+    REMOTE_INDEX_MANIFEST_COLLECTION,
     VectorDatabase,
     configManager,
 } from "@hitmux/hitmux-context-engine-core";
@@ -503,6 +504,10 @@ async function getCollectionOverviews(
     const overviews: CollectionOverview[] = [];
 
     for (const collectionName of collectionNames.sort()) {
+        if (collectionName === REMOTE_INDEX_MANIFEST_COLLECTION) {
+            continue;
+        }
+
         const description = await getCollectionDescription(
             vectorDatabase,
             collectionName,

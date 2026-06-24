@@ -681,6 +681,11 @@ describe('Milvus structured metadata schema', () => {
         await expect((database as any).ensureIndexManifestCollection()).resolves.toBeUndefined();
 
         expect(createCollection).toHaveBeenCalledTimes(1);
+        expect(createCollection).toHaveBeenCalledWith(
+            'hitmux_index_manifests',
+            2,
+            'Hitmux Context Engine remote index status manifests'
+        );
         expect(hasCollection).toHaveBeenCalledTimes(2);
     });
 
@@ -726,6 +731,11 @@ describe('Milvus structured metadata schema', () => {
         await expect((database as any).ensureIndexManifestCollection()).resolves.toBeUndefined();
 
         expect(createCollection).toHaveBeenCalledTimes(1);
+        expect(createCollection).toHaveBeenCalledWith(
+            'hitmux_index_manifests',
+            2,
+            'Hitmux Context Engine remote index status manifests'
+        );
         expect(hasCollection).toHaveBeenCalledTimes(2);
     });
 

@@ -4019,7 +4019,17 @@ export class ToolHandlers {
             return validation.error;
         }
 
+        const refreshValidation = this.normalizeOptionalBooleanArg(
+            "get_indexing_status",
+            "refresh",
+            args?.refresh,
+        );
+        if (refreshValidation.error) {
+            return refreshValidation.error;
+        }
+
         const { path: codebasePath } = args;
+        const refreshRemote = refreshValidation.value === true;
 
         try {
             const absolutePath = requireAbsolutePath(codebasePath);
@@ -4051,11 +4061,14 @@ export class ToolHandlers {
                 };
             }
 
-            const syncCodebasePath =
-                this.snapshotManager.findTrackedCodebasePath(absolutePath) ||
-                absolutePath;
-            let remoteProbe =
-                await this.syncTargetCodebaseFromVectorDatabase(syncCodebasePath);
+            let remoteProbe: RemoteCollectionProbe | null = null;
+            if (refreshRemote) {
+                const syncCodebasePath =
+                    this.snapshotManager.findTrackedCodebasePath(absolutePath) ||
+                    absolutePath;
+                remoteProbe =
+                    await this.syncTargetCodebaseFromVectorDatabase(syncCodebasePath);
+            }
             this.snapshotManager.refreshFromDiskForRead();
 
             // Check indexing status using new status system
@@ -4078,6 +4091,7 @@ export class ToolHandlers {
             );
             let remoteDiagnostics = "";
             if (
+                refreshRemote &&
                 typeof (this.context as any).getCollectionName === "function" &&
                 typeof (this.context as any).getVectorDatabase === "function"
             ) {
@@ -4227,6 +4241,10 @@ export class ToolHandlers {
                         statusMessage += `\n${indexingJobStatusMessage}`;
                     } else {
                         statusMessage = ` Codebase '${absolutePath}' is not indexed. ${NOT_INDEXED_INDEXING_HINT}`;
+                        if (!refreshRemote) {
+                            statusMessage +=
+                                "\n Tip: pass refresh=true to check remote collection/manifest state and recover status written outside this local snapshot.";
+                        }
                     }
                     if (manifestRepairStatusMessage.length > 0) {
                         statusMessage += `\n${manifestRepairStatusMessage}`;

@@ -108,4 +108,18 @@ describe('extractDefinitionIdentifiers', () => {
             'main',
         ]));
     });
+
+    it('bounds scanning time for long non-definition lines', () => {
+        const longGenericCall = `${'VeryLongType '.repeat(4000)}notAFunctionCallWithoutTerminator`;
+        const content = [
+            longGenericCall,
+            'func stillFound() {}',
+        ].join('\n');
+
+        const startedAt = Date.now();
+        const identifiers = extractDefinitionIdentifiers(content);
+
+        expect(Date.now() - startedAt).toBeLessThan(100);
+        expect(identifiers).toEqual(expect.arrayContaining(['stillFound']));
+    });
 });

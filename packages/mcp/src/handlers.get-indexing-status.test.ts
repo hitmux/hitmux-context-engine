@@ -55,7 +55,7 @@ async function writeMerkleSnapshot(homeDir: string, codebasePath: string, files:
     );
 }
 
-test("get_indexing_status syncs vector database state before reading the snapshot", async () => {
+test("get_indexing_status refresh=true syncs vector database state before reading the snapshot", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
@@ -74,7 +74,7 @@ test("get_indexing_status syncs vector database state before reading the snapsho
             });
         };
 
-        const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
+        const result = await handlers.handleGetIndexingStatus({ path: codebasePath, refresh: true });
 
         assert.equal(syncCalls, 1);
         assert.equal(result.isError, undefined);
@@ -114,7 +114,7 @@ test("get_indexing_status reports job state when global snapshot entry is missin
     });
 });
 
-test("get_indexing_status refreshes indexed entries written by another MCP process", async () => {
+test("get_indexing_status refreshes local indexed entries written by another MCP process", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
@@ -129,13 +129,17 @@ test("get_indexing_status refreshes indexed entries written by another MCP proce
         secondSnapshotManager.saveCodebaseSnapshot();
 
         const handlers = new ToolHandlers({} as any, firstSnapshotManager);
-        (handlers as any).syncTargetCodebaseFromVectorDatabase = async () => {};
+        let syncCalls = 0;
+        (handlers as any).syncTargetCodebaseFromVectorDatabase = async () => {
+            syncCalls += 1;
+        };
 
         const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
 
         assert.equal(result.isError, undefined);
         assert.match(result.content[0].text, /fully indexed and ready for search/);
         assert.match(result.content[0].text, /7 files, 11 chunks/);
+        assert.equal(syncCalls, 0);
         assert.equal(firstSnapshotManager.getCodebaseStatus(codebasePath), "indexed");
     });
 });
@@ -168,10 +172,14 @@ test("get_indexing_status does not hang when target collection existence check s
         await mkdir(codebasePath, { recursive: true });
 
         const snapshotManager = new SnapshotManager();
+        let hasCollectionCalls = 0;
         const context = {
             getCollectionName: () => "code_chunks_stalled",
             getVectorDatabase: () => ({
-                hasCollection: async () => new Promise<boolean>(() => {}),
+                hasCollection: async () => {
+                    hasCollectionCalls += 1;
+                    return new Promise<boolean>(() => {});
+                },
             }),
         };
 
@@ -181,10 +189,11 @@ test("get_indexing_status does not hang when target collection existence check s
 
         assert.equal(result.isError, undefined);
         assert.match(result.content[0].text, /is not indexed/);
+        assert.equal(hasCollectionCalls, 0);
     });
 });
 
-test("get_indexing_status does not scan unrelated vector database collections for a tracked codebase", async () => {
+test("get_indexing_status default status does not probe remote collections for a tracked codebase", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
@@ -229,12 +238,12 @@ test("get_indexing_status does not scan unrelated vector database collections fo
 
         assert.equal(result.isError, undefined);
         assert.match(result.content[0].text, /fully indexed and ready for search/);
-        assert.equal(hasCollectionCalls, 1);
-        assert.equal(descriptionCalls, 1);
+        assert.equal(hasCollectionCalls, 0);
+        assert.equal(descriptionCalls, 0);
     });
 });
 
-test("get_indexing_status does not let vector database recovery mark active indexing as completed", async () => {
+test("get_indexing_status refresh=true does not let vector database recovery mark active indexing as completed", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
@@ -264,7 +273,7 @@ test("get_indexing_status does not let vector database recovery mark active inde
         };
 
         const handlers = new ToolHandlers(context as any, snapshotManager);
-        const result = await handlers.handleGetIndexingStatus({ path: codebasePath });
+        const result = await handlers.handleGetIndexingStatus({ path: codebasePath, refresh: true });
 
         assert.equal(rowCountQueries, 1);
         assert.equal(result.isError, undefined);
@@ -274,7 +283,7 @@ test("get_indexing_status does not let vector database recovery mark active inde
     });
 });
 
-test("get_indexing_status keeps shared local snapshot entries while collection description path is indexing", async () => {
+test("get_indexing_status refresh=true keeps shared local snapshot entries while collection description path is indexing", async () => {
     await withTempHome(async (tempRoot) => {
         const indexingCodebasePath = path.join(tempRoot, "repo-indexing");
         const indexedCodebasePath = path.join(tempRoot, "repo-indexed");
@@ -311,7 +320,7 @@ test("get_indexing_status keeps shared local snapshot entries while collection d
         };
 
         const handlers = new ToolHandlers(context as any, snapshotManager);
-        const result = await handlers.handleGetIndexingStatus({ path: indexedCodebasePath });
+        const result = await handlers.handleGetIndexingStatus({ path: indexedCodebasePath, refresh: true });
 
         assert.equal(rowCountQueries, 1);
         assert.equal(result.isError, undefined);
@@ -321,7 +330,7 @@ test("get_indexing_status keeps shared local snapshot entries while collection d
     });
 });
 
-test("get_indexing_status recovers requested codebase from shared remote manifest", async () => {
+test("get_indexing_status refresh=true recovers requested codebase from shared remote manifest", async () => {
     await withTempHome(async (tempRoot) => {
         const firstCodebasePath = path.join(tempRoot, "repo-a");
         const secondCodebasePath = path.join(tempRoot, "repo-b");
@@ -362,7 +371,7 @@ test("get_indexing_status recovers requested codebase from shared remote manifes
         };
 
         const handlers = new ToolHandlers(context as any, snapshotManager);
-        const result = await handlers.handleGetIndexingStatus({ path: secondCodebasePath });
+        const result = await handlers.handleGetIndexingStatus({ path: secondCodebasePath, refresh: true });
 
         assert.equal(result.isError, undefined);
         assert.match(result.content[0].text, /fully indexed and ready for search/);
@@ -373,7 +382,7 @@ test("get_indexing_status recovers requested codebase from shared remote manifes
     });
 });
 
-test("get_indexing_status deduplicates concurrent collection probes for the same collection", async () => {
+test("get_indexing_status refresh=true deduplicates concurrent collection probes for the same collection", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
         await mkdir(codebasePath, { recursive: true });
@@ -430,8 +439,8 @@ test("get_indexing_status deduplicates concurrent collection probes for the same
         };
 
         const handlers = new ToolHandlers(context as any, snapshotManager);
-        const first = handlers.handleGetIndexingStatus({ path: codebasePath });
-        const second = handlers.handleGetIndexingStatus({ path: codebasePath });
+        const first = handlers.handleGetIndexingStatus({ path: codebasePath, refresh: true });
+        const second = handlers.handleGetIndexingStatus({ path: codebasePath, refresh: true });
         await new Promise((resolve) => setImmediate(resolve));
         releaseProbe();
         const results = await Promise.all([first, second]);
@@ -444,7 +453,7 @@ test("get_indexing_status deduplicates concurrent collection probes for the same
     });
 });
 
-test("get_indexing_status keeps local shared snapshot entries when path extraction is incomplete", async () => {
+test("get_indexing_status refresh=true keeps local shared snapshot entries when path extraction is incomplete", async () => {
     await withTempHome(async (tempRoot) => {
         const firstCodebasePath = path.join(tempRoot, "repo-a");
         const secondCodebasePath = path.join(tempRoot, "repo-b");
@@ -475,7 +484,7 @@ test("get_indexing_status keeps local shared snapshot entries when path extracti
         };
 
         const handlers = new ToolHandlers(context as any, snapshotManager);
-        const result = await handlers.handleGetIndexingStatus({ path: secondCodebasePath });
+        const result = await handlers.handleGetIndexingStatus({ path: secondCodebasePath, refresh: true });
 
         assert.equal(result.isError, undefined);
         assert.match(result.content[0].text, /fully indexed and ready for search/);

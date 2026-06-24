@@ -23,6 +23,7 @@ import {
 } from './types';
 import {
     REMOTE_INDEX_MANIFEST_COLLECTION,
+    REMOTE_INDEX_MANIFEST_VECTOR_DIMENSION,
     createRemoteIndexManifestDocument,
     getRemoteIndexManifestDocumentId,
     getRemoteIndexManifestKey,
@@ -552,7 +553,7 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         try {
             await this.createCollection(
                 REMOTE_INDEX_MANIFEST_COLLECTION,
-                1,
+                REMOTE_INDEX_MANIFEST_VECTOR_DIMENSION,
                 'Hitmux Context Engine remote index status manifests'
             );
         } catch (error) {

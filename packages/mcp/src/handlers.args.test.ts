@@ -143,6 +143,19 @@ test("index_codebase rejects malformed control arguments before path resolution"
     }
 });
 
+test("get_indexing_status rejects malformed refresh argument before status lookup", async () => {
+    const handlers = createHandlers();
+
+    const result = await handlers.handleGetIndexingStatus({
+        path: "/tmp/does-not-exist",
+        refresh: "true",
+    });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /refresh/);
+    assert.match(result.content[0].text, /boolean/);
+});
+
 test("index_codebase dryRun previews files without starting indexing", async () => {
     await withTempDir(async (tempRoot) => {
         const project = path.join(tempRoot, "repo");
@@ -425,6 +438,7 @@ test("get_indexing_status not-indexed response recommends project ignore file", 
         assert.match(result.content[0].text, /\.hceignore/);
         assert.match(result.content[0].text, /\.\*ignore/);
         assert.match(result.content[0].text, /index_codebase/);
+        assert.match(result.content[0].text, /refresh=true/);
     });
 });
 
