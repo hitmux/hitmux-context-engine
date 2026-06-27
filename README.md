@@ -1,5 +1,7 @@
 # Hitmux Context Engine
 
+Language: English | [中文](README.zh-CN.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
+
 Semantic code search for MCP clients.
 
 Hitmux Context Engine indexes a repository into Milvus-compatible vector storage, then gives Claude Code, OpenAI Codex CLI, OpenCode, Cursor, Windsurf, and other MCP clients focused tools for finding code by behavior, symbol, workflow, or file role.
@@ -13,60 +15,69 @@ Use it when an AI coding agent needs more than text grep:
 
 - Search indexed code with natural-language or identifier-heavy queries.
 - Prefer implementation files while still surfacing related tests, docs, config, and exports when useful.
-- Trace definitions, references, imports, exports, and related tests for a symbol.
 - Keep project configuration in simple `config.conf` files instead of per-client environment setup.
 
-Typical MCP workflow:
+Typical first-use workflow:
 
 ```text
-Index this codebase
+hce index .
 Check the indexing status
 Find the handler that validates MCP tool arguments
-Trace the symbol createMcpConfig
 ```
 
 ## Quick Start
 
-Create the runtime config:
+Create or complete the runtime config:
 
 ```bash
-mkdir -p ~/.hitmux-context-engine
-cat > ~/.hitmux-context-engine/config.conf << 'EOF'
-embeddingProvider = OpenRouter
-embeddingModel = qwen/qwen3-embedding-4b
-openrouterApiKey = sk-or-your-openrouter-api-key
-milvusAddress = localhost:19530
-EOF
+npm install -g @hitmux/hce@latest
+hce init
 ```
 
-Add the MCP server to Claude Code:
+Then edit `~/.hitmux-context-engine/config.conf` and fill in the provider key. Check local config and connectivity:
 
 ```bash
-claude mcp add hitmux-context-engine -- npx -y @hitmux/hce@latest
+hce doctor
 ```
 
-Or add it to OpenAI Codex CLI:
+For Claude Code, add the MCP server:
 
 ```bash
-codex mcp add hitmux-context-engine -- npx -y @hitmux/hce@latest
+claude mcp add hitmux-context-engine -- hce
+```
+
+For OpenAI Codex CLI, add the MCP server:
+
+```bash
+codex mcp add hitmux-context-engine -- hce
 ```
 
 The full package alias `@hitmux/hitmux-context-engine` and the original MCP package `@hitmux/hitmux-context-engine-mcp` start the same server.
 
-Database note: Use Local Milvus with `milvusAddress = localhost:19530`. For self-hosted remote Milvus, replace it with the reachable host and port, and add `milvusToken` only if authentication is required. For Zilliz Cloud, use the cloud public endpoint and add `milvusToken` with your Personal Key. Other database backends are not selectable from `config.conf`.
+Database note: Use Local Milvus with `milvusAddress = localhost:19530`. For self-hosted remote Milvus, replace it with the reachable host and port, and add `milvusToken` only if authentication is required. For a free Zilliz Cloud database, sign up at https://cloud.zilliz.com/signup, then use the cloud public endpoint and add `milvusToken` with your Personal Key. Other database backends are not selectable from `config.conf`.
 
-Then open your MCP client in a repository and ask:
+For a new repository, create the first index from the repository root before relying on MCP search:
+
+```bash
+hce index .
+```
+
+Then open your MCP client in the repository and ask:
 
 ```text
-Index this codebase
 Check the indexing status
 Find functions that handle user authentication
-Trace the symbol AuthService
+```
+
+You can also check status from a shell:
+
+```bash
+hce status .
 ```
 
 More client examples, including Cursor, Windsurf, Claude Desktop, Gemini CLI, Qwen Code, VS Code MCP, Cline, and Roo Code, are in [docs/quick-start.md](docs/quick-start.md).
 
-For a local source checkout, run `./scripts/install-local-global.sh` to build the workspace and install a user-level `hitmux-context-engine-mcp` command from the current checkout. Run the script with `sudo` to install the command globally. Then use that command in MCP clients, for example `claude mcp add hitmux-context-engine -- hitmux-context-engine-mcp` or `codex mcp add hitmux-context-engine -- hitmux-context-engine-mcp`.
+For a local source checkout, run `./scripts/install-local-global.sh` to build the workspace and install a user-level `hitmux-context-engine-mcp` command from the current checkout. Run the script with `sudo` to install the command globally. Published-package Claude Code and Codex CLI setup uses the global `hce` command shown above.
 
 ## Configuration
 
@@ -138,3 +149,11 @@ MIT. See [LICENSE](LICENSE).
 ## Acknowledgements
 
 This project is based on the core of [zilliztech/claude-context](https://github.com/zilliztech/claude-context). Thanks to the [Linux Do community](https://linux.do) for its support.
+
+## Screenshots
+
+![Hitmux Context Engine screenshot 1](img/English_1.jpg)
+
+![Hitmux Context Engine screenshot 2](img/English_2.jpg)
+
+![Hitmux Context Engine screenshot 3](img/English_3.jpg)

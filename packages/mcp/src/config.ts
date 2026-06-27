@@ -47,7 +47,7 @@ export interface CodebaseSnapshotV1 {
 // New format (v2) - structured with codebase information
 
 export type RequestSplitterType = "ast" | "langchain";
-export type CodebaseStatsSource = "index_run" | "collection_row_count";
+export type CodebaseStatsSource = "index_run" | "collection_row_count" | "remote_manifest";
 
 // Request-level indexing options stored with a codebase's snapshot entry.
 export interface CodebaseIndexOptions {
@@ -95,6 +95,7 @@ export type CodebaseInfo =
 export interface CodebaseSnapshotV2 {
     formatVersion: "v2";
     codebases: Record<string, CodebaseInfo>; // codebasePath -> CodebaseInfo
+    removedCodebases?: Record<string, string>; // codebasePath -> removal timestamp tombstone
     lastUpdated: string;
 }
 
@@ -146,24 +147,6 @@ export function getEmbeddingModelForProvider(provider: string): string {
             return selectedModel;
         }
     }
-}
-
-function getPositiveIntegerFromConfig(
-    name: Parameters<typeof configManager.getNumber>[0],
-): number | undefined {
-    const parsedValue = configManager.getNumber(name);
-    if (parsedValue === undefined) {
-        return undefined;
-    }
-
-    if (Number.isInteger(parsedValue) && parsedValue > 0) {
-        return parsedValue;
-    }
-
-    console.warn(
-        `[DEBUG] Ignoring invalid config.${name}: ${parsedValue}. Expected a positive integer.`,
-    );
-    return undefined;
 }
 
 export function getBooleanFromConfig(
@@ -223,7 +206,7 @@ function getCodebaseIdentityModeFromConfig(): CodebaseIdentityMode | undefined {
     return undefined;
 }
 
-export function createMcpConfig(): ContextMcpConfig {
+export function createMcpConfig(defaultServerVersion = "0.0.0"): ContextMcpConfig {
     console.log(
         `[DEBUG] Global config file: ${configManager.getGlobalConfigFilePath()}`,
     );
@@ -269,7 +252,7 @@ export function createMcpConfig(): ContextMcpConfig {
         name:
             configManager.getString("mcpServerName") ||
             "Hitmux Context Engine MCP Server",
-        version: configManager.getString("mcpServerVersion") || "1.0.0",
+        version: configManager.getString("mcpServerVersion") || defaultServerVersion,
         // Embedding provider configuration
         embeddingProvider: embeddingProvider || "OpenRouter",
         embeddingModel: getEmbeddingModelForProvider(
@@ -397,7 +380,7 @@ Index management commands:
  hce rm <name|path>       Delete one collection by collection name or repo path
  hce index                Sync or create the index for the current directory
  hce index <name|path>    Sync or create by collection name or repo path
- hce index --all          Force rebuild all known repo indexes
+ hce index --all --force  Force rebuild all known repo indexes
 
 Configuration:
  Runtime configuration is read from both files, with project config overriding
@@ -488,8 +471,8 @@ Common config.conf fields:
 Example config.conf:
  embeddingProvider = OpenRouter
  embeddingModel = qwen/qwen3-embedding-4b
- # embeddingBatchSize = 32
- # embeddingConcurrency = 4
+ # embeddingBatchSize = 64
+ # embeddingConcurrency = 2
  openrouterApiKey = sk-or-xxx
  milvusAddress = localhost:19530
  milvusToken = your-token

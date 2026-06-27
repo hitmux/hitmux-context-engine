@@ -210,6 +210,70 @@ describe('AstCodeSplitter symbol metadata', () => {
         });
     });
 
+    it('does not split nested TypeScript locals into standalone definition chunks', async () => {
+        const splitter = new AstCodeSplitter(2000, 0);
+        const code = [
+            'export const topLevelValue = 1;',
+            '',
+            'export const makeThing = () => {',
+            '    const callback = () => {',
+            '        const nestedValue = 3;',
+            '        return nestedValue;',
+            '    };',
+            '',
+            '    return callback();',
+            '};',
+            '',
+            'export function outer() {',
+            '    const innerValue = 2;',
+            '    return innerValue;',
+            '}',
+        ].join('\n');
+
+        const chunks = await splitter.split(code, 'typescript', '/repo/src/example.ts');
+        const symbols = chunks
+            .map((chunk) => chunk.metadata.symbolName)
+            .filter((symbol): symbol is string => typeof symbol === 'string');
+
+        expect(symbols).toEqual(expect.arrayContaining([
+            'topLevelValue',
+            'makeThing',
+            'outer',
+        ]));
+        expect(symbols).not.toEqual(expect.arrayContaining([
+            'callback',
+            'nestedValue',
+            'innerValue',
+        ]));
+    });
+
+    it('keeps regex fallback focused on top-level TypeScript declarations', async () => {
+        const splitter = new AstCodeSplitter(2000, 0);
+        (splitter as unknown as { getParser: () => never }).getParser = () => {
+            throw new Error('forced fallback');
+        };
+
+        const code = [
+            'export const topLevelValue = 1;',
+            '',
+            'export function outer() {',
+            '    const innerValue = 2;',
+            '    return innerValue;',
+            '}',
+        ].join('\n');
+
+        const chunks = await splitter.split(code, 'typescript', '/repo/src/example.ts');
+        const symbols = chunks
+            .map((chunk) => chunk.metadata.symbolName)
+            .filter((symbol): symbol is string => typeof symbol === 'string');
+
+        expect(symbols).toEqual(expect.arrayContaining([
+            'topLevelValue',
+            'outer',
+        ]));
+        expect(symbols).not.toContain('innerValue');
+    });
+
     it('marks TypeScript re-export chunks explicitly', async () => {
         const splitter = new AstCodeSplitter(2000, 0);
         const code = [

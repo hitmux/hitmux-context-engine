@@ -29,6 +29,7 @@ function expectedMetadataHydrationOutputFields(outputFields: string[]): string[]
         'relativePath',
         'startLine',
         'endLine',
+        'fileExtension',
         ...STRUCTURED_METADATA_FIELDS,
     ])];
 }
@@ -216,7 +217,7 @@ describe('Milvus structured metadata schema', () => {
             isDefinition: true,
             sourceStartLine: 10,
             sourceEndLine: 12,
-            pathTokens: ['src', 'buildRoom', 'ts'],
+            pathTokens: ['src', 'buildRoom', 'build', 'Room', 'ts'],
             symbols: ['buildRoom'],
             definitionIdentifiers: ['buildRoom'],
         });
@@ -322,6 +323,7 @@ describe('Milvus structured metadata schema', () => {
             relativePath: 'src/legacyRoom.ts',
             startLine: 3,
             endLine: 4,
+            fileExtension: '.ts',
         }], ['metadata']);
         const metadata = JSON.parse(rows[0].metadata);
 
@@ -329,11 +331,40 @@ describe('Milvus structured metadata schema', () => {
         expect(metadata).toMatchObject({
             language: 'typescript',
             fileName: 'legacyRoom.ts',
+            fileExtension: '.ts',
             sourceStartLine: 3,
             sourceEndLine: 4,
         });
         expect(metadata).not.toHaveProperty('primarySymbol');
         expect(metadata).not.toHaveProperty('symbolKind');
+    });
+
+    it('merges P4 definition identifiers into legacy metadata arrays during hydration', () => {
+        const rows = hydrateSlimMetadataRows([{
+            metadata: JSON.stringify({
+                language: 'c',
+                symbols: ['legacyOnly'],
+                definitionIdentifiers: ['legacyOnly'],
+            }),
+            content: 'static void lrangeCommand(client *c) {\n}\n{ .handler = xreadCommand },',
+            relativePath: 'src/commands.c',
+            startLine: 1,
+            endLine: 3,
+            fileExtension: '.c',
+        }], ['metadata']);
+        const metadata = JSON.parse(rows[0].metadata);
+
+        expect(metadata.fileExtension).toBe('.c');
+        expect(metadata.definitionIdentifiers).toEqual(expect.arrayContaining([
+            'legacyOnly',
+            'lrangeCommand',
+            'xreadCommand',
+        ]));
+        expect(metadata.symbols).toEqual(expect.arrayContaining([
+            'legacyOnly',
+            'lrangeCommand',
+            'xreadCommand',
+        ]));
     });
 
     it.each([
@@ -435,6 +466,30 @@ describe('Milvus structured metadata schema', () => {
                 language: 'typescript',
             }),
         }]);
+    });
+
+    it('omits empty expr from gRPC count queries', async () => {
+        const database = Object.create(MilvusVectorDatabase.prototype) as MilvusVectorDatabase;
+        const query = jest.fn().mockResolvedValue({
+            status: { error_code: 'Success' },
+            data: [{ 'count(*)': '42' }],
+        });
+
+        (database as any).initializationPromise = Promise.resolve();
+        (database as any).client = {
+            hasCollection: jest.fn().mockResolvedValue({ value: true }),
+            getLoadState: jest.fn().mockResolvedValue({ state: 3 }),
+            loadCollection: jest.fn().mockResolvedValue({}),
+            query,
+        };
+
+        const rowCount = await database.getCollectionRowCount('count_query_test');
+
+        expect(rowCount).toBe(42);
+        expect(query).toHaveBeenCalledWith({
+            collection_name: 'count_query_test',
+            output_fields: ['count(*)'],
+        });
     });
 
     it.each([
@@ -613,6 +668,27 @@ describe('Milvus structured metadata schema', () => {
         expect(hybridFields).toEqual(expect.arrayContaining([...STRUCTURED_METADATA_FIELDS]));
     });
 
+    it('treats a gRPC remote manifest collection already-exists response as a successful concurrent create', async () => {
+        const database = Object.create(MilvusVectorDatabase.prototype) as MilvusVectorDatabase;
+        const hasCollection = jest.fn()
+            .mockResolvedValueOnce(false)
+            .mockResolvedValueOnce(true);
+        const createCollection = jest.fn().mockRejectedValue(new Error('collection already exists'));
+
+        (database as any).hasCollection = hasCollection;
+        (database as any).createCollection = createCollection;
+
+        await expect((database as any).ensureIndexManifestCollection()).resolves.toBeUndefined();
+
+        expect(createCollection).toHaveBeenCalledTimes(1);
+        expect(createCollection).toHaveBeenCalledWith(
+            'hitmux_index_manifests',
+            2,
+            'Hitmux Context Engine remote index status manifests'
+        );
+        expect(hasCollection).toHaveBeenCalledTimes(2);
+    });
+
     it('adds structured metadata fields to REST regular and hybrid collections', async () => {
         const database = Object.create(MilvusRestfulVectorDatabase.prototype) as MilvusRestfulVectorDatabase;
         const createRequests: any[] = [];
@@ -640,6 +716,27 @@ describe('Milvus structured metadata schema', () => {
 
         expect(regularFields).toEqual(expect.arrayContaining([...STRUCTURED_METADATA_FIELDS]));
         expect(hybridFields).toEqual(expect.arrayContaining([...STRUCTURED_METADATA_FIELDS]));
+    });
+
+    it('treats a REST remote manifest collection already-exists response as a successful concurrent create', async () => {
+        const database = Object.create(MilvusRestfulVectorDatabase.prototype) as MilvusRestfulVectorDatabase;
+        const hasCollection = jest.fn()
+            .mockResolvedValueOnce(false)
+            .mockResolvedValueOnce(true);
+        const createCollection = jest.fn().mockRejectedValue(new Error('collection already exists'));
+
+        (database as any).hasCollection = hasCollection;
+        (database as any).createCollection = createCollection;
+
+        await expect((database as any).ensureIndexManifestCollection()).resolves.toBeUndefined();
+
+        expect(createCollection).toHaveBeenCalledTimes(1);
+        expect(createCollection).toHaveBeenCalledWith(
+            'hitmux_index_manifests',
+            2,
+            'Hitmux Context Engine remote index status manifests'
+        );
+        expect(hasCollection).toHaveBeenCalledTimes(2);
     });
 
     it('uses structured output fields when a gRPC collection description has schema v2', async () => {

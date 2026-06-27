@@ -14,14 +14,19 @@ export function truncateContent(content: string, maxLength: number): string {
  * Ensure path is absolute. If relative path is provided, resolve it properly.
  */
 export function ensureAbsolutePath(inputPath: string): string {
-    // If already absolute, return as is
     if (path.isAbsolute(inputPath)) {
         return inputPath;
     }
 
-    // For relative paths, resolve to absolute path
-    const resolved = path.resolve(inputPath);
-    return resolved;
+    return path.resolve(inputPath);
+}
+
+export function requireAbsolutePath(inputPath: string): string {
+    if (path.isAbsolute(inputPath)) {
+        return inputPath;
+    }
+
+    throw new Error(`Path must be absolute. Received relative path '${inputPath}'.`);
 }
 
 export function trackCodebasePath(codebasePath: string): void {

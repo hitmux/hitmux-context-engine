@@ -1,3 +1,5 @@
+import type { RemoteIndexManifest } from './remote-index-manifest';
+
 // Interface definitions
 export interface VectorDocument {
     id: string;
@@ -199,6 +201,23 @@ export interface VectorDatabase {
      * Callers should treat -1 as "unknown" and NOT as "empty".
      */
     getCollectionRowCount(collectionName: string): Promise<number>;
+
+    /**
+     * Read a remote index status manifest for one codebase inside a collection.
+     * Implementations that do not support remote manifests may omit this method;
+     * callers must report manifest unavailability rather than scan chunk rows.
+     */
+    readIndexManifest?(collectionName: string, codebasePath: string): Promise<RemoteIndexManifest | null>;
+
+    /**
+     * Write or replace a remote index status manifest.
+     */
+    writeIndexManifest?(manifest: RemoteIndexManifest): Promise<void>;
+
+    /**
+     * Delete a remote index status manifest when the owning collection is cleared.
+     */
+    deleteIndexManifest?(collectionName: string, codebasePath: string): Promise<void>;
 }
 
 /**

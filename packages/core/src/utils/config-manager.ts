@@ -369,12 +369,12 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     {
         key: 'embeddingBatchSize',
         description: 'Embedding batch size for index operations.',
-        example: '32'
+        example: '64'
     },
     {
         key: 'embeddingConcurrency',
         description: 'Embedding request concurrency for index operations.',
-        example: '4'
+        example: '2'
     },
     {
         key: 'fileProcessingConcurrency',

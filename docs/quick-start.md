@@ -1,37 +1,39 @@
 # Quick Start
 
+Language: English | [中文](quick-start.zh-CN.md) | [Español](quick-start.es.md) | [Français](quick-start.fr.md) | [Deutsch](quick-start.de.md) | [日本語](quick-start.ja.md) | [한국어](quick-start.ko.md)
+
 This page shows how to start Hitmux Context Engine from MCP clients. Product configuration lives in `~/.hitmux-context-engine/config.conf` or `.hitmux-context-engine/config.conf` inside a project. MCP client configuration only starts the stdio server.
 
 ## Product Config
 
-Create the runtime config first:
+Install the short CLI globally and create or complete the runtime config:
 
 ```bash
-mkdir -p ~/.hitmux-context-engine
-cat > ~/.hitmux-context-engine/config.conf << 'EOF'
-embeddingProvider = OpenRouter
-embeddingModel = qwen/qwen3-embedding-4b
-openrouterApiKey = sk-or-your-openrouter-api-key
-milvusAddress = localhost:19530
-EOF
+npm install -g @hitmux/hce@latest
+hce init
 ```
 
-Database notes: Local Milvus uses `milvusAddress = localhost:19530`. For a self-hosted remote Milvus instance, use the reachable host and port; set `milvusToken` only when the server requires authentication. For Zilliz Cloud, use the cloud public endpoint as `milvusAddress` and put the Personal Key in `milvusToken`. `config.conf` cannot switch to SQLite, Chroma, Qdrant, LanceDB, or other database backends.
+Then edit `~/.hitmux-context-engine/config.conf`, fill in the provider key, and run `hce doctor` to check config parsing plus embedding/vector database connectivity. Use `hce doctor --no-connectivity` when you only want local checks.
+
+Database notes: Local Milvus uses `milvusAddress = localhost:19530`. For a self-hosted remote Milvus instance, use the reachable host and port; set `milvusToken` only when the server requires authentication. For a free Zilliz Cloud database, sign up at https://cloud.zilliz.com/signup, then use the cloud public endpoint as `milvusAddress` and put the Personal Key in `milvusToken`. `config.conf` cannot switch to SQLite, Chroma, Qdrant, LanceDB, or other database backends.
 
 Hitmux Context Engine does not inherit system proxy environment variables by default. Configure `embeddingUseSystemProxy` and `databaseUseSystemProxy` only when the embedding provider or vector database must use a proxy; see [Configuration](configuration.md#system-proxy).
 
-`@hitmux/hce`, `@hitmux/hitmux-context-engine`, and `@hitmux/hitmux-context-engine-mcp` all start the same MCP server. The examples below use the short package name:
+`@hitmux/hce`, `@hitmux/hitmux-context-engine`, and `@hitmux/hitmux-context-engine-mcp` all start the same MCP server. Plain `hce` with no arguments is the MCP stdio server mode used by clients:
 
 ```bash
-npx -y @hitmux/hce@latest
+hce
 ```
+
+For shell diagnostics after indexing, run `hce status .` from the repository root.
 
 ## Claude Code
 
-Add the server directly:
+Install globally and add the server:
 
 ```bash
-claude mcp add hitmux-context-engine -- npx -y @hitmux/hce@latest
+npm install -g @hitmux/hce@latest
+claude mcp add hitmux-context-engine -- hce
 ```
 
 After editing `config.conf`, reconnect the server:
@@ -42,18 +44,19 @@ After editing `config.conf`, reconnect the server:
 
 ## OpenAI Codex CLI
 
-Add the server directly:
+Install globally and add the server:
 
 ```bash
-codex mcp add hitmux-context-engine -- npx -y @hitmux/hce@latest
+npm install -g @hitmux/hce@latest
+codex mcp add hitmux-context-engine -- hce
 ```
 
 You can also edit `~/.codex/config.toml` directly:
 
 ```toml
 [mcp_servers.hitmux-context-engine]
-command = "npx"
-args = ["-y", "@hitmux/hce@latest"]
+command = "hce"
+args = []
 startup_timeout_sec = 20
 ```
 
@@ -67,7 +70,7 @@ OpenCode config uses the `mcp` object in `opencode.json` or `opencode.jsonc`. Fo
   "mcp": {
     "hitmux-context-engine": {
       "type": "local",
-      "command": ["npx", "-y", "@hitmux/hce@latest"],
+      "command": ["hce"],
       "enabled": true
     }
   }
@@ -87,8 +90,8 @@ Add Hitmux Context Engine as a custom local stdio server:
 | Server ID | `hitmux-context-engine` |
 | Name | `Hitmux Context Engine` |
 | Transport Type | `stdio` |
-| Command | `npx` |
-| Arguments | `-y @hitmux/hce@latest` |
+| Command | `hce` |
+| Arguments | |
 
 Enable the app toggles for the clients you want CC Switch to manage. CC Switch writes the corresponding client config on sync; restart the target CLI after changing MCP settings.
 
@@ -102,21 +105,21 @@ Standard config:
 {
   "mcpServers": {
     "hitmux-context-engine": {
-      "command": "npx",
-      "args": ["-y", "@hitmux/hce@latest"]
+      "command": "hce",
+      "args": []
     }
   }
 }
 ```
 
-On Windows, if the client cannot find the npm shim, change `command` to `npx.cmd`:
+On Windows, if the client cannot find the global npm shim, change `command` to `hce.cmd`:
 
 ```json
 {
   "mcpServers": {
     "hitmux-context-engine": {
-      "command": "npx.cmd",
-      "args": ["-y", "@hitmux/hce@latest"]
+      "command": "hce.cmd",
+      "args": []
     }
   }
 }
@@ -143,8 +146,8 @@ VS Code native MCP config usually uses a `servers` structure. Example user-level
   "servers": {
     "hitmux-context-engine": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@hitmux/hce@latest"]
+      "command": "hce",
+      "args": []
     }
   }
 }
@@ -173,8 +176,7 @@ If the install directory is not in `PATH`, add it to `PATH` or use the wrapper's
 Local wrapper examples:
 
 ```bash
-claude mcp add hitmux-context-engine -- hitmux-context-engine-mcp
-codex mcp add hitmux-context-engine -- hitmux-context-engine-mcp
+hitmux-context-engine-mcp
 ```
 
 JSON clients:
@@ -217,10 +219,15 @@ CC Switch:
 
 ## Use In A Repository
 
-Open any code repository, then ask your MCP client:
+For a new repository, create the first index from the repository root:
+
+```bash
+hce index .
+```
+
+Then open your MCP client in the repository and ask:
 
 ```text
-Index this codebase
 Check the indexing status
 Find functions that handle user authentication
 ```

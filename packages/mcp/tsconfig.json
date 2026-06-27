@@ -23,7 +23,8 @@
     "exclude": [
         "dist",
         "node_modules",
-        "src/**/*.test.ts"
+        "src/**/*.test.ts",
+        "src/test-silence.ts"
     ],
     "references": [
         {

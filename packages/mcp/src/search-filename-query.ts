@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 
-const FILE_TOKEN_PATTERN = /(?:^|[\s"'`(<{\[])([A-Za-z0-9_.@+~-]+(?:[\\/][A-Za-z0-9_.@+~-]+)*\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})(?=$|[\s"'`),}\]>:;!?])/g;
+const FILE_TOKEN_PATTERN = /(?:^|[\s"'`(<{[])([A-Za-z0-9_.@+~-]+(?:[\\/][A-Za-z0-9_.@+~-]+)*\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})(?=$|[\s"'`),}\]>:;!?])/g;
 const MAX_EXACT_BASENAME_INDEX_ROWS = 20;
 
 interface QueryableVectorDatabase {
@@ -162,7 +162,7 @@ function isLikelyFileToken(normalizedPath: string): boolean {
 function isStandaloneFilenameLikeQuery(query: string, normalizedPath: string): boolean {
     const trimmedQuery = query
         .trim()
-        .replace(/^[\s"'`(<{\[]+/, "")
+        .replace(/^[\s"'`(<{[]+/, "")
         .replace(/[\s"'`),}\]>:;!?]+$/, "");
     return normalizeQueryPath(trimmedQuery) === normalizedPath;
 }

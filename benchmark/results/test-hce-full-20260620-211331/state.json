@@ -1,0 +1,15 @@
+{
+  "runId": "2026-06-20T13-13-44.464Z",
+  "status": "indexing",
+  "project": "ClaudeCode",
+  "collectionName": "hybrid_code_chunks_87954d0b",
+  "updatedAt": "2026-06-20T13:14:04.183Z",
+  "temporaryIndexes": [
+    {
+      "project": "ClaudeCode",
+      "projectRoot": "/opt/test-hce/ClaudeCode",
+      "collectionName": "hybrid_code_chunks_87954d0b",
+      "createdAt": "2026-06-20T13:14:04.183Z"
+    }
+  ]
+}

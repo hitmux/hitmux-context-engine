@@ -165,6 +165,7 @@ describe('Context lexical search supplement', () => {
         expect(exactFilter).toContain('primarySymbol');
         expect(exactFilter).toContain('basename');
         expect(exactFilter).toContain('isDefinition == true');
+        expect(exactFilter).not.toContain('content like');
         expect(exactFilter).not.toContain('metadata like');
     });
 
@@ -245,16 +246,25 @@ describe('Context lexical search supplement', () => {
             SEARCH_OUTPUT_FIELDS,
             200
         );
-        expect(vectorDatabase.query).toHaveBeenNthCalledWith(
-            2,
-            expect.any(String),
-            expect.stringContaining('RenderWorkerBridge'),
-            SEARCH_OUTPUT_FIELDS,
-            80
-        );
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
     });
 
-    it('rejects lexical supplement search when structured fields are missing', async () => {
+    it('can disable lexical supplement for benchmark runs', async () => {
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        await context.semanticSearch('/repo', 'RenderWorkerBridge', 5, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        expect(vectorDatabase.query).not.toHaveBeenCalled();
+    });
+
+    it('skips lexical supplement when structured fields are missing', async () => {
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.query.mockRejectedValueOnce(new Error('field primarySymbol not found in schema'));
         const context = new Context({
@@ -263,8 +273,10 @@ describe('Context lexical search supplement', () => {
             vectorDatabase,
         });
 
-        await expect(context.semanticSearch('/repo', 'RenderWorkerBridge', 5, 0.3)).rejects.toThrow('unsupported search schema');
+        const results = await context.semanticSearch('/repo', 'RenderWorkerBridge', 5, 0.3);
+
         expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
+        expect(results[0].relativePath).toBe('server/src/rooms/GameRoom.ts');
     });
 
     it.each(['basename', 'fileExtension'])('keeps filename-like search usable when structured filename field %s is missing', async (field) => {
@@ -282,7 +294,7 @@ describe('Context lexical search supplement', () => {
         expect(results[0].relativePath).toBe('server/src/rooms/GameRoom.ts');
     });
 
-    it('queries broad lexical candidates when exact rows do not contain enough owner-quality matches', async () => {
+    it('does not query broad lexical candidates when exact rows do not contain enough owner-quality matches', async () => {
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.query
             .mockResolvedValueOnce(Array.from({ length: 5 }, (_, index) => createRow({
@@ -297,20 +309,7 @@ describe('Context lexical search supplement', () => {
                     basename: `renderWorkerBridgeReference${index}`,
                     symbols: ['RenderWorkerBridge'],
                 },
-            })))
-            .mockResolvedValueOnce([createRow({
-                id: 'render-worker-bridge-definition',
-                content: 'export class RenderWorkerBridge {}',
-                relativePath: 'src/workers/bridge/renderWorkerBridge.ts',
-                startLine: 28,
-                endLine: 40,
-                metadata: {
-                    language: 'typescript',
-                    fileName: 'renderWorkerBridge.ts',
-                    basename: 'renderWorkerBridge',
-                    definitionIdentifiers: ['RenderWorkerBridge'],
-                },
-            })]);
+            })));
         const context = new Context({
             hybridMode: false,
             embedding: new TestEmbedding(),
@@ -319,7 +318,9 @@ describe('Context lexical search supplement', () => {
 
         await context.semanticSearch('/repo', 'RenderWorkerBridge', 5, 0.3);
 
-        expect(vectorDatabase.query).toHaveBeenCalledTimes(2);
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
+        expect(vectorDatabase.query.mock.calls[0][1]).not.toContain('content like');
+        expect(vectorDatabase.query.mock.calls[0][1]).not.toContain(' like ');
     });
 
     it('does not query broad lexical candidates when exact anchor candidates fill the needed pool', async () => {
@@ -824,7 +825,6 @@ describe('Context lexical search supplement', () => {
         const results = await context.semanticSearch('/repo', 'FooRegistry config definitions', 10, 0.3);
         const paths = results.map(result => result.relativePath);
         const exactFilter = String(vectorDatabase.query.mock.calls[0][1]);
-        const broadFilter = String(vectorDatabase.query.mock.calls[1][1]);
 
         expect(paths[0]).toBe('src/foo/FooRegistry.ts');
         expect(paths.indexOf('src/foo/FooRegistry.ts')).toBeLessThan(paths.indexOf('src/config/configDefinitions.ts'));
@@ -832,11 +832,10 @@ describe('Context lexical search supplement', () => {
         expect(paths.indexOf('src/foo/FooRegistry.ts')).toBeLessThan(paths.indexOf('src/foo/FooRegistry.test.ts'));
         expect(paths.indexOf('src/foo/FooRegistry.ts')).toBeLessThan(paths.indexOf('docs/foo/README.md'));
         expect(exactFilter).toContain('FooRegistry');
-        expect(broadFilter).toContain('FooRegistry');
         expect(exactFilter).not.toContain('config');
-        expect(broadFilter).not.toContain('config');
         expect(exactFilter).not.toContain('definitions');
-        expect(broadFilter).not.toContain('definitions');
+        expect(exactFilter).not.toContain(' like ');
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
     });
 
     it('does not let weak multi-token descriptors expand recall when a strong anchor exists', async () => {
@@ -879,17 +878,14 @@ describe('Context lexical search supplement', () => {
 
         const results = await context.semanticSearch('/repo', 'FooRegistry config manager system', 10, 0.3);
         const exactFilter = String(vectorDatabase.query.mock.calls[0][1]);
-        const broadFilter = String(vectorDatabase.query.mock.calls[1][1]);
 
         expect(results[0].relativePath).toBe('src/foo/FooRegistry.ts');
         expect(exactFilter).toContain('FooRegistry');
-        expect(broadFilter).toContain('FooRegistry');
         expect(exactFilter).not.toContain('config');
         expect(exactFilter).not.toContain('manager');
         expect(exactFilter).not.toContain('system');
-        expect(broadFilter).not.toContain('config');
-        expect(broadFilter).not.toContain('manager');
-        expect(broadFilter).not.toContain('system');
+        expect(exactFilter).not.toContain(' like ');
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
     });
 
     it('recalls literal anchors for HTTP paths, env vars, and dotted config keys', async () => {
@@ -1224,6 +1220,102 @@ describe('Context lexical search supplement', () => {
         expect(paths.indexOf('src/config/foo-registry.json')).toBeLessThan(paths.indexOf('src/app/fooBootstrap.ts'));
     });
 
+    it('promotes package metadata files for dependency group queries without explicit targetRole', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'release-script',
+                    content: 'FastAPI dependency groups are mentioned while preparing a release.',
+                    relativePath: 'scripts/prepare_release.py',
+                    startLine: 10,
+                    endLine: 30,
+                    fileExtension: '.py',
+                    metadata: {
+                        language: 'python',
+                        fileName: 'prepare_release.py',
+                        basename: 'prepare_release',
+                    },
+                }),
+                createRow({
+                    id: 'pyproject',
+                    content: '[dependency-groups]\ndev = ["pytest"]\n# FastAPI packaging metadata',
+                    relativePath: 'pyproject.toml',
+                    startLine: 1,
+                    endLine: 12,
+                    fileExtension: '.toml',
+                    metadata: {
+                        language: 'toml',
+                        fileName: 'pyproject.toml',
+                        basename: 'pyproject',
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'FastAPI pyproject.toml dependency groups', 10, 0.3);
+        const paths = results.map(result => result.relativePath);
+
+        expect(paths.indexOf('pyproject.toml')).toBeLessThan(paths.indexOf('scripts/prepare_release.py'));
+        expect(results.find(result => result.relativePath === 'pyproject.toml')).toMatchObject({
+            fileRole: 'config',
+            isPrimary: true,
+        });
+    });
+
+    it('promotes build configuration files for CMake source list queries without explicit targetRole', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'app-implementation',
+                    content: 'Application implementation uses the compiled source list.',
+                    relativePath: 'src/main.c',
+                    startLine: 1,
+                    endLine: 25,
+                    fileExtension: '.c',
+                    metadata: {
+                        language: 'c',
+                        fileName: 'main.c',
+                        basename: 'main',
+                    },
+                }),
+                createRow({
+                    id: 'cmake-source-list',
+                    content: 'set(SOURCES main.c networking.c) # source file lists',
+                    relativePath: 'build/CMakeLists.txt',
+                    startLine: 1,
+                    endLine: 16,
+                    fileExtension: '.txt',
+                    metadata: {
+                        language: 'cmake',
+                        fileName: 'CMakeLists.txt',
+                        basename: 'CMakeLists',
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'CMake build configuration source file lists', 10, 0.3);
+        const paths = results.map(result => result.relativePath);
+
+        expect(paths.indexOf('build/CMakeLists.txt')).toBeLessThan(paths.indexOf('src/main.c'));
+        expect(results.find(result => result.relativePath === 'build/CMakeLists.txt')).toMatchObject({
+            fileRole: 'config',
+            isPrimary: true,
+        });
+    });
+
     it('allows explicitly requested README results to outrank implementation files', async () => {
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.query
@@ -1310,6 +1402,198 @@ describe('Context lexical search supplement', () => {
 
         expect(results[0].relativePath).toBe('src/styles/index.less');
         expect(results[1].relativePath).toBe('src/ui/interfaces/battle/manualCannonPanel.ts');
+    });
+
+    it('recalls route group owners for broad HTTP prefixes plus route descriptors', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'api-helper',
+                    content: 'export const request = client.create("/api/users");',
+                    relativePath: 'web/default/src/helpers/api.ts',
+                    startLine: 1,
+                    endLine: 12,
+                    metadata: {
+                        language: 'typescript',
+                        fileName: 'api.ts',
+                        basename: 'api',
+                    },
+                }),
+                createRow({
+                    id: 'api-router',
+                    content: 'func SetApiRouter(router *gin.Engine) { apiRouter := router.Group("/api") }',
+                    relativePath: 'router/api-router.go',
+                    startLine: 10,
+                    endLine: 42,
+                    fileExtension: '.go',
+                    metadata: {
+                        language: 'go',
+                        fileName: 'api-router.go',
+                        basename: 'api-router',
+                        symbols: ['SetApiRouter'],
+                        definitionIdentifiers: ['SetApiRouter'],
+                        pathTokens: ['router', 'api-router'],
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', '/api route groups', 5, 0.3);
+        const exactFilter = String(vectorDatabase.query.mock.calls[0][1]);
+
+        expect(results[0].relativePath).toBe('router/api-router.go');
+        expect(exactFilter).toContain('/api');
+        expect(exactFilter).not.toContain('route');
+        expect(exactFilter).not.toContain('group');
+        expect(exactFilter).not.toContain(' like ');
+    });
+
+    it('recalls route composition owners when group prefixes and child routes are split', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'tail-only',
+                    content: 'const chatCompletionsUrl = "/chat/completions";',
+                    relativePath: 'web/default/src/helpers/chat.ts',
+                    startLine: 1,
+                    endLine: 12,
+                    metadata: {
+                        language: 'typescript',
+                        fileName: 'chat.ts',
+                        basename: 'chat',
+                    },
+                }),
+                createRow({
+                    id: 'relay-router',
+                    content: 'func SetRelayRouter(router *gin.Engine) { v1 := router.Group("/v1"); v1.POST("/chat/completions", relayTextHelper) }',
+                    relativePath: 'router/relay-router.go',
+                    startLine: 20,
+                    endLine: 55,
+                    fileExtension: '.go',
+                    metadata: {
+                        language: 'go',
+                        fileName: 'relay-router.go',
+                        basename: 'relay-router',
+                        symbols: ['SetRelayRouter'],
+                        definitionIdentifiers: ['SetRelayRouter'],
+                        pathTokens: ['router', 'relay-router'],
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', '/v1/chat/completions route registration', 5, 0.3);
+        const exactFilter = String(vectorDatabase.query.mock.calls[0][1]);
+
+        expect(results[0].relativePath).toBe('router/relay-router.go');
+        expect(exactFilter).toContain('/v1');
+        expect(exactFilter).toContain('/chat/completions');
+    });
+
+    it('recalls nested route composition across multiple route groups', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'tail-only',
+                    content: 'const chatCompletionsUrl = "/chat/completions";',
+                    relativePath: 'web/default/src/helpers/chat.ts',
+                    startLine: 1,
+                    endLine: 12,
+                    metadata: {
+                        language: 'typescript',
+                        fileName: 'chat.ts',
+                        basename: 'chat',
+                    },
+                }),
+                createRow({
+                    id: 'nested-router',
+                    content: 'func SetRelayRouter(router *gin.Engine) { api := router.Group("/api"); v1 := api.Group("/v1"); v1.POST("/chat/completions", relayTextHelper) }',
+                    relativePath: 'router/relay-router.go',
+                    startLine: 20,
+                    endLine: 55,
+                    fileExtension: '.go',
+                    metadata: {
+                        language: 'go',
+                        fileName: 'relay-router.go',
+                        basename: 'relay-router',
+                        symbols: ['SetRelayRouter'],
+                        definitionIdentifiers: ['SetRelayRouter'],
+                        pathTokens: ['router', 'relay-router'],
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', '/api/v1/chat/completions route registration', 5, 0.3);
+        const exactFilter = String(vectorDatabase.query.mock.calls[0][1]);
+
+        expect(results[0].relativePath).toBe('router/relay-router.go');
+        expect(exactFilter).toContain('/api');
+        expect(exactFilter).toContain('/v1');
+        expect(exactFilter).toContain('/chat/completions');
+    });
+
+    it('does not add generic command registration candidates from descriptor phrases', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'command registration owner', 5, 0.3);
+
+        expect(vectorDatabase.query).not.toHaveBeenCalled();
+        expect(results).toEqual([]);
+    });
+
+    it('does not add generic adapter candidates from mapping descriptor phrases', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'central mapping table generic adapter', 5, 0.3);
+
+        expect(vectorDatabase.query).not.toHaveBeenCalled();
+        expect(results).toEqual([]);
+    });
+
+    it('does not add generic startup entry candidates from descriptor phrases', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'startup entry dispatch commands', 5, 0.3);
+
+        expect(vectorDatabase.query).not.toHaveBeenCalled();
+        expect(results).toEqual([]);
     });
 
     it('groups semantic-only results by explicit default implementation target', async () => {
@@ -1435,6 +1719,239 @@ describe('Context lexical search supplement', () => {
             'src/a.test.ts:1',
         ]);
         expect(results.map(result => result.isPrimary)).toEqual([true, true, true]);
+    });
+
+    it('uses file-level evidence aggregation before selecting default semantic search results', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValueOnce([
+            createVectorResult({
+                id: 'single',
+                content: 'single high semantic candidate for a broad query',
+                relativePath: 'src/single.ts',
+                startLine: 1,
+                endLine: 20,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                },
+            }, 0.96),
+            createVectorResult({
+                id: 'owner-primary',
+                content: 'export function ownerPrimary(): void {}',
+                relativePath: 'src/owner.ts',
+                startLine: 1,
+                endLine: 20,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                    chunkRole: 'definition',
+                },
+            }, 0.9),
+            createVectorResult({
+                id: 'owner-support',
+                content: 'export function registerOwnerRoute(): void {}',
+                relativePath: 'src/owner.ts',
+                startLine: 40,
+                endLine: 60,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                    chunkRole: 'definition',
+                },
+            }, 0.89),
+            createVectorResult({
+                id: 'owner-support-2',
+                content: 'export function dispatchOwnerAdapter(): void {}',
+                relativePath: 'src/owner.ts',
+                startLine: 80,
+                endLine: 100,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                    chunkRole: 'definition',
+                },
+            }, 0.88),
+        ]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'go', 2, 0.3);
+
+        expect(results.map(result => `${result.relativePath}:${result.startLine}`)).toEqual([
+            'src/owner.ts:1',
+            'src/single.ts:1',
+        ]);
+    });
+
+    it('keeps targetRole=all output ungrouped for lexical owner queries', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValueOnce([
+            createVectorResult({
+                id: 'first-a',
+                content: 'export function firstA(): void {}',
+                relativePath: 'src/a.ts',
+                startLine: 10,
+                endLine: 20,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                    chunkRole: 'definition',
+                },
+            }, 0.99),
+            createVectorResult({
+                id: 'second-a',
+                content: 'export function secondA(): void {}',
+                relativePath: 'src/a.ts',
+                startLine: 40,
+                endLine: 50,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                    chunkRole: 'definition',
+                },
+            }, 0.98),
+            createVectorResult({
+                id: 'test',
+                content: 'it("uses firstA", () => firstA());',
+                relativePath: 'src/a.test.ts',
+                startLine: 1,
+                endLine: 8,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'test',
+                    chunkRole: 'test_case',
+                },
+            }, 0.97),
+        ]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'firstA definition owner', 3, 0.3, undefined, {
+            targetRole: 'all',
+        });
+
+        expect(results.map(result => `${result.relativePath}:${result.startLine}`)).toEqual([
+            'src/a.ts:10',
+            'src/a.ts:40',
+            'src/a.test.ts:1',
+        ]);
+        expect(results.map(result => result.isPrimary)).toEqual([true, true, true]);
+    });
+
+    it('does not run central owner supplement for targetRole=all descriptor queries', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValueOnce([
+            createVectorResult({
+                id: 'semantic-result',
+                content: 'semantic result keeps original order',
+                relativePath: 'src/semantic.ts',
+                startLine: 1,
+                endLine: 20,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                },
+            }, 0.99),
+        ]);
+        vectorDatabase.query
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'central mapping table generic adapter', 5, 0.3, undefined, {
+            targetRole: 'all',
+        });
+
+        expect(vectorDatabase.query).not.toHaveBeenCalled();
+        expect(results.map(result => result.relativePath)).toEqual(['src/semantic.ts']);
+    });
+
+    it('does not apply inferred role intent while merging lexical rows for targetRole=all', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValueOnce([
+            createVectorResult({
+                id: 'package-metadata',
+                content: 'dependency groups',
+                relativePath: 'pyproject.toml',
+                startLine: 1,
+                endLine: 8,
+                fileExtension: '.toml',
+                metadata: {
+                    language: 'toml',
+                    fileRole: 'config',
+                    fileName: 'pyproject.toml',
+                    basename: 'pyproject',
+                },
+            }, 0.99),
+            createVectorResult({
+                id: 'implementation-loader',
+                content: 'dependency groups',
+                relativePath: 'src/loader.ts',
+                startLine: 1,
+                endLine: 20,
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                    chunkRole: 'definition',
+                },
+            }, 0.98),
+        ]);
+        vectorDatabase.query
+            .mockResolvedValueOnce([
+                createRow({
+                    id: 'package-metadata',
+                    content: 'dependency groups',
+                    relativePath: 'pyproject.toml',
+                    startLine: 1,
+                    endLine: 8,
+                    fileExtension: '.toml',
+                    metadata: {
+                        language: 'toml',
+                        fileRole: 'config',
+                        fileName: 'pyproject.toml',
+                        basename: 'pyproject',
+                    },
+                }),
+                createRow({
+                    id: 'implementation-loader',
+                    content: 'dependency groups',
+                    relativePath: 'src/loader.ts',
+                    startLine: 1,
+                    endLine: 20,
+                    metadata: {
+                        language: 'typescript',
+                        fileRole: 'implementation',
+                        fileName: 'loader.ts',
+                        basename: 'loader',
+                    },
+                }),
+            ])
+            .mockResolvedValueOnce([]);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'dependency groups', 2, 0.3, undefined, {
+            targetRole: 'all',
+        });
+
+        expect(results.map(result => result.relativePath)).toEqual([
+            'pyproject.toml',
+            'src/loader.ts',
+        ]);
+        expect(results.map(result => result.isPrimary)).toEqual([true, true]);
     });
 
     it('reranks implementation matches by structure before semantic drift inside the same group', async () => {
@@ -1816,13 +2333,7 @@ describe('Context lexical search supplement', () => {
             SEARCH_OUTPUT_FIELDS,
             200
         );
-        expect(vectorDatabase.query).toHaveBeenNthCalledWith(
-            2,
-            expect.any(String),
-            expect.stringContaining('TowerRegistry'),
-            SEARCH_OUTPUT_FIELDS,
-            80
-        );
+        expect(vectorDatabase.query).toHaveBeenCalledTimes(1);
     });
 
     it('deduplicates nested vector results from the same logical block', async () => {

@@ -65,12 +65,25 @@ function stringifyConf(config: Record<string, unknown>): string {
 
 test("createMcpConfig defaults to OpenRouter qwen embeddings", async () => {
     await withTempConfig({}, () => {
-        const config = createMcpConfig();
+        const config = createMcpConfig("0.1.24");
 
+        assert.equal(config.version, "0.1.24");
         assert.equal(config.embeddingProvider, "OpenRouter");
         assert.equal(config.embeddingModel, "qwen/qwen3-embedding-4b");
         assert.equal(config.embeddingUseSystemProxy, false);
         assert.equal(config.databaseUseSystemProxy, false);
+    });
+});
+
+test("createMcpConfig lets configured MCP server version override package version", async () => {
+    await withTempConfig({
+        project: {
+            mcpServerVersion: "custom-version"
+        }
+    }, () => {
+        const config = createMcpConfig("0.1.24");
+
+        assert.equal(config.version, "custom-version");
     });
 });
 
@@ -90,8 +103,8 @@ test("ensureGlobalConfigFile creates a commented default global config", async (
         assert.match(content, /fileProcessingConcurrency = 2/);
         assert.doesNotMatch(content, /\nembeddingBatchSize = /);
         assert.doesNotMatch(content, /\nembeddingConcurrency = /);
-        assert.match(content, /# embeddingBatchSize = 32/);
-        assert.match(content, /# embeddingConcurrency = 4/);
+        assert.match(content, /# embeddingBatchSize = 64/);
+        assert.match(content, /# embeddingConcurrency = 2/);
         assert.match(content, /# openrouterApiKey = sk-or-your-openrouter-api-key/);
         assert.match(content, /milvusAddress = localhost:19530/);
         assert.match(content, /embeddingUseSystemProxy = false/);
@@ -145,8 +158,8 @@ test("ensureGlobalConfigFile completes existing config using the default templat
         assert.match(content, /# Default embedding provider\.\nembeddingProvider = OpenAI # keep inline comment\nembeddingModel = qwen\/qwen3-embedding-4b\n# openrouterApiKey = sk-or-your-openrouter-api-key/);
         assert.match(content, /# Local Milvus default\. Change this for remote Milvus or Zilliz Cloud\.\n# milvusAddress = remote\.example:19530\n# milvusToken = your-milvus-or-zilliz-token/);
         assert.match(content, /# Index worker defaults\.\nfileProcessingConcurrency = 2/);
-        assert.match(content, /# Embedding batch size for index operations\.\n# embeddingBatchSize = 32/);
-        assert.match(content, /# Embedding request concurrency for index operations\.\n# embeddingConcurrency = 4/);
+        assert.match(content, /# Embedding batch size for index operations\.\n# embeddingBatchSize = 64/);
+        assert.match(content, /# Embedding request concurrency for index operations\.\n# embeddingConcurrency = 2/);
         assert.match(content, /# Effective-line growth limit before automatic incremental sync pauses for manual review\.\n# automaticIncrementalEffectiveLineLimit = 5000/);
         assert.match(content, /# Background sync defaults\.\nbackgroundSync = true\ntriggerWatcher = true\nprojectWatcher = true\nprojectWatcherDebounceMs = 1000\nprojectWatcherUsePolling = false\nprojectWatcherFallbackScanIntervalMs = 600000/);
         assert.match(content, /# Additional file extensions to index; repeat the field for multiple values\.\ncustomExtensions = \.vue\ncustomExtensions = \.svelte/);

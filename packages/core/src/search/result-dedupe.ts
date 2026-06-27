@@ -235,7 +235,7 @@ function getLeadingDefinitionSignature(content: string): string | undefined {
     }
 
     const firstMeaningfulLine = firstMeaningfulRawLine.trim();
-    const methodMatch = firstMeaningfulLine.match(/^(?:public|private|protected|static|async|override|readonly|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^)]*\)\s*(?:\{|=>|:)/);
+    const methodMatch = firstMeaningfulLine.match(/^(?:public|private|protected|static|async|override|readonly|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>[\],.?]*\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^)]*\)\s*(?:\{|=>|:)/);
     if (methodMatch) {
         return `method:${methodMatch[1]}`;
     }

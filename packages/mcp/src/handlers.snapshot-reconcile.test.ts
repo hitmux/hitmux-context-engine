@@ -82,6 +82,48 @@ test("startup reconciliation removes indexed snapshot entries whose collection i
     });
 });
 
+test("startup reconciliation can validate only the requested indexed codebase", async () => {
+    await withTempHome(async (tempRoot) => {
+        const requestedCodebasePath = path.join(tempRoot, "repo-a");
+        const unrelatedCodebasePath = path.join(tempRoot, "repo-b");
+        await mkdir(requestedCodebasePath, { recursive: true });
+        await mkdir(unrelatedCodebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(requestedCodebasePath, {
+            indexedFiles: 2,
+            totalChunks: 4,
+            status: "completed"
+        });
+        snapshotManager.setCodebaseIndexed(unrelatedCodebasePath, {
+            indexedFiles: 3,
+            totalChunks: 5,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        const checkedCollections: string[] = [];
+        const context = {
+            getCollectionName: (codebasePath: string) => codebasePath === requestedCodebasePath
+                ? "requested_collection"
+                : "unrelated_collection",
+            getVectorDatabase: () => ({
+                hasCollection: async (collectionName: string) => {
+                    checkedCollections.push(collectionName);
+                    return true;
+                }
+            })
+        } as any;
+        const handlers = new ToolHandlers(context, snapshotManager);
+
+        await handlers.validateIndexedCollections(requestedCodebasePath);
+
+        assert.deepEqual(checkedCollections, ["requested_collection"]);
+        assert.equal(snapshotManager.getCodebaseStatus(requestedCodebasePath), "indexed");
+        assert.equal(snapshotManager.getCodebaseStatus(unrelatedCodebasePath), "indexed");
+    });
+});
+
 test("startup reconciliation times out stalled collection probes without deleting snapshot entries", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");

@@ -10,6 +10,7 @@ type EmbeddingMode = 'throw' | 'empty' | 'short' | 'mixed-dimensions';
 
 class FailingEmbedding extends Embedding {
     protected maxTokens = 8192;
+    public batchTexts: string[][] = [];
 
     constructor(private readonly mode: EmbeddingMode) {
         super();
@@ -24,6 +25,7 @@ class FailingEmbedding extends Embedding {
     }
 
     async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        this.batchTexts.push([...texts]);
         if (this.mode === 'throw') {
             throw new Error('quota exhausted');
         }
@@ -158,6 +160,28 @@ describe('Context embedding failure handling', () => {
         });
 
         await expect(context.indexCodebase(project)).rejects.toThrow(EmbeddingError);
+        expect(vectorDatabase.insert).not.toHaveBeenCalled();
+        expect(vectorDatabase.insertHybrid).not.toHaveBeenCalled();
+    });
+
+    it('propagates duplicate embedding failures without inserting partial documents', async () => {
+        const project = path.join(tempRoot, 'duplicate-failure-project');
+        await fs.mkdir(project);
+        const content = 'export const duplicated = 1;\n';
+        await fs.writeFile(path.join(project, 'one.ts'), content);
+        await fs.writeFile(path.join(project, 'two.ts'), content);
+        await writeProjectConfig(project, { embeddingBatchSize: 10 });
+        const embedding = new FailingEmbedding('throw');
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding,
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(context.indexCodebase(project)).rejects.toThrow(EmbeddingError);
+        expect(embedding.batchTexts).toEqual([[content]]);
         expect(vectorDatabase.insert).not.toHaveBeenCalled();
         expect(vectorDatabase.insertHybrid).not.toHaveBeenCalled();
     });

@@ -27,6 +27,7 @@ export interface SemanticSearchOptions {
     targetRole?: SearchTargetRole;
     includeRelated?: boolean;
     filenameLikeQuery?: SemanticSearchFilenameLikeQuery;
+    enableLexicalSupplement?: boolean;
 }
 
 export interface SemanticSearchResult {

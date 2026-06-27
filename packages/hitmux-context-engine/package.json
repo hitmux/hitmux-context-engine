@@ -1,6 +1,6 @@
 {
     "name": "@hitmux/hitmux-context-engine",
-    "version": "0.1.24",
+    "version": "0.2.4",
     "description": "Package alias for the Hitmux Context Engine MCP server",
     "type": "module",
     "bin": {

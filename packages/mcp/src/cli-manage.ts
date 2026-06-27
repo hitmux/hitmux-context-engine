@@ -4,6 +4,7 @@ import {
     Embedding,
     FileSynchronizer,
     MilvusVectorDatabase,
+    REMOTE_INDEX_MANIFEST_COLLECTION,
     VectorDatabase,
     configManager,
 } from "@hitmux/hitmux-context-engine-core";
@@ -14,7 +15,6 @@ import {
     RequestSplitterType,
     createMcpConfig,
 } from "./config.js";
-import { queryCollectionStats } from "./collection-stats.js";
 import { createEmbeddingInstance } from "./embedding.js";
 import { createRequestSplitter, resolveRequestSplitterType } from "./splitter.js";
 import { SnapshotManager } from "./snapshot.js";
@@ -56,7 +56,9 @@ interface CollectionOverview {
 interface CliManageCommand {
     action: CliManageAction;
     target?: string;
+    targets?: string[];
     all?: boolean;
+    force?: boolean;
 }
 
 export interface CliManageOptions {
@@ -72,6 +74,7 @@ export interface CliManageOptions {
     acquireWriterLock?: (label: string) => McpWriterLock | null;
     stdout?: (message: string) => void;
     stderr?: (message: string) => void;
+    signal?: AbortSignal;
 }
 
 export function parseCliManageCommand(args: string[]): CliManageCommand {
@@ -88,22 +91,41 @@ export function parseCliManageCommand(args: string[]): CliManageCommand {
     }
 
     if (action === "rm") {
-        if (rest.length !== 1 || rest[0] === "--all") {
-            throw new Error("Usage: hce rm <collection-name|repo-path>");
+        if (rest.length === 0 || rest.some((arg) => arg.startsWith("--"))) {
+            throw new Error("Usage: hce rm <collection-name|repo-path> [...]");
         }
-        return { action, target: rest[0] };
+        return { action, targets: rest };
     }
 
     const all = rest.includes("--all");
-    const targets = rest.filter((arg) => arg !== "--all");
-    if (all && targets.length > 0) {
-        throw new Error("Usage: hce index [collection-name|repo-path]\n       hce index --all");
-    }
-    if (targets.length > 1) {
-        throw new Error("Usage: hce index [collection-name|repo-path]\n       hce index --all");
+    const force = rest.includes("--force");
+    const unknownFlag = rest.find(
+        (arg) => arg.startsWith("--") && arg !== "--all" && arg !== "--force",
+    );
+    if (unknownFlag) {
+        throw new Error(getCliManageUsage());
     }
 
-    return { action, all, target: targets[0] };
+    const targets = rest.filter((arg) => arg !== "--all" && arg !== "--force");
+    if (all && targets.length > 0) {
+        throw new Error(getCliManageUsage());
+    }
+    if (all && !force) {
+        throw new Error(
+            "Refusing to force rebuild all known repo indexes without explicit confirmation.\nUsage: hce index --all --force",
+        );
+    }
+    if (!force && targets.length > 1) {
+        throw new Error(getCliManageUsage());
+    }
+
+    return {
+        action,
+        all,
+        force,
+        target: targets[0],
+        targets: targets.length > 0 ? targets : undefined,
+    };
 }
 
 export async function runCliManageCommand(
@@ -132,7 +154,7 @@ export async function runCliManageCommand(
         }
 
         if (command.action === "rm") {
-            await removeCollection(command.target!, runtime, options);
+            await removeCollections(command.targets!, runtime, options);
             return 0;
         }
 
@@ -148,9 +170,10 @@ export function getCliManageUsage(): string {
     return [
         "Usage:",
         " hce list [collection-name|repo-path]",
-        " hce rm <collection-name|repo-path>",
+        " hce rm <collection-name|repo-path> [...]",
         " hce index [collection-name|repo-path]",
-        " hce index --all",
+        " hce index --force [collection-name|repo-path ...]",
+        " hce index --all --force",
     ].join("\n");
 }
 
@@ -228,43 +251,61 @@ async function listCollections(
     writeStdout(options, formatCollectionDetails(matches[0]));
 }
 
-async function removeCollection(
-    target: string,
+async function removeCollections(
+    targets: string[],
     runtime: ReturnType<typeof createCliRuntime>,
     options: CliManageOptions,
 ): Promise<void> {
     const collections = await getCollectionOverviews(runtime.vectorDatabase);
-    const matches = resolveCollectionTarget(target, collections, runtime.context);
-    if (matches.length === 0) {
-        throw new Error(`No collection or repo path matched '${target}'.`);
-    }
-    if (matches.length > 1) {
-        throw new Error(formatAmbiguousTarget(target, matches));
+    const resolvedCollections: CollectionOverview[] = [];
+    const resolvedCollectionNames = new Set<string>();
+
+    for (const target of targets) {
+        const matches = resolveCollectionTarget(target, collections, runtime.context);
+        if (matches.length === 0) {
+            throw new Error(`No collection or repo path matched '${target}'.`);
+        }
+        if (matches.length > 1) {
+            throw new Error(formatAmbiguousTarget(target, matches));
+        }
+
+        const collection = matches[0];
+        if (!resolvedCollectionNames.has(collection.collectionName)) {
+            resolvedCollectionNames.add(collection.collectionName);
+            resolvedCollections.push(collection);
+        }
     }
 
-    const collection = matches[0];
     const lockFactory = options.acquireWriterLock ?? acquireMcpWriterLock;
-    const writerLock = lockFactory(`cli rm '${collection.collectionName}'`);
+    const lockLabel =
+        resolvedCollections.length === 1
+            ? `cli rm '${resolvedCollections[0].collectionName}'`
+            : `cli rm ${resolvedCollections.length} collections`;
+    const writerLock = lockFactory(lockLabel);
     if (!writerLock) {
-        throw new Error(formatMcpWriterLockBusyMessage(`rm '${target}'`));
+        throw new Error(formatMcpWriterLockBusyMessage(formatRmAction(targets)));
     }
 
+    const removedLines: string[] = [];
     try {
-        await runtime.vectorDatabase.dropCollection(collection.collectionName);
-        if (collection.codebasePath) {
-            runtime.snapshotManager.removeCodebaseCompletely(collection.codebasePath);
-            runtime.snapshotManager.saveCodebaseSnapshot();
-            await FileSynchronizer.deleteSnapshot(collection.codebasePath);
+        for (const collection of resolvedCollections) {
+            await runtime.vectorDatabase.dropCollection(collection.collectionName);
+            if (collection.codebasePath) {
+                runtime.snapshotManager.removeCodebaseCompletely(collection.codebasePath);
+                await runtime.snapshotManager.saveCodebaseSnapshotAsync();
+                await FileSynchronizer.deleteSnapshot(collection.codebasePath);
+            }
+
+            const repoPath = collection.codebasePath ?? "unknown";
+            removedLines.push(
+                `Removed collection '${collection.collectionName}'.\nRepo path: ${repoPath}`,
+            );
         }
     } finally {
         writerLock.release();
     }
 
-    const repoPath = collection.codebasePath ?? "unknown";
-    writeStdout(
-        options,
-        `Removed collection '${collection.collectionName}'.\nRepo path: ${repoPath}\n`,
-    );
+    writeStdout(options, `${removedLines.join("\n")}\n`);
 }
 
 async function indexCollections(
@@ -273,26 +314,16 @@ async function indexCollections(
     options: CliManageOptions,
 ): Promise<void> {
     const lockFactory = options.acquireWriterLock ?? acquireMcpWriterLock;
-    const writerLock = lockFactory(
-        command.all ? "cli index --all" : `cli index '${command.target ?? process.cwd()}'`,
-    );
+    const actionLabel = formatIndexAction(command);
+    const writerLock = lockFactory(actionLabel);
     if (!writerLock) {
-        throw new Error(
-            formatMcpWriterLockBusyMessage(
-                command.all ? "index --all" : `index '${command.target ?? process.cwd()}'`,
-            ),
-        );
+        throw new Error(formatMcpWriterLockBusyMessage(actionLabel.replace(/^cli /, "")));
     }
 
     try {
         const targets = command.all
             ? await resolveAllIndexTargets(runtime)
-            : [
-                  await resolveIndexTarget(
-                      command.target ?? process.cwd(),
-                      runtime,
-                  ),
-              ];
+            : await resolveIndexTargets(command, runtime);
 
         if (targets.length === 0) {
             throw new Error("No indexed repo paths were found for index --all.");
@@ -300,7 +331,7 @@ async function indexCollections(
 
         const results: string[] = [];
         for (const targetPath of targets) {
-            const result = command.all
+            const result = command.all || command.force
                 ? await forceRebuildPath(targetPath, runtime, options)
                 : await syncOrCreatePath(targetPath, runtime, options);
             results.push(result);
@@ -310,6 +341,19 @@ async function indexCollections(
     } finally {
         writerLock.release();
     }
+}
+
+function formatIndexAction(command: CliManageCommand): string {
+    if (command.all) {
+        return "cli index --all";
+    }
+    const targets = command.targets ?? [command.target ?? process.cwd()];
+    if (command.force) {
+        return targets.length === 1
+            ? `cli index --force '${targets[0]}'`
+            : `cli index --force ${targets.length} targets`;
+    }
+    return `cli index '${targets[0]}'`;
 }
 
 async function syncOrCreatePath(
@@ -332,18 +376,28 @@ async function syncOrCreatePath(
             splitter,
             indexOptions.requestIgnoreFiles ?? [],
             indexOptions.requestMaxDepth,
+            { abortSignal: options.signal },
         );
-        const collectionStats = await queryCollectionStats(
-            runtime.context,
-            codebasePath,
-            "CLI-INDEX",
-        );
-        if (collectionStats) {
+        const collectionName = runtime.context.getCollectionName(codebasePath);
+        const remoteManifest =
+            typeof runtime.context.getVectorDatabase().readIndexManifest === "function"
+                ? await runtime.context
+                      .getVectorDatabase()
+                      .readIndexManifest!(collectionName, codebasePath)
+                : null;
+        if (remoteManifest) {
             runtime.snapshotManager.setCodebaseIndexed(codebasePath, {
-                ...collectionStats,
-                status: "completed",
+                indexedFiles: remoteManifest.indexedFiles,
+                totalChunks: remoteManifest.totalChunks,
+                status: remoteManifest.status,
+                statsSource: "remote_manifest",
             }, indexOptions);
-            runtime.snapshotManager.saveCodebaseSnapshot();
+            await runtime.snapshotManager.saveCodebaseSnapshotAsync();
+        } else {
+            writeStderr(
+                options,
+                `Remote manifest missing for '${codebasePath}'. Snapshot counts were not refreshed; run repair_index_manifest for legacy collections.\n`,
+            );
         }
         return `Synced '${codebasePath}'. Changes: added=${stats.added}, removed=${stats.removed}, modified=${stats.modified}.`;
     }
@@ -355,7 +409,7 @@ async function syncOrCreatePath(
         indexOptions.requestIgnorePatterns ?? [],
         indexOptions.requestCustomExtensions ?? [],
         splitter,
-        undefined,
+        options.signal,
         {
             additionalIgnoreFiles: indexOptions.requestIgnoreFiles ?? [],
             maxDepth: indexOptions.requestMaxDepth,
@@ -365,7 +419,7 @@ async function syncOrCreatePath(
         ...indexOptions,
         requestSplitter: splitterType,
     });
-    runtime.snapshotManager.saveCodebaseSnapshot();
+    await runtime.snapshotManager.saveCodebaseSnapshotAsync();
     return `Indexed '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
 }
 
@@ -384,7 +438,7 @@ async function forceRebuildPath(
         indexOptions.requestIgnorePatterns ?? [],
         indexOptions.requestCustomExtensions ?? [],
         createRequestSplitter(splitterType),
-        undefined,
+        options.signal,
         {
             additionalIgnoreFiles: indexOptions.requestIgnoreFiles ?? [],
             maxDepth: indexOptions.requestMaxDepth,
@@ -394,7 +448,7 @@ async function forceRebuildPath(
         ...indexOptions,
         requestSplitter: splitterType,
     });
-    runtime.snapshotManager.saveCodebaseSnapshot();
+    await runtime.snapshotManager.saveCodebaseSnapshotAsync();
     return `Rebuilt '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
 }
 
@@ -452,6 +506,18 @@ async function resolveAllIndexTargets(
     return [...paths].sort();
 }
 
+async function resolveIndexTargets(
+    command: CliManageCommand,
+    runtime: ReturnType<typeof createCliRuntime>,
+): Promise<string[]> {
+    const requestedTargets = command.targets ?? [command.target ?? process.cwd()];
+    const resolvedPaths = new Set<string>();
+    for (const target of requestedTargets) {
+        resolvedPaths.add(await resolveIndexTarget(target, runtime));
+    }
+    return [...resolvedPaths];
+}
+
 async function resolveIndexTarget(
     target: string,
     runtime: ReturnType<typeof createCliRuntime>,
@@ -495,6 +561,10 @@ async function getCollectionOverviews(
     const overviews: CollectionOverview[] = [];
 
     for (const collectionName of collectionNames.sort()) {
+        if (collectionName === REMOTE_INDEX_MANIFEST_COLLECTION) {
+            continue;
+        }
+
         const description = await getCollectionDescription(
             vectorDatabase,
             collectionName,
@@ -714,6 +784,14 @@ function formatAmbiguousTarget(
                 `- ${collection.collectionName} (${collection.codebasePath ?? "unknown"})`,
         ),
     ].join("\n");
+}
+
+function formatRmAction(targets: string[]): string {
+    if (targets.length === 1) {
+        return `rm '${targets[0]}'`;
+    }
+
+    return `rm ${targets.length} targets`;
 }
 
 function assertDirectory(codebasePath: string): void {

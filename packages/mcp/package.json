@@ -1,6 +1,6 @@
 {
     "name": "@hitmux/hitmux-context-engine-mcp",
-    "version": "0.1.24",
+    "version": "0.2.4",
     "description": "Model Context Protocol integration for Hitmux Context Engine",
     "type": "module",
     "main": "dist/index.js",
@@ -32,7 +32,8 @@
     "files": [
         "dist",
         "src",
-        "!src/**/*.test.ts"
+        "!src/**/*.test.ts",
+        "!src/test-silence.ts"
     ],
     "repository": {
         "type": "git",

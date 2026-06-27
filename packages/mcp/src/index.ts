@@ -1,22 +1,8 @@
 #!/usr/bin/env node
 
-// CRITICAL: Redirect console outputs to stderr IMMEDIATELY to avoid interfering with MCP JSON protocol
-// Only MCP protocol messages should go to stdout
-console.log = (...args: any[]) => {
-    process.stderr.write("[LOG] " + args.join(" ") + "\n");
-};
-
-console.warn = (...args: any[]) => {
-    process.stderr.write("[WARN] " + args.join(" ") + "\n");
-};
-
-// console.error already goes to stderr by default
-
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isAbsolute } from "node:path";
 import {
     ListToolsRequestSchema,
     CallToolRequestSchema,
@@ -26,24 +12,23 @@ import {
     applySystemProxyPolicy,
     configManager,
 } from "@hitmux/hitmux-context-engine-core";
-import { MilvusVectorDatabase } from "@hitmux/hitmux-context-engine-core";
 
 // Import our modular components
 import {
     createMcpConfig,
     logConfigurationSummary,
-    showHelpMessage,
     ContextMcpConfig,
 } from "./config.js";
 import {
-    createEmbeddingInstance,
-    logEmbeddingProviderInfo,
-} from "./embedding.js";
-import { runCliManageCommand } from "./cli-manage.js";
-import { runCliTestCommand } from "./cli-test.js";
+    readCurrentPackageVersion,
+    runCliCommand,
+    shouldStartMcpServer,
+} from "./cli.js";
+import { createRuntimeContext } from "./runtime-context.js";
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 import { ToolHandlers } from "./handlers.js";
+import { isHceDebugEnabled } from "./logger.js";
 import { UpdateChecker } from "./update-checker.js";
 
 applySystemProxyPolicy(false);
@@ -52,24 +37,40 @@ process.on("unhandledRejection", (reason) => {
     console.error("[MCP] Unhandled async error (kept server alive):", reason);
 });
 
-const MCP_PACKAGE_NAME = "@hitmux/hitmux-context-engine-mcp";
+let activeCommandAbortController: AbortController | null = null;
+let activeCommandExitTimer: ReturnType<typeof setTimeout> | undefined;
 
-function readCurrentPackageVersion(): string {
-    const packageJsonPath = join(
-        dirname(fileURLToPath(import.meta.url)),
-        "..",
-        "package.json",
-    );
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
-        version?: string;
-    };
-    return packageJson.version ?? "0.0.0";
+function clearActiveCommandExitTimer(): void {
+    if (activeCommandExitTimer) {
+        clearTimeout(activeCommandExitTimer);
+        activeCommandExitTimer = undefined;
+    }
 }
+
+function handleShutdownSignal(signalName: "SIGINT" | "SIGTERM"): void {
+    if (activeCommandAbortController && !activeCommandAbortController.signal.aborted) {
+        console.error(`Received ${signalName}, cancelling active command...`);
+        activeCommandAbortController.abort();
+        clearActiveCommandExitTimer();
+        activeCommandExitTimer = setTimeout(() => {
+            console.error(`Active command did not stop after ${signalName}; exiting.`);
+            process.exit(signalName === "SIGINT" ? 130 : 143);
+        }, 5000);
+        activeCommandExitTimer.unref?.();
+        return;
+    }
+
+    console.error(`Received ${signalName}, shutting down gracefully...`);
+    process.exit(signalName === "SIGINT" ? 130 : 143);
+}
+
+const MCP_PACKAGE_NAME = "@hitmux/hitmux-context-engine-mcp";
 
 class ContextMcpServer {
     private server: Server;
     private snapshotManager: SnapshotManager;
     private updateChecker: UpdateChecker;
+    private currentPackageVersion: string;
     private runtime: {
         context: Context;
         syncManager: SyncManager;
@@ -82,11 +83,12 @@ class ContextMcpServer {
     > | null = null;
 
     constructor() {
+        this.currentPackageVersion = readCurrentPackageVersion();
         // Initialize MCP server
         this.server = new Server(
             {
                 name: "Hitmux Context Engine MCP Server",
-                version: "1.0.0",
+                version: this.currentPackageVersion,
             },
             {
                 capabilities: {
@@ -99,7 +101,7 @@ class ContextMcpServer {
         this.snapshotManager.loadCodebaseSnapshot();
         this.updateChecker = new UpdateChecker({
             packageName: MCP_PACKAGE_NAME,
-            currentVersion: readCurrentPackageVersion(),
+            currentVersion: this.currentPackageVersion,
         });
         this.updateChecker.start();
 
@@ -144,6 +146,20 @@ class ContextMcpServer {
         return result;
     }
 
+    private getAbsolutePathArgument(args: unknown): string | undefined {
+        if (!args || typeof args !== "object" || Array.isArray(args)) {
+            return undefined;
+        }
+
+        const value = (args as { path?: unknown }).path;
+        if (typeof value !== "string" || value.trim().length === 0) {
+            return undefined;
+        }
+
+        const trimmed = value.trim();
+        return isAbsolute(trimmed) ? trimmed : undefined;
+    }
+
     private getConfigReadError(): Error | null {
         const errors = configManager.getReadErrors(process.cwd());
         if (errors.length === 0) {
@@ -176,7 +192,7 @@ class ContextMcpServer {
                     throw configError;
                 }
 
-                const config = createMcpConfig();
+                const config = createMcpConfig(this.currentPackageVersion);
                 logConfigurationSummary(config);
 
                 const runtime = await this.createRuntime(config);
@@ -193,34 +209,12 @@ class ContextMcpServer {
     private async createRuntime(
         config: ContextMcpConfig,
     ): Promise<NonNullable<ContextMcpServer["runtime"]>> {
-        // Initialize embedding provider
         console.log(
             `[EMBEDDING] Initializing embedding provider: ${config.embeddingProvider}`,
         );
         console.log(`[EMBEDDING] Using model: ${config.embeddingModel}`);
 
-        const embedding = createEmbeddingInstance(config);
-        logEmbeddingProviderInfo(config, embedding);
-
-        // Initialize vector database
-        const vectorDatabase = new MilvusVectorDatabase({
-            address: config.milvusAddress,
-            ...(config.milvusToken && { token: config.milvusToken }),
-            useSystemProxy: config.databaseUseSystemProxy,
-        });
-
-        // Initialize Hitmux Context Engine
-        const context = new Context({
-            embedding,
-            vectorDatabase,
-            collectionNameOverride: config.collectionNameOverride,
-            collectionIdentity: {
-                mode: config.codebaseIdentityMode,
-                customIdentity: config.codebaseIdentity,
-                globalName: config.globalCollectionName,
-                gitRemoteName: config.gitRemoteName,
-            },
-        });
+        const context = createRuntimeContext(config);
 
         // Initialize managers
         const syncManager = new SyncManager(context, this.snapshotManager);
@@ -384,8 +378,9 @@ This tool is versatile and can be used before completing various tasks to retrie
                                 },
                                 limit: {
                                     type: "number",
+                                    default: 10,
                                     description:
-                                        "Optional override for the maximum number of results to return. Leave empty for the bounded default result set; use a specific value only when you need more or fewer results.",
+                                        "Maximum number of results to return. Default to 10 and use 10 for normal searches; set a different value only when the user explicitly asks for more or fewer results.",
                                 },
                                 targetRole: {
                                     type: "string",
@@ -408,7 +403,7 @@ This tool is versatile and can be used before completing various tasks to retrie
                                 includeTraceEvidence: {
                                     type: "boolean",
                                     description:
-                                        "Optional: attach compact trace_symbol evidence for a small number of top implementation or entry results. Defaults to false.",
+                                        "Optional: attach compact symbol relationship evidence for a small number of top implementation or entry results. Defaults to false.",
                                     default: false,
                                 },
                                 consistency: {
@@ -438,62 +433,6 @@ This tool is versatile and can be used before completing various tasks to retrie
                         },
                     },
                     {
-                        name: "trace_symbol",
-                        description:
-                            "Trace a symbol through current source files. Finds definitions, references, imports, exports, and related tests without requiring a schema migration.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                path: {
-                                    type: "string",
-                                    description:
-                                        "ABSOLUTE path to the codebase directory to trace in.",
-                                },
-                                symbol: {
-                                    type: "string",
-                                    description:
-                                        "Identifier to trace, such as a class, function, method, type, or variable name.",
-                                },
-                                startPath: {
-                                    type: "string",
-                                    description:
-                                        "Optional relative or absolute file path to scan first, usually a top search result or known entry point.",
-                                },
-                                startLine: {
-                                    type: "number",
-                                    description:
-                                        "Optional 1-based start line inside startPath to prioritize evidence near a current search result.",
-                                    minimum: 1,
-                                },
-                                endLine: {
-                                    type: "number",
-                                    description:
-                                        "Optional 1-based end line inside startPath to prioritize evidence near a current search result.",
-                                    minimum: 1,
-                                },
-                                maxFiles: {
-                                    type: "number",
-                                    description:
-                                        "Optional maximum number of source files to scan. Defaults to 1000.",
-                                    minimum: 1,
-                                },
-                                maxReferences: {
-                                    type: "number",
-                                    description:
-                                        "Optional maximum number of entries per evidence section. Defaults to 40.",
-                                    minimum: 1,
-                                },
-                                includeTests: {
-                                    type: "boolean",
-                                    description:
-                                        "Optional: include related test evidence. Defaults to true.",
-                                    default: true,
-                                },
-                            },
-                            required: ["path", "symbol"],
-                        },
-                    },
-                    {
                         name: "clear_index",
                         description: `Clear the search index. IMPORTANT: You MUST provide an absolute path.`,
                         inputSchema: {
@@ -517,6 +456,27 @@ This tool is versatile and can be used before completing various tasks to retrie
                                     type: "string",
                                     description: `ABSOLUTE path to the codebase directory to check status for.`,
                                 },
+                                refresh: {
+                                    type: "boolean",
+                                    description:
+                                        "Optional. Defaults to false for fast local snapshot/job status. Set true to probe the vector database and recover remote collection/manifest state.",
+                                    default: false,
+                                },
+                            },
+                            required: ["path"],
+                        },
+                    },
+                    {
+                        name: "repair_index_manifest",
+                        description:
+                            "Explicitly migrate or repair legacy remote status for an indexed codebase by scanning chunk metadata once and writing the remote index manifest. Use only when get_indexing_status reports a missing remote manifest for an existing collection.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                path: {
+                                    type: "string",
+                                    description: `ABSOLUTE path to the codebase directory whose remote index manifest should be repaired.`,
+                                },
                             },
                             required: ["path"],
                         },
@@ -534,8 +494,16 @@ This tool is versatile and can be used before completing various tasks to retrie
                 try {
                     runtime = await this.getRuntime();
                     if (!runtime.snapshotValidated) {
-                        await runtime.toolHandlers.validateLegacyZeroEntries();
-                        await runtime.toolHandlers.validateIndexedCollections();
+                        const targetCodebasePath =
+                            this.getAbsolutePathArgument(args);
+                        if (targetCodebasePath) {
+                            await runtime.toolHandlers.validateLegacyZeroEntries(
+                                targetCodebasePath,
+                            );
+                            await runtime.toolHandlers.validateIndexedCollections(
+                                targetCodebasePath,
+                            );
+                        }
                         runtime.snapshotValidated = true;
                     }
                     if (!runtime.backgroundSyncStarted) {
@@ -564,11 +532,6 @@ This tool is versatile and can be used before completing various tasks to retrie
                                 args,
                             );
                             return this.withUpdateNotice(result);
-                        case "trace_symbol":
-                            result = await runtime.toolHandlers.handleTraceSymbol(
-                                args,
-                            );
-                            return this.withUpdateNotice(result);
                         case "clear_index":
                             result = await runtime.toolHandlers.handleClearIndex(
                                 args,
@@ -576,6 +539,11 @@ This tool is versatile and can be used before completing various tasks to retrie
                             return this.withUpdateNotice(result);
                         case "get_indexing_status":
                             result = await runtime.toolHandlers.handleGetIndexingStatus(
+                                args,
+                            );
+                            return this.withUpdateNotice(result);
+                        case "repair_index_manifest":
+                            result = await runtime.toolHandlers.handleRepairIndexManifest(
                                 args,
                             );
                             return this.withUpdateNotice(result);
@@ -618,15 +586,22 @@ This tool is versatile and can be used before completing various tasks to retrie
 
 // Main execution
 async function main() {
-    // Parse command line arguments
     const args = process.argv.slice(2);
 
-    // Show help if requested
-    if (args.includes("--help") || args.includes("-h")) {
-        showHelpMessage();
-        process.exit(0);
+    if (!shouldStartMcpServer(args)) {
+        activeCommandAbortController = new AbortController();
+        try {
+            const exitCode = await runCliCommand(args, {
+                signal: activeCommandAbortController.signal,
+            });
+            process.exit(exitCode);
+        } finally {
+            activeCommandAbortController = null;
+            clearActiveCommandExitTimer();
+        }
     }
 
+    installMcpConsoleRedirect();
     const ensureConfigResult = configManager.ensureGlobalConfigFile();
     if (ensureConfigResult.created) {
         console.log(
@@ -638,29 +613,31 @@ async function main() {
         );
     }
 
-    if (args[0] === "test") {
-        const exitCode = await runCliTestCommand(args.slice(1));
-        process.exit(exitCode);
-    }
-
-    if (args[0] === "list" || args[0] === "rm" || args[0] === "index") {
-        const exitCode = await runCliManageCommand(args);
-        process.exit(exitCode);
-    }
-
     const server = new ContextMcpServer();
     await server.start();
 }
 
+function installMcpConsoleRedirect(): void {
+    console.log = (...args: any[]) => {
+        if (isHceDebugEnabled()) {
+            process.stderr.write("[LOG] " + args.join(" ") + "\n");
+        }
+    };
+
+    console.warn = (...args: any[]) => {
+        if (isHceDebugEnabled()) {
+            process.stderr.write("[WARN] " + args.join(" ") + "\n");
+        }
+    };
+}
+
 // Handle graceful shutdown
 process.on("SIGINT", () => {
-    console.error("Received SIGINT, shutting down gracefully...");
-    process.exit(0);
+    handleShutdownSignal("SIGINT");
 });
 
 process.on("SIGTERM", () => {
-    console.error("Received SIGTERM, shutting down gracefully...");
-    process.exit(0);
+    handleShutdownSignal("SIGTERM");
 });
 
 // Always start the server - this is designed to be the main entry point

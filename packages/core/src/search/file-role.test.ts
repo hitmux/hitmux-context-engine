@@ -24,6 +24,28 @@ describe('file role classification and intent', () => {
         expect(isFileRoleExplicitlyRequested('config', jsonIntent, 'src/config/towers.json')).toBe(true);
     });
 
+    it('treats build and package metadata wording as explicit config intent', () => {
+        const buildIntent = inferFileRoleIntent('Valkey build configuration source file lists CMake');
+        const packageIntent = inferFileRoleIntent('FastAPI packaging metadata dependency groups pyproject.toml');
+        const cmakeListsIntent = inferFileRoleIntent('CMakeLists.txt');
+
+        expect(buildIntent.preferredRoles.has('config')).toBe(true);
+        expect(packageIntent.preferredRoles.has('config')).toBe(true);
+        expect(cmakeListsIntent.preferredRoles.has('config')).toBe(true);
+        expect(isFileRoleExplicitlyRequested('config', buildIntent, 'src/CMakeLists.txt')).toBe(true);
+        expect(isFileRoleExplicitlyRequested('config', packageIntent, 'pyproject.toml')).toBe(true);
+        expect(isFileRoleExplicitlyRequested('config', cmakeListsIntent, 'src/CMakeLists.txt')).toBe(true);
+    });
+
+    it('does not treat bare data format words as config intent', () => {
+        for (const query of ['json parser implementation', 'env var loader', 'toml decoder']) {
+            const intent = inferFileRoleIntent(query);
+
+            expect(intent.preferredRoles.has('config')).toBe(false);
+            expect(isFileRoleExplicitlyRequested('config', intent, 'src/config/parser.ts')).toBe(false);
+        }
+    });
+
     it('classifies test docs style config and generated roles independently of query wording', () => {
         expect(classifyFileRole('src/towers/towerRegistry.test.ts')).toBe('test');
         expect(classifyFileRole('docs/towers/README.md')).toBe('docs');
@@ -31,6 +53,16 @@ describe('file role classification and intent', () => {
         expect(classifyFileRole('src/towers/config/factory.ts')).toBe('config');
         expect(classifyFileRole('src/generated/towers.ts')).toBe('generated');
         expect(classifyFileRole('src/towers/towerRegistry.ts')).toBe('implementation');
+    });
+
+    it('classifies common build and package metadata files as config', () => {
+        expect(classifyFileRole('src/CMakeLists.txt')).toBe('config');
+        expect(classifyFileRole('cmake/Modules/SourceFiles.cmake')).toBe('config');
+        expect(classifyFileRole('Makefile')).toBe('config');
+        expect(classifyFileRole('pyproject.toml')).toBe('config');
+        expect(classifyFileRole('Cargo.toml')).toBe('config');
+        expect(classifyFileRole('go.mod')).toBe('config');
+        expect(classifyFileRole('package.json')).toBe('config');
     });
 
     it('recognizes common multi-language test file naming patterns', () => {

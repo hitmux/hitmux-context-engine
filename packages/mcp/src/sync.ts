@@ -14,8 +14,11 @@ import {
     createRequestSplitter,
     resolveRequestSplitterType,
 } from "./splitter.js";
-import { queryCollectionStats } from "./collection-stats.js";
-import { acquireMcpWriterLock, type McpWriterLock } from "./sync-lock.js";
+import {
+    acquireMcpWriterLock,
+    formatMcpWriterLockBusyMessage,
+    type McpWriterLock,
+} from "./sync-lock.js";
 import { ProjectChangeTracker, type ProjectChangeState } from "./project-change-tracker.js";
 
 const DEFAULT_INITIAL_SYNC_DELAY_MS = 5_000;
@@ -150,7 +153,6 @@ export class SyncManager {
     private context: Context;
     private snapshotManager: SnapshotManager;
     private isSyncing: boolean = false;
-    private syncLock: McpWriterLock | null = null;
     private triggerWatcher: fs.FSWatcher | null = null;
     private triggerDebounceTimer: NodeJS.Timeout | null = null;
     private backgroundSyncTimer: NodeJS.Timeout | null = null;
@@ -170,23 +172,6 @@ export class SyncManager {
         this.snapshotManager = snapshotManager;
     }
 
-    private acquireGlobalSyncLock(): boolean {
-        if (this.syncLock) {
-            console.log("[SYNC-DEBUG] Sync writer lock is already held by this manager. Skipping overlapping sync.");
-            return false;
-        }
-
-        this.syncLock = acquireMcpWriterLock("automatic sync");
-        return this.syncLock !== null;
-    }
-
-    private releaseGlobalSyncLock(): void {
-        if (this.syncLock) {
-            this.syncLock.release();
-            this.syncLock = null;
-        }
-    }
-
     public getSyncStatus(codebasePath: string): CodebaseSyncStatus | undefined {
         const status = this.syncStatuses.get(codebasePath);
         return status ? { ...status } : undefined;
@@ -197,14 +182,29 @@ export class SyncManager {
         this.ensureProjectWatcher(codebasePath, codebaseInfo?.requestIgnoreFiles || []);
     }
 
+    private getCollectionNameForLock(codebasePath: string): string {
+        const context = this.context as unknown as {
+            getCollectionName?: (path: string) => string;
+        };
+        if (typeof context.getCollectionName === "function") {
+            return context.getCollectionName(codebasePath);
+        }
+
+        return `codebase_${codebasePath.replace(/[^A-Za-z0-9]/g, "_")}`;
+    }
+
     public async syncCodebaseForSearch(
         codebasePath: string,
-        options: { consistencyMode?: SearchConsistencyMode } = {},
+        options: {
+            consistencyMode?: SearchConsistencyMode;
+            writerLockHeld?: boolean;
+        } = {},
     ): Promise<CodebaseSyncStats> {
         return this.syncCodebase(codebasePath, 0, 1, {
             consistencyMode: options.consistencyMode ?? "strong",
             throwOnIncrementalTooLarge: true,
             throwOnSyncError: true,
+            writerLockHeld: options.writerLockHeld === true,
         });
     }
 
@@ -274,10 +274,6 @@ export class SyncManager {
             return;
         }
 
-        if (!this.acquireGlobalSyncLock()) {
-            return;
-        }
-
         this.isSyncing = true;
         console.log(
             `[SYNC-DEBUG] Starting index sync for all ${indexedCodebases.length} codebases...`,
@@ -306,6 +302,14 @@ export class SyncManager {
                 indexedCodebases,
                 syncConcurrency,
             );
+            const syncWarnings = syncResults
+                .map((stats, index) => ({
+                    codebasePath: indexedCodebases[index],
+                    warning: stats.warning,
+                }))
+                .filter((entry): entry is { codebasePath: string; warning: string } =>
+                    typeof entry.warning === "string" && entry.warning.length > 0,
+                );
             const totalStats = syncResults.reduce(
                 (total, stats) => ({
                     added: total.added + stats.added,
@@ -322,9 +326,20 @@ export class SyncManager {
             console.log(
                 `[SYNC-DEBUG] Index sync completed for all codebases in ${totalElapsed}ms`,
             );
-            console.log(
-                `[SYNC] Index sync completed for all codebases. Total changes - Added: ${totalStats.added}, Removed: ${totalStats.removed}, Modified: ${totalStats.modified}`,
-            );
+            if (syncWarnings.length > 0) {
+                console.warn(
+                    `[SYNC] Index sync completed with warnings. Total changes - Added: ${totalStats.added}, Removed: ${totalStats.removed}, Modified: ${totalStats.modified}. ` +
+                        `Skipped or warned codebases: ${syncWarnings.length}.`,
+                );
+                console.warn(
+                    `[SYNC] Index sync skipped or warned for ${syncWarnings.length} codebase(s): ` +
+                        syncWarnings.map((entry) => `${entry.codebasePath}: ${entry.warning}`).join("; "),
+                );
+            } else {
+                console.log(
+                    `[SYNC] Index sync completed for all codebases. Total changes - Added: ${totalStats.added}, Removed: ${totalStats.removed}, Modified: ${totalStats.modified}`,
+                );
+            }
         } catch (error: any) {
             const totalElapsed = Date.now() - syncStartTime;
             console.error(
@@ -335,7 +350,6 @@ export class SyncManager {
         } finally {
             this.isSyncing = false;
             this.syncStatuses.clear();
-            this.releaseGlobalSyncLock();
             this.drainQueuedProjectWatcherSyncs();
             const totalElapsed = Date.now() - syncStartTime;
             console.log(
@@ -378,13 +392,34 @@ export class SyncManager {
             throwOnIncrementalTooLarge?: boolean;
             throwOnSyncError?: boolean;
             forceFullScan?: boolean;
+            writerLockHeld?: boolean;
         } = {},
     ): Promise<CodebaseSyncStats> {
         const codebaseStartTime = Date.now();
+        const collectionName = this.getCollectionNameForLock(codebasePath);
+        const lockScope = { kind: "collection" as const, collectionName };
+        let writerLock: McpWriterLock | null = null;
 
         console.log(
             `[SYNC-DEBUG] [${index + 1}/${totalCodebases}] Starting sync for codebase: '${codebasePath}'`,
         );
+
+        if (options.writerLockHeld !== true) {
+            writerLock = acquireMcpWriterLock(
+                `automatic sync for '${codebasePath}'`,
+                lockScope,
+            );
+            if (!writerLock) {
+                const warning = formatMcpWriterLockBusyMessage(
+                    `automatic sync for '${codebasePath}'`,
+                    lockScope,
+                );
+                console.log(`[SYNC-DEBUG] Skipping automatic sync: ${warning}`);
+                this.snapshotManager.setCodebaseSyncWarning(codebasePath, warning);
+                await this.snapshotManager.saveCodebaseSnapshotAsync();
+                return { added: 0, removed: 0, modified: 0, warning };
+            }
+        }
 
         try {
             const pathExists = fs.existsSync(codebasePath);
@@ -394,7 +429,7 @@ export class SyncManager {
                 console.warn(
                     `[SYNC-DEBUG] Codebase path '${codebasePath}' no longer exists. Removing it from automatic sync tracking.`,
                 );
-                this.removeMissingCodebaseFromTracking(codebasePath);
+                await this.removeMissingCodebaseFromTracking(codebasePath);
                 return { added: 0, removed: 0, modified: 0 };
             }
         } catch (pathError: any) {
@@ -451,21 +486,8 @@ export class SyncManager {
             );
 
             if (stats.added > 0 || stats.removed > 0 || stats.modified > 0) {
-                const collectionStats = await queryCollectionStats(
-                    this.context,
-                    codebasePath,
-                    "SYNC-STATS",
-                );
-                if (collectionStats) {
-                    this.snapshotManager.setCodebaseIndexed(codebasePath, {
-                        ...collectionStats,
-                        status: "completed",
-                    });
-                    this.snapshotManager.saveCodebaseSnapshot();
-                } else {
-                    this.snapshotManager.clearCodebaseSyncWarning(codebasePath);
-                    this.snapshotManager.saveCodebaseSnapshot();
-                }
+                this.snapshotManager.markCodebaseSynced(codebasePath, stats);
+                await this.snapshotManager.saveCodebaseSnapshotAsync();
                 console.log(
                     `[SYNC] Sync complete for '${codebasePath}'. Added: ${stats.added}, Removed: ${stats.removed}, Modified: ${stats.modified} (${codebaseElapsed}ms)`,
                 );
@@ -478,7 +500,7 @@ export class SyncManager {
                         typeof previousInfo.syncWarning === "string";
                     this.snapshotManager.clearCodebaseSyncWarning(codebasePath);
                     if (hadSyncWarning) {
-                        this.snapshotManager.saveCodebaseSnapshot();
+                        await this.snapshotManager.saveCodebaseSnapshotAsync();
                     }
                 }
                 console.log(
@@ -496,7 +518,7 @@ export class SyncManager {
                 const warning = `Automatic incremental indexing paused: detected ${error.effectiveLines} effective lines across ${error.changedFiles} added/modified file(s), exceeding the ${error.threshold} line limit. Check whether this is a large batch of files that should be added to .hceignore. If the files should be indexed, review the change set and run index_codebase with incremental=true from MCP.`;
                 console.warn(`[SYNC] ${warning}`);
                 this.snapshotManager.setCodebaseSyncWarning(codebasePath, warning);
-                this.snapshotManager.saveCodebaseSnapshot();
+                await this.snapshotManager.saveCodebaseSnapshotAsync();
                 return { added: 0, removed: 0, modified: 0 };
             }
 
@@ -524,10 +546,11 @@ export class SyncManager {
             return { added: 0, removed: 0, modified: 0 };
         } finally {
             this.syncStatuses.delete(codebasePath);
+            writerLock?.release();
         }
     }
 
-    private removeMissingCodebaseFromTracking(codebasePath: string): void {
+    private async removeMissingCodebaseFromTracking(codebasePath: string): Promise<void> {
         const timer = this.projectWatcherSyncTimers.get(codebasePath);
         if (timer) {
             clearTimeout(timer);
@@ -546,7 +569,7 @@ export class SyncManager {
         this.syncStatuses.delete(codebasePath);
         this.projectChangeTracker?.unwatch(codebasePath);
         this.snapshotManager.removeCodebaseCompletely(codebasePath);
-        this.snapshotManager.saveCodebaseSnapshot();
+        await this.snapshotManager.saveCodebaseSnapshotAsync();
     }
 
     public startBackgroundSync(): void {
@@ -778,15 +801,6 @@ export class SyncManager {
             return;
         }
 
-        if (!this.acquireGlobalSyncLock()) {
-            if (forceFullScan) {
-                this.scheduleFullScanReconciliation(codebasePath, Math.max(1_000, getProjectWatcherDebounceMs()));
-            } else {
-                this.scheduleProjectWatcherSync(codebasePath, Math.max(1_000, getProjectWatcherDebounceMs()));
-            }
-            return;
-        }
-
         this.isSyncing = true;
         this.projectWatcherSyncActive.add(codebasePath);
         try {
@@ -811,7 +825,6 @@ export class SyncManager {
         } finally {
             this.projectWatcherSyncActive.delete(codebasePath);
             this.isSyncing = false;
-            this.releaseGlobalSyncLock();
             if (this.projectWatcherSyncQueued.delete(codebasePath)) {
                 this.scheduleProjectWatcherSync(codebasePath);
             }

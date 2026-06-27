@@ -17,7 +17,9 @@ import {
     HybridSearchResult,
     InsertOptions,
     DEFAULT_SEARCH_OUTPUT_FIELDS,
-    STRUCTURED_METADATA_FIELDS
+    STRUCTURED_METADATA_FIELDS,
+    REMOTE_INDEX_MANIFEST_VERSION,
+    RemoteIndexManifestStatus
 } from './vectordb';
 import {
     SearchResultGroup,
@@ -44,12 +46,15 @@ import {
     isFileRoleExplicitlyRequested
 } from './search/file-role';
 import { normalizeLineRange } from './search/line-range';
+import { extractPathTokens, splitStructuralToken } from './search/path-tokens';
+import { extractDefinitionIdentifiers } from './search/definition-identifiers';
 import { diversifySemanticSearchResultsByFile } from './search/result-diversify';
 import { deduplicateSemanticSearchResults, getNormalizedContentHash } from './search/result-dedupe';
 import { traceSymbolInFiles } from './search/symbol-trace';
 import { countEffectiveLinesInContent } from './utils/effective-lines';
+import { getKnownFileNameLanguage, isSupportedCodeFileName } from './utils/file-support';
 
-const FILE_TOKEN_PATTERN = /(?:^|[\s"'`(<{\[])([A-Za-z0-9_.@+~-]+(?:[\\/][A-Za-z0-9_.@+~-]+)*\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})(?=$|[\s"'`),}\]>:;!?])/g;
+const FILE_TOKEN_PATTERN = /(?:^|[\s"'`(<{[])([A-Za-z0-9_.@+~-]+(?:[\\/][A-Za-z0-9_.@+~-]+)*\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})(?=$|[\s"'`),}\]>:;!?])/g;
 
 /**
  * Thrown by indexCodebase / processFileList when an AbortSignal fires
@@ -78,6 +83,7 @@ export class IncrementalIndexTooLargeError extends Error {
 
 interface ReindexByChangeOptions {
     skipEffectiveLineLimit?: boolean;
+    abortSignal?: AbortSignal;
 }
 
 interface IncrementalChanges {
@@ -129,6 +135,13 @@ interface ProcessFileListOptions {
 
 interface ChunkBatchInsertOptions extends InsertOptions {
     ensureCollectionBeforeInsert?: (dimension: number) => Promise<void>;
+    abortSignal?: AbortSignal;
+}
+
+interface IndexingRunCache {
+    embeddings: Map<string, EmbeddingVector>;
+    inFlightEmbeddings: Map<string, Promise<EmbeddingVector>>;
+    definitionIdentifiers: Map<string, string[]>;
 }
 
 interface PrepareCollectionOptions {
@@ -257,12 +270,29 @@ interface GroupedSearchResult extends SemanticSearchResult {
 interface NormalizedSemanticSearchOptions {
     targetRole: SearchTargetRole;
     includeRelated: boolean;
+    enableLexicalSupplement: boolean;
     filenameLikeQuery?: SemanticSearchFilenameLikeQuery;
 }
 
 interface StructuralSearchTerms {
     terms: string[];
     variants: string[];
+}
+
+type DescriptorPhrase =
+    | 'route_group'
+    | 'route_registration'
+    | 'mapping_table'
+    | 'owner_registry'
+    | 'command_registration'
+    | 'module_registration'
+    | 'generic_adapter'
+    | 'startup_entry';
+
+interface RouteCompositionTerm {
+    fullPath: string;
+    groupPrefix: string;
+    childRoute: string;
 }
 
 type QueryRow = Record<string, unknown>;
@@ -279,6 +309,9 @@ interface LexicalSearchTerms {
     roleHints: string[];
     pathHints: string[];
     literalAnchors: string[];
+    descriptorPhrases: DescriptorPhrase[];
+    descriptorRecallTerms: string[];
+    routeCompositionTerms: RouteCompositionTerm[];
     recallTerms: string[];
     scoringTerms: string[];
 }
@@ -299,8 +332,7 @@ const LEXICAL_OWNER_TIERS = {
 
 const LEXICAL_EXACT_CANDIDATE_LIMIT_MIN = 100;
 const LEXICAL_EXACT_CANDIDATE_LIMIT_MAX = 200;
-const LEXICAL_BROAD_CANDIDATE_LIMIT_MIN = 40;
-const LEXICAL_BROAD_CANDIDATE_LIMIT_MAX = 80;
+const LEXICAL_SUPPLEMENT_TIMEOUT_MS = 1500;
 const SEARCH_CANDIDATE_LIMIT_MULTIPLIER = 4;
 const SEARCH_CANDIDATE_LIMIT_MIN = 80;
 const SEARCH_CANDIDATE_LIMIT_MAX = 200;
@@ -310,6 +342,8 @@ const DEFAULT_SUPPORTED_EXTENSIONS = [
     '.ts', '.tsx', '.js', '.jsx', '.py', '.java', '.cpp', '.c', '.h', '.hpp',
     '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala', '.m', '.mm',
     '.dart', '.sol', '.ex', '.exs', '.lua', '.luau',
+    // Structured config and build files with bounded default coverage
+    '.toml', '.cmake',
     // Text and markup files
     '.md', '.markdown', '.ipynb',
     // '.txt',  '.json', '.yaml', '.yml', '.xml', '.html', '.htm',
@@ -728,6 +762,13 @@ export class Context {
             )
         );
         this.throwIfIndexAborted(signal);
+        const supportedExtensions = this.getEffectiveSupportedExtensions(additionalSupportedExtensions, codebasePath);
+        const baselineSynchronizer = await this.createFullIndexBaselineSynchronizer(
+            codebasePath,
+            ignorePatterns,
+            supportedExtensions,
+            requestOptions.maxDepth
+        );
 
         // 2. Check and prepare vector collection
         progressCallback?.({ phase: 'Preparing collection...', current: 0, total: 100, percentage: 0 });
@@ -767,7 +808,6 @@ export class Context {
 
         // 3. Recursively traverse codebase to get all supported files
         progressCallback?.({ phase: 'Scanning files...', current: 5, total: 100, percentage: 5 });
-        const supportedExtensions = this.getEffectiveSupportedExtensions(additionalSupportedExtensions, codebasePath);
         const codeFiles = await this.measureIndexingStage(
             timingMetrics,
             'scanFilesMs',
@@ -793,6 +833,8 @@ export class Context {
                 embeddingConcurrency: this.getEmbeddingConcurrency(codebasePath),
                 fileProcessingConcurrency: this.getFileProcessingConcurrency(codebasePath)
             }, timingMetrics);
+            await this.commitFullIndexBaseline(codebasePath, baselineSynchronizer);
+            await this.writeRemoteIndexManifest(codebasePath, 'completed', 0, 0);
             return { indexedFiles: 0, totalChunks: 0, status: 'completed' };
         }
 
@@ -859,12 +901,40 @@ export class Context {
             total: codeFiles.length,
             percentage: 100
         });
+        if (result.status === 'completed') {
+            await this.commitFullIndexBaseline(codebasePath, baselineSynchronizer);
+        } else {
+            baselineSynchronizer.discardPendingChanges();
+        }
+        await this.writeRemoteIndexManifest(
+            codebasePath,
+            result.status,
+            result.processedFiles,
+            result.totalChunks
+        );
 
         return {
             indexedFiles: result.processedFiles,
             totalChunks: result.totalChunks,
             status: result.status
         };
+    }
+
+    private async createFullIndexBaselineSynchronizer(
+        codebasePath: string,
+        ignorePatterns: string[],
+        supportedExtensions: string[],
+        maxDepth?: number
+    ): Promise<FileSynchronizer> {
+        const synchronizer = new FileSynchronizer(codebasePath, ignorePatterns, supportedExtensions, { maxDepth });
+        await synchronizer.initialize({ createSnapshotIfMissing: false });
+        await synchronizer.checkForChanges({ deferSnapshotUpdate: true });
+        return synchronizer;
+    }
+
+    private async commitFullIndexBaseline(codebasePath: string, synchronizer: FileSynchronizer): Promise<void> {
+        await synchronizer.commitPendingChanges();
+        this.synchronizers.set(this.getCollectionName(codebasePath), synchronizer);
     }
 
     async reindexByChange(
@@ -879,6 +949,7 @@ export class Context {
     ): Promise<{ added: number, removed: number, modified: number }> {
         const collectionName = this.getCollectionName(codebasePath);
         const splitter = requestSplitter || this.codeSplitter;
+        await this.validateExistingCollectionEmbedding(collectionName);
 
         // Recreate the synchronizer on each sync so newly added or edited
         // ignore files affect the next incremental check without a restart.
@@ -915,6 +986,7 @@ export class Context {
     ): Promise<{ added: number, removed: number, modified: number }> {
         const collectionName = this.getCollectionName(codebasePath);
         const splitter = requestSplitter || this.codeSplitter;
+        await this.validateExistingCollectionEmbedding(collectionName);
 
         const ignorePatterns = await this.loadIgnorePatterns(codebasePath, additionalIgnorePatterns, additionalIgnoreFiles);
         const supportedExtensions = this.getEffectiveSupportedExtensions(additionalSupportedExtensions, codebasePath);
@@ -944,11 +1016,17 @@ export class Context {
         progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number }) => void,
         options: ReindexByChangeOptions = {}
     ): Promise<{ added: number, removed: number, modified: number }> {
+        this.throwIfIndexAborted(options.abortSignal);
         const { added, removed, modified } = changes;
         const totalChanges = added.length + removed.length + modified.length;
 
         if (totalChanges === 0) {
             await currentSynchronizer.commitPendingChanges();
+            await this.refreshRemoteIndexManifestFromSynchronizer(
+                codebasePath,
+                collectionName,
+                currentSynchronizer
+            );
             progressCallback?.({ phase: 'No changes detected', current: 100, total: 100, percentage: 100 });
             console.log('[Context] ✅ No file changes detected.');
             return { added: 0, removed: 0, modified: 0 };
@@ -971,6 +1049,7 @@ export class Context {
         }
 
         const fileWeights = await this.getFileProcessingWeights(filesToIndex);
+        this.throwIfIndexAborted(options.abortSignal);
         const deletionWeight = 1;
         const deletionWeightTotal = (removed.length + modified.length) * deletionWeight;
         const totalWorkWeight = Math.max(deletionWeightTotal + fileWeights.totalWeight, 1);
@@ -1008,11 +1087,13 @@ export class Context {
         };
 
         for (const file of removed) {
+            this.throwIfIndexAborted(options.abortSignal);
             await this.deleteFileChunks(collectionName, file);
             completeDeletionWork(`Removed ${file}`);
         }
 
         for (const file of modified) {
+            this.throwIfIndexAborted(options.abortSignal);
             await this.deleteFileChunks(collectionName, file);
             completeDeletionWork(`Deleted old chunks for ${file}`);
         }
@@ -1025,18 +1106,30 @@ export class Context {
                     completeIndexFile(filePath, `Indexed ${filePath} (${fileIndex}/${totalFiles})`);
                 },
                 splitter,
-                undefined,
+                options.abortSignal,
                 (progress) => {
                     updateIndexFileProgress(
                         progress.filePath,
                         progress.fileProgress,
                         `Indexing ${path.relative(codebasePath, progress.filePath)} (${progress.processedChunks}/${progress.totalChunks} chunks)`
                     );
+                },
+                undefined,
+                {
+                    deferVectorFlushLoad: true
                 }
             );
         }
 
+        this.throwIfIndexAborted(options.abortSignal);
+        await this.finalizeVectorCollectionWrites(codebasePath);
+        this.throwIfIndexAborted(options.abortSignal);
         await currentSynchronizer.commitPendingChanges();
+        await this.refreshRemoteIndexManifestFromSynchronizer(
+            codebasePath,
+            collectionName,
+            currentSynchronizer
+        );
 
         console.log(`[Context] ✅ Re-indexing complete. Added: ${added.length}, Removed: ${removed.length}, Modified: ${modified.length}`);
         progressCallback?.({ phase: 'Re-indexing complete!', current: totalChanges, total: totalChanges, percentage: 100 });
@@ -1279,6 +1372,7 @@ export class Context {
         return {
             targetRole: this.isSearchTargetRole(options.targetRole) ? options.targetRole : 'implementation',
             includeRelated: options.includeRelated !== false,
+            enableLexicalSupplement: options.enableLexicalSupplement !== false,
             ...(explicitFilenameLikeQuery ?? inferredFilenameLikeQuery
                 ? { filenameLikeQuery: explicitFilenameLikeQuery ?? inferredFilenameLikeQuery }
                 : {})
@@ -1344,7 +1438,7 @@ export class Context {
     private isStandaloneFilenameLikeQuery(query: string, normalizedPath: string): boolean {
         const trimmedQuery = query
             .trim()
-            .replace(/^[\s"'`(<{\[]+/, '')
+            .replace(/^[\s"'`(<{[]+/, '')
             .replace(/[\s"'`),}\]>:;!?]+$/, '');
         return this.normalizeQueryPath(trimmedQuery) === normalizedPath;
     }
@@ -1372,7 +1466,7 @@ export class Context {
 
     private getSearchFileRoleIntent(query: string, filterExpr: string | undefined, targetRole: SearchTargetRole): FileRoleIntent {
         const inferredIntent = inferFileRoleIntent(query, filterExpr);
-        const preferredRoles = new Set<FileRole>();
+        const preferredRoles = new Set<FileRole>(inferredIntent.preferredRoles);
         if (targetRole === 'test') {
             preferredRoles.add('test');
         } else if (targetRole === 'docs') {
@@ -1644,11 +1738,32 @@ export class Context {
             return 0;
         }
 
+        if (this.hasRouteCompositionAnchorMatch(result, query)) {
+            return 1;
+        }
+
         if (reasons.includes('path_match') || this.hasLiteralAnchorMatch(result, query)) {
             return 1;
         }
 
+        if (reasons.includes('reference_match') && result.score >= 180) {
+            return 1;
+        }
+
         return 2;
+    }
+
+    private hasRouteCompositionAnchorMatch(result: SemanticSearchResult, query: string): boolean {
+        const routeCompositionTerms = this.extractLexicalSearchTerms(query).routeCompositionTerms;
+        if (routeCompositionTerms.length === 0) {
+            return false;
+        }
+
+        const lowerContent = result.content.toLowerCase();
+        return routeCompositionTerms.some(routeTerm =>
+            lowerContent.includes(routeTerm.groupPrefix.toLowerCase())
+            && lowerContent.includes(routeTerm.childRoute.toLowerCase())
+        );
     }
 
     private hasLiteralAnchorMatch(result: SemanticSearchResult, query: string): boolean {
@@ -1765,11 +1880,7 @@ export class Context {
     }
 
     private splitStructuralToken(value: string): string[] {
-        return value
-            .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-            .split(/[^A-Za-z0-9]+/)
-            .map(term => term.trim())
-            .filter(term => term.length > 0);
+        return splitStructuralToken(value);
     }
 
     private getStructuralTermVariants(term: string): string[] {
@@ -1830,60 +1941,52 @@ export class Context {
             || /^(?:async\s+)?def\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(firstMeaningfulLine)
             || /^func\s+(?:\([^)]+\)\s*)?[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(firstMeaningfulLine)
             || /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(firstMeaningfulLine)
-            || /^(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+[A-Za-z_$][A-Za-z0-9_$]*\s*\(/.test(firstMeaningfulLine);
+            || /^(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>[\],.?]*\s+)+[A-Za-z_$][A-Za-z0-9_$]*\s*\(/.test(firstMeaningfulLine);
     }
 
     private async addLexicalSearchResults(
         collectionName: string,
         query: string,
         candidateLimit: number,
-        outputLimit: number,
+        _outputLimit: number,
         filterExpr: string | undefined,
         vectorResults: SemanticSearchResult[],
         options: NormalizedSemanticSearchOptions
     ): Promise<SemanticSearchResult[]> {
+        if (!options.enableLexicalSupplement || options.targetRole === 'all') {
+            return vectorResults;
+        }
+
         const terms = this.extractLexicalSearchTerms(query);
-        if (terms.recallTerms.length === 0) {
+        if (!options.filenameLikeQuery && !this.hasStructuredLexicalAnchors(terms)) {
             return vectorResults;
         }
 
         const roleIntent = this.getSearchFileRoleIntent(query, filterExpr, options.targetRole);
         let exactRows: QueryRow[] = [];
-        let broadRows: QueryRow[] = [];
         let exactCandidates: RankedLexicalCandidate[] = [];
         try {
-            const lexicalLimits = this.getLexicalCandidateLimits(candidateLimit);
+            const lexicalLimit = this.getLexicalCandidateLimit(candidateLimit);
             const exactFilter = options.filenameLikeQuery
                 ? this.buildFilenameLikeExactCandidateFilter(options.filenameLikeQuery, filterExpr)
                 : this.buildExactCandidateFilter(terms, filterExpr);
-            exactRows = await this.vectorDatabase.query(
+            if (!exactFilter) {
+                return vectorResults;
+            }
+            exactRows = await this.queryLexicalSupplementRows(
                 collectionName,
                 exactFilter,
                 [...DEFAULT_SEARCH_OUTPUT_FIELDS],
-                lexicalLimits.exact
+                lexicalLimit
             );
             exactCandidates = this.rankLexicalRows(exactRows, terms, roleIntent);
-            if (!options.filenameLikeQuery && this.shouldQueryBroadLexicalCandidates(exactCandidates, outputLimit, lexicalLimits.exact)) {
-                const lexicalFilter = this.buildLexicalFilter(terms, filterExpr);
-                broadRows = await this.vectorDatabase.query(
-                    collectionName,
-                    lexicalFilter,
-                    [...DEFAULT_SEARCH_OUTPUT_FIELDS],
-                    lexicalLimits.broad
-                );
-            }
         } catch (error) {
-            if (this.isMissingStructuredFieldError(error) && options.filenameLikeQuery) {
-                console.warn(`[Context] Filename-like lexical supplement unavailable for '${collectionName}' because structured filename fields are missing.`);
-                return vectorResults;
-            }
-
-            throw this.isMissingStructuredFieldError(error)
-                ? this.createCollectionSchemaMismatchError(collectionName, 'Milvus rejected one or more structured lexical filter fields.')
-                : error;
+            const reason = error instanceof Error ? error.message : String(error);
+            console.warn(`[Context] Lexical supplement skipped for '${collectionName}': ${reason}`);
+            return vectorResults;
         }
 
-        if (exactRows.length === 0 && broadRows.length === 0) {
+        if (exactRows.length === 0) {
             return vectorResults;
         }
 
@@ -1902,10 +2005,7 @@ export class Context {
             });
         });
 
-        const lexicalCandidates = [
-            ...exactCandidates,
-            ...this.rankLexicalRows(this.excludeExistingQueryRows(broadRows, exactRows), terms, roleIntent)
-        ];
+        const lexicalCandidates = exactCandidates;
 
         for (const candidate of lexicalCandidates) {
             const { result, metadata, lexicalScore } = candidate;
@@ -1957,6 +2057,30 @@ export class Context {
             }) => result);
     }
 
+    private async queryLexicalSupplementRows(
+        collectionName: string,
+        filter: string,
+        outputFields: string[],
+        limit: number
+    ): Promise<QueryRow[]> {
+        return new Promise<QueryRow[]>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                reject(new SearchTimeoutError(`Lexical supplement query timed out after ${LEXICAL_SUPPLEMENT_TIMEOUT_MS}ms.`));
+            }, LEXICAL_SUPPLEMENT_TIMEOUT_MS);
+            timer.unref?.();
+
+            void this.vectorDatabase.query(collectionName, filter, outputFields, limit)
+                .then(rows => {
+                    clearTimeout(timer);
+                    resolve(rows);
+                })
+                .catch(error => {
+                    clearTimeout(timer);
+                    reject(error);
+                });
+        });
+    }
+
     private buildFilenameLikeExactCandidateFilter(query: SemanticSearchFilenameLikeQuery, filterExpr?: string): string {
         const filenameFilter = query.isPathLike
             ? `relativePath == "${this.escapeFilterString(query.normalizedPath)}"`
@@ -1974,28 +2098,21 @@ export class Context {
         return `basename == "${this.escapeFilterString(basename)}" and fileExtension == "${this.escapeFilterString(extension)}"`;
     }
 
-    private getLexicalCandidateLimits(topK: number): { exact: number; broad: number } {
+    private getLexicalCandidateLimit(topK: number): number {
         const normalizedTopK = Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 5;
 
-        return {
-            exact: Math.min(
-                Math.max(normalizedTopK * 20, LEXICAL_EXACT_CANDIDATE_LIMIT_MIN),
-                LEXICAL_EXACT_CANDIDATE_LIMIT_MAX
-            ),
-            broad: Math.min(
-                Math.max(normalizedTopK * 8, LEXICAL_BROAD_CANDIDATE_LIMIT_MIN),
-                LEXICAL_BROAD_CANDIDATE_LIMIT_MAX
-            )
-        };
+        return Math.min(
+            Math.max(normalizedTopK * 20, LEXICAL_EXACT_CANDIDATE_LIMIT_MIN),
+            LEXICAL_EXACT_CANDIDATE_LIMIT_MAX
+        );
     }
 
-    private shouldQueryBroadLexicalCandidates(exactCandidates: RankedLexicalCandidate[], topK: number, exactLimit: number): boolean {
-        const normalizedTopK = Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 5;
-        const exactEnoughThreshold = Math.min(normalizedTopK, exactLimit);
-        const effectiveExactCandidates = exactCandidates.filter(candidate =>
-            candidate.lexicalScore.ownerTier >= LEXICAL_OWNER_TIERS.exactDefinition
-        );
-        return effectiveExactCandidates.length < exactEnoughThreshold;
+    private getNeutralFileRoleIntent(): FileRoleIntent {
+        return {
+            preferredRoles: new Set<FileRole>(),
+            explicitExtensions: new Set<string>(),
+            disableRoleScoring: true
+        };
     }
 
     private extractLexicalSearchTerms(query: string): LexicalSearchTerms {
@@ -2039,6 +2156,16 @@ export class Context {
                 if (basename && basename !== term && basename.length >= 3) {
                     pathHints.add(basename);
                 }
+                const structuralTerms = isHttpPath || isDottedOrColonApi || isEnvVar
+                    ? []
+                    : this.getPathLikeStructuralTerms(term);
+                for (const structuralTerm of structuralTerms) {
+                    if (this.isFileRoleHintToken(structuralTerm)) {
+                        roleHints.add(structuralTerm);
+                    } else {
+                        pathHints.add(structuralTerm);
+                    }
+                }
             } else if (isIdentifierLike || isSnakeCase || isEnvVar || isDottedOrColonApi || isLongSpecificToken) {
                 strongAnchors.add(term);
             } else if (isRoleHint) {
@@ -2048,14 +2175,34 @@ export class Context {
             }
         }
 
+        const descriptorPhrases = this.extractDescriptorPhrases(rawTerms);
+        const descriptorRecallTerms = this.extractDescriptorRecallTerms(rawTerms, descriptorPhrases);
+        const routeCompositionTerms = this.extractRouteCompositionTerms([...literalAnchors]);
         const primaryTerms = [...new Set([
             ...strongAnchors,
             ...pathHints,
             ...literalAnchors,
         ])].slice(0, 8);
+        const primaryRecallTerms = [...new Set(primaryTerms.flatMap(term => this.getLexicalRecallTermVariants(term)))].slice(0, 12);
+        const descriptorRecallTermsForQuery = descriptorPhrases.length > 0
+            ? descriptorRecallTerms
+            : [];
+        const routeRecallTerms = routeCompositionTerms.flatMap(term => [term.groupPrefix, term.childRoute]);
+        const scoringTerms = this.uniqueCaseInsensitive([
+            ...primaryTerms.flatMap(term => this.getLexicalRecallTermVariants(term)),
+            ...roleHints,
+            ...routeRecallTerms,
+        ]).slice(0, 16);
         const fallbackRecallTerms = primaryTerms.length > 0
-            ? primaryTerms
-            : [...roleHints].slice(0, 8);
+            ? [...new Set([
+                ...primaryRecallTerms,
+                ...descriptorRecallTermsForQuery,
+                ...routeRecallTerms,
+            ])].slice(0, 18)
+            : [...new Set([
+                ...roleHints,
+                ...descriptorRecallTermsForQuery,
+            ])].slice(0, 12);
 
         return {
             strongAnchors: [...strongAnchors].slice(0, 8),
@@ -2063,74 +2210,182 @@ export class Context {
             roleHints: [...roleHints].slice(0, 8),
             pathHints: [...pathHints].slice(0, 8),
             literalAnchors: [...literalAnchors].slice(0, 8),
+            descriptorPhrases,
+            descriptorRecallTerms: descriptorRecallTermsForQuery,
+            routeCompositionTerms,
             recallTerms: fallbackRecallTerms,
-            scoringTerms: [...new Set([
-                ...strongAnchors,
-                ...pathHints,
-                ...roleHints,
-                ...literalAnchors,
-            ])].slice(0, 12)
+            scoringTerms
         };
     }
 
-    private buildLexicalFilter(terms: LexicalSearchTerms, filterExpr?: string): string {
-        const termFilters = terms.recallTerms
-            .map(term => this.escapeFilterString(term))
-            .flatMap(term => [
-                `relativePath like "%${term}%"`,
-                `content like "%${term}%"`,
-                `primarySymbol like "%${term}%"`,
-                `basename like "%${term}%"`,
-                `pathSegment0 like "%${term}%"`,
-                `pathSegment1 like "%${term}%"`,
-                `pathSegment2 like "%${term}%"`,
-                `pathSegment3 like "%${term}%"`,
-                `pathSegment4 like "%${term}%"`
-            ]);
-
-        const lexicalFilter = `(${termFilters.join(' or ')})`;
-        if (filterExpr && filterExpr.trim().length > 0) {
-            return `(${filterExpr}) and ${lexicalFilter}`;
+    private uniqueCaseInsensitive(terms: string[]): string[] {
+        const seen = new Set<string>();
+        const uniqueTerms: string[] = [];
+        for (const term of terms) {
+            const key = term.toLowerCase();
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            uniqueTerms.push(term);
         }
 
-        return lexicalFilter;
+        return uniqueTerms;
     }
 
-    private buildExactCandidateFilter(terms: LexicalSearchTerms, filterExpr?: string): string {
-        const termFilters = terms.recallTerms
-            .map(term => this.escapeFilterString(term))
-            .flatMap(term => {
-                const filters = [
-                    `relativePath like "%${term}%"`,
-                    `content like "%${term}%"`,
-                    `basename == "${term}"`,
-                    `primarySymbol == "${term}"`,
-                    `primarySymbol like "%${term}%"`,
-                    `pathSegment0 == "${term}"`,
-                    `pathSegment1 == "${term}"`,
-                    `pathSegment2 == "${term}"`,
-                    `pathSegment3 == "${term}"`,
-                    `pathSegment4 == "${term}"`
-                ];
+    private extractDescriptorPhrases(rawTerms: string[]): DescriptorPhrase[] {
+        const normalizedTerms = new Set(rawTerms
+            .flatMap(term => this.splitStructuralToken(term))
+            .map(term => term.toLowerCase())
+            .flatMap(term => this.getStructuralTermVariants(term)));
+        const hasAny = (...terms: string[]) => terms.some(term => normalizedTerms.has(term));
+        const phrases = new Set<DescriptorPhrase>();
 
-                if (this.isIdentifierTerm(term)) {
-                    filters.push(
-                        `(isDefinition == true and primarySymbol == "${term}")`,
-                        `content like "%class ${term}%"`,
-                        `content like "%interface ${term}%"`,
-                        `content like "%function ${term}%"`,
-                        `content like "%def ${term}%"`,
-                        `content like "%func ${term}%"`,
-                        `content like "%fn ${term}%"`,
-                        `content like "%struct ${term}%"`,
-                        `content like "%const ${term}%"`,
-                        `content like "%type ${term}%"`,
-                        `content like "%enum ${term}%"`
-                    );
+        if (hasAny('route', 'router') && hasAny('group')) {
+            phrases.add('route_group');
+        }
+        if (hasAny('route', 'router') && hasAny('registration', 'register', 'registered')) {
+            phrases.add('route_registration');
+        }
+        if (hasAny('mapping', 'map') && hasAny('table')) {
+            phrases.add('mapping_table');
+        }
+        if (hasAny('central', 'owner') && hasAny('registry', 'registration', 'register')) {
+            phrases.add('owner_registry');
+        }
+        if (hasAny('command', 'subcommand') && hasAny('registration', 'register', 'declaration', 'declare', 'owner')) {
+            phrases.add('command_registration');
+        }
+        if (hasAny('module', 'modules') && hasAny('registry', 'registration', 'register')) {
+            phrases.add('module_registration');
+        }
+        if (hasAny('generic') && hasAny('adapter', 'adaptor')) {
+            phrases.add('generic_adapter');
+        }
+        if ((hasAny('startup', 'start', 'entry', 'entrypoint', 'bootstrap') && hasAny('owner', 'registration', 'main', 'entry'))
+            || (hasAny('start', 'startup') && hasAny('dispatch', 'dispatched', 'command', 'commands', 'state'))) {
+            phrases.add('startup_entry');
+        }
+
+        return [...phrases].slice(0, 6);
+    }
+
+    private extractDescriptorRecallTerms(rawTerms: string[], descriptorPhrases: DescriptorPhrase[]): string[] {
+        if (descriptorPhrases.length === 0) {
+            return [];
+        }
+
+        const phraseTerms: Record<DescriptorPhrase, string[]> = {
+            route_group: ['route', 'Route', 'router', 'Router', 'group', 'Group'],
+            route_registration: ['route', 'Route', 'router', 'Router', 'register', 'Register', 'registration', 'Registration'],
+            mapping_table: ['mapping', 'Mapping', 'map', 'Map', 'table', 'Table', 'switch', 'Switch', 'adaptor', 'Adaptor', 'adapter', 'Adapter'],
+            owner_registry: ['registry', 'Registry', 'register', 'Register', 'registration', 'Registration', 'module', 'Module'],
+            command_registration: ['command', 'Command', 'commands', 'Commands', 'subcommand', 'Subcommand', 'register', 'Register', 'registration', 'Registration'],
+            module_registration: ['module', 'Module', 'modules', 'Modules', 'registry', 'Registry', 'register', 'Register', 'registration', 'Registration'],
+            generic_adapter: ['generic', 'Generic', 'adapter', 'Adapter', 'adaptor', 'Adaptor', 'mapping', 'Mapping'],
+            startup_entry: ['startup', 'Startup', 'start', 'Start', 'entry', 'Entry', 'entrypoint', 'Entrypoint', 'bootstrap', 'Bootstrap', 'main', 'Main', 'dispatch', 'Dispatch', 'commands', 'Commands'],
+        };
+        const terms = new Set<string>();
+
+        for (const phrase of descriptorPhrases) {
+            for (const term of phraseTerms[phrase]) {
+                terms.add(term);
+            }
+        }
+
+        return [...terms].slice(0, 16);
+    }
+
+    private getLexicalRecallTermVariants(term: string): string[] {
+        const variants = new Set<string>([term]);
+        for (const structuralTerm of this.getPathLikeStructuralTerms(term)) {
+            variants.add(structuralTerm);
+        }
+        if (/^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+$/.test(term)) {
+            const parts = term.split('_').filter(part => part.length > 0);
+            const pascalParts = parts.map(part => this.toIdentifierPart(part, true));
+            if (pascalParts.length > 0) {
+                variants.add(pascalParts.join(''));
+                variants.add(`${pascalParts[0].charAt(0).toLowerCase()}${pascalParts[0].slice(1)}${pascalParts.slice(1).join('')}`);
+            }
+        }
+
+        if (/^[a-z][a-z0-9-]*$/.test(term)) {
+            variants.add(`${term.charAt(0).toUpperCase()}${term.slice(1)}`);
+        }
+
+        if (term.toLowerCase() === 'security') {
+            variants.add('secure');
+            variants.add('Secure');
+        }
+
+        return [...variants].filter(value => value.length >= 3);
+    }
+
+    private getPathLikeStructuralTerms(term: string): string[] {
+        if (!/[./:_-]/.test(term)) {
+            return [];
+        }
+        if (term.startsWith('/')
+            || term.includes('.')
+            || /^[A-Z][A-Z0-9_]{2,}$/.test(term)
+            || /^[A-Za-z_][A-Za-z0-9_-]*(?:[.:][A-Za-z_][A-Za-z0-9_-]*)+$/.test(term)) {
+            return [];
+        }
+
+        return this.uniqueCaseInsensitive(
+            term
+                .split(/[./:_-]+/)
+                .flatMap(part => this.splitStructuralToken(part))
+                .filter(part => part.length >= 3 && !this.isStructuralStopword(part))
+        ).slice(0, 8);
+    }
+
+    private toIdentifierPart(value: string, capitalize: boolean): string {
+        const lowerValue = value.toLowerCase();
+        if (['id', 'api', 'url', 'uri', 'http', 'https'].includes(lowerValue)) {
+            return lowerValue.toUpperCase();
+        }
+
+        return capitalize
+            ? `${lowerValue.charAt(0).toUpperCase()}${lowerValue.slice(1)}`
+            : lowerValue;
+    }
+
+    private extractRouteCompositionTerms(literalAnchors: string[]): RouteCompositionTerm[] {
+        const terms: RouteCompositionTerm[] = [];
+        for (const anchor of literalAnchors) {
+            const normalized = anchor.replace(/\/+/g, '/');
+            if (!normalized.startsWith('/')) {
+                continue;
+            }
+
+            const segments = normalized.split('/').filter(segment => segment.length > 0);
+            if (segments.length < 3) {
+                continue;
+            }
+
+            for (let index = 0; index < segments.length - 1; index += 1) {
+                const childSegments = segments.slice(index + 1);
+                if (childSegments.length < 2) {
+                    continue;
                 }
+                terms.push({
+                    fullPath: normalized,
+                    groupPrefix: `/${segments[index]}`,
+                    childRoute: `/${childSegments.join('/')}`,
+                });
+            }
+        }
 
-                return filters;
-            });
+        return terms.slice(0, 8);
+    }
+
+    private buildExactCandidateFilter(terms: LexicalSearchTerms, filterExpr?: string): string | undefined {
+        const termFilters = this.buildStructuredExactLexicalFilters(terms);
+        if (termFilters.length === 0) {
+            return undefined;
+        }
 
         const exactFilter = `(${termFilters.join(' or ')})`;
         if (filterExpr && filterExpr.trim().length > 0) {
@@ -2140,16 +2395,72 @@ export class Context {
         return exactFilter;
     }
 
-    private isMissingStructuredFieldError(error: unknown): boolean {
-        const message = error instanceof Error ? error.message : String(error);
-        const lowerMessage = message.toLowerCase();
-        const lexicalFilterFields = [
-            ...STRUCTURED_METADATA_FIELDS,
-            'fileExtension',
-            'relativePath',
-        ];
-        return lexicalFilterFields.some(field => lowerMessage.includes(field.toLowerCase()))
-            && /field|schema|output|not.*exist|not.*found|cannot.*find|undefined/i.test(message);
+    private hasStructuredLexicalAnchors(terms: LexicalSearchTerms): boolean {
+        return terms.strongAnchors.length > 0
+            || terms.pathHints.length > 0
+            || terms.literalAnchors.length > 0;
+    }
+
+    private buildStructuredExactLexicalFilters(terms: LexicalSearchTerms): string[] {
+        const filters = new Set<string>();
+        const addEquality = (field: string, value: string) => {
+            const normalizedValue = value.trim();
+            if (normalizedValue.length === 0) {
+                return;
+            }
+            filters.add(`${field} == "${this.escapeFilterString(normalizedValue)}"`);
+        };
+        const addBasename = (value: string) => addEquality('basename', value);
+        const addPathSegments = (value: string) => {
+            for (const field of ['pathSegment0', 'pathSegment1', 'pathSegment2', 'pathSegment3', 'pathSegment4']) {
+                addEquality(field, value);
+            }
+        };
+        const addIdentifier = (value: string) => {
+            addEquality('primarySymbol', value);
+            filters.add(`(isDefinition == true and primarySymbol == "${this.escapeFilterString(value)}")`);
+            addBasename(value);
+            const lowerFirst = value.length > 1
+                ? `${value.charAt(0).toLowerCase()}${value.slice(1)}`
+                : value.toLowerCase();
+            if (lowerFirst !== value) {
+                addBasename(lowerFirst);
+            }
+        };
+        const addFileToken = (value: string) => {
+            const normalizedPath = this.normalizeQueryPath(value);
+            const basename = path.posix.basename(normalizedPath);
+            const extension = path.posix.extname(basename);
+            if (extension) {
+                filters.add(`(${this.buildBasenameExactFilter(basename)})`);
+            }
+            if (normalizedPath.includes('/')) {
+                addEquality('relativePath', normalizedPath);
+            }
+            const basenameWithoutExtension = extension
+                ? path.posix.basename(basename, extension)
+                : basename;
+            addBasename(basenameWithoutExtension);
+            addPathSegments(basenameWithoutExtension);
+        };
+
+        for (const term of this.uniqueCaseInsensitive([
+            ...terms.strongAnchors,
+            ...terms.literalAnchors,
+            ...terms.pathHints,
+        ]).slice(0, 12)) {
+            if (this.isLikelyFileToken(this.normalizeQueryPath(term))) {
+                addFileToken(term);
+            }
+            if (this.isIdentifierTerm(term)) {
+                addIdentifier(term);
+            } else {
+                addBasename(term);
+                addPathSegments(term);
+            }
+        }
+
+        return [...filters];
     }
 
     private isIdentifierTerm(term: string): boolean {
@@ -2157,11 +2468,11 @@ export class Context {
     }
 
     private isFileRoleHintToken(term: string): boolean {
-        return /^(?:__tests__|tests?|specs?|e2e|readme|docs?|documentation|markdown|mdx?|css|scss|sass|less|stylus?|styles?|stylesheet|generated|dist|build|bundle|minified|min)$/i.test(term);
+        return /^(?:__tests__|tests?|specs?|e2e|readme|docs?|documentation|markdown|mdx?|css|scss|sass|less|stylus?|styles?|stylesheet|generated|dist|build|bundle|minified|min|config|configuration|package|packaging|metadata|dependencies|dependency|cmake|makefile|pyproject|cargo|gomod)$/i.test(term);
     }
 
     private isQueryAnchorStopword(term: string): boolean {
-        return /^(?:where|when|what|which|who|whom|whose|why|how|does|this|that|these|those|with|from|into|onto|between|including|implemented|handles?|uses?|reads?|writes?|shows?|find)$/i.test(term);
+        return /^(?:where|when|what|which|who|whom|whose|why|how|does|after|before|this|that|these|those|with|from|into|onto|between|including|implemented|handles?|uses?|reads?|writes?|shows?|find)$/i.test(term);
     }
 
     private vectorSearchResultToSemanticSearchResult(document: VectorDocument, score: number): SemanticSearchResult {
@@ -2217,20 +2528,6 @@ export class Context {
 
                 return a.result.startLine - b.result.startLine;
             });
-    }
-
-    private excludeExistingQueryRows(rows: QueryRow[], existingRows: QueryRow[]): QueryRow[] {
-        const existingKeys = new Set(existingRows.map(row => this.getQueryRowKey(row)));
-        return rows.filter(row => !existingKeys.has(this.getQueryRowKey(row)));
-    }
-
-    private getQueryRowKey(row: QueryRow): string {
-        return [
-            typeof row.relativePath === 'string' ? row.relativePath : '',
-            String(row.startLine ?? ''),
-            String(row.endLine ?? ''),
-            typeof row.id === 'string' ? row.id : ''
-        ].join(':');
     }
 
     private mergeScoreReasons(existingReasons: SearchScoreReason[], newReasons: SearchScoreReason[]): SearchScoreReason[] {
@@ -2362,6 +2659,11 @@ export class Context {
         const symbols = this.getMetadataStringArray(metadata, 'symbols');
         const definitionIdentifiers = this.getMetadataStringArray(metadata, 'definitionIdentifiers');
         const pathTokens = this.getMetadataStringArray(metadata, 'pathTokens');
+        let contentDefinitionIdentifiers: string[] | undefined;
+        const getContentDefinitionIdentifiers = () => {
+            contentDefinitionIdentifiers ??= extractDefinitionIdentifiers(content);
+            return contentDefinitionIdentifiers;
+        };
 
         let score = 0;
         let ownerTier: number = LEXICAL_OWNER_TIERS.semantic;
@@ -2395,7 +2697,7 @@ export class Context {
                 score += 360;
                 reasons.add('exact_symbol_definition');
                 promoteOwnerTier(LEXICAL_OWNER_TIERS.exactDefinition);
-            } else if (this.hasDefinitionMatch(content, term)) {
+            } else if (getContentDefinitionIdentifiers().some(symbol => symbol === term || symbol.toLowerCase() === lowerTerm)) {
                 score += 320;
                 reasons.add('exact_symbol_definition');
                 promoteOwnerTier(LEXICAL_OWNER_TIERS.exactDefinition);
@@ -2422,6 +2724,22 @@ export class Context {
             }
         }
 
+        const routeCompositionScore = this.scoreRouteCompositionMatches(result, terms);
+        if (routeCompositionScore > 0) {
+            score += routeCompositionScore;
+            reasons.add('path_match');
+            promoteOwnerTier(LEXICAL_OWNER_TIERS.pathOwner);
+        }
+
+        const descriptorScore = this.scoreDescriptorPhraseMatches(result, metadata, terms);
+        if (descriptorScore > 0) {
+            score += descriptorScore;
+            reasons.add('reference_match');
+            if (descriptorScore >= 180) {
+                promoteOwnerTier(LEXICAL_OWNER_TIERS.reference);
+            }
+        }
+
         if (score > 0) {
             score += this.scoreWeakDescriptorMatches(result, metadata, terms.weakDescriptors);
             score += this.scoreFileRoleMatch(result, metadata, roleIntent);
@@ -2433,6 +2751,150 @@ export class Context {
             reasons: scoreReasons,
             ownerTier
         };
+    }
+
+    private hasCentralOwnerDescriptorPhrase(phrases: DescriptorPhrase[]): boolean {
+        return phrases.some(phrase => [
+            'mapping_table',
+            'owner_registry',
+            'command_registration',
+            'module_registration',
+            'generic_adapter',
+            'startup_entry',
+        ].includes(phrase));
+    }
+
+    private scoreRouteCompositionMatches(result: SemanticSearchResult, terms: LexicalSearchTerms): number {
+        if (terms.routeCompositionTerms.length === 0) {
+            return 0;
+        }
+
+        const lowerContent = result.content.toLowerCase();
+        const lowerPath = result.relativePath.toLowerCase();
+        let score = 0;
+        for (const routeTerm of terms.routeCompositionTerms) {
+            const fullPath = routeTerm.fullPath.toLowerCase();
+            const groupPrefix = routeTerm.groupPrefix.toLowerCase();
+            const childRoute = routeTerm.childRoute.toLowerCase();
+            if (lowerContent.includes(fullPath)) {
+                score += 180;
+            } else if (lowerContent.includes(groupPrefix) && lowerContent.includes(childRoute)) {
+                score += 320;
+            } else if (lowerContent.includes(childRoute)) {
+                score += 80;
+            }
+
+            if ((lowerPath.includes('router') || lowerPath.includes('route')) && lowerContent.includes(childRoute)) {
+                score += 80;
+            }
+        }
+
+        return Math.min(score, 420);
+    }
+
+    private scoreDescriptorPhraseMatches(
+        result: SemanticSearchResult,
+        metadata: QueryRow,
+        terms: LexicalSearchTerms
+    ): number {
+        if (terms.descriptorPhrases.length === 0) {
+            return 0;
+        }
+
+        const normalizedContent = this.normalizeDescriptorText(result.content);
+        const normalizedPath = this.normalizeDescriptorText(result.relativePath);
+        const normalizedMetadata = this.normalizeDescriptorText([
+            this.getMetadataString(metadata, 'fileName'),
+            this.getMetadataString(metadata, 'basename'),
+            ...this.getMetadataStringArray(metadata, 'pathTokens'),
+            ...this.getMetadataStringArray(metadata, 'symbols'),
+            ...this.getMetadataStringArray(metadata, 'definitionIdentifiers'),
+        ].join(' '));
+        const combined = `${normalizedPath} ${normalizedContent} ${normalizedMetadata}`;
+        let score = 0;
+
+        for (const phrase of terms.descriptorPhrases) {
+            switch (phrase) {
+                case 'route_group':
+                    if ((combined.includes('router group') || combined.includes('route group') || result.content.includes('.Group('))
+                        && (normalizedPath.includes('router') || normalizedPath.includes('route'))) {
+                        score += 220;
+                    } else if (combined.includes('group') && (normalizedPath.includes('router') || normalizedPath.includes('route'))) {
+                        score += 120;
+                    }
+                    break;
+                case 'route_registration':
+                    if ((/\.?(?:GET|POST|PUT|PATCH|DELETE|Handle|Any)\s*\(/.test(result.content) || combined.includes('register'))
+                        && (normalizedPath.includes('router') || normalizedPath.includes('route'))) {
+                        score += 180;
+                    }
+                    break;
+                case 'mapping_table':
+                    if ((combined.includes('switch') || combined.includes(' map ') || combined.includes('mapping'))
+                        && (combined.includes('api type') || combined.includes('adaptor') || combined.includes('adapter'))) {
+                        score += this.startsWithDefinitionLike(result.content) ? 260 : 190;
+                    }
+                    break;
+                case 'owner_registry':
+                    if (combined.includes('registry') || combined.includes('registration') || combined.includes('register')) {
+                        score += normalizedPath.includes('registry') || normalizedPath.includes('module') || normalizedPath.includes('cmd')
+                            ? 220
+                            : 120;
+                    }
+                    break;
+                case 'command_registration':
+                    if (combined.includes('command') && (combined.includes('register') || combined.includes('registration') || combined.includes('declare'))) {
+                        score += normalizedPath.includes('cmd') || normalizedPath.includes('command') || normalizedPath.includes('cli')
+                            ? 240
+                            : 150;
+                    }
+                    break;
+                case 'module_registration':
+                    if (combined.includes('module') && (combined.includes('registry') || combined.includes('register') || combined.includes('registration'))) {
+                        score += normalizedPath.includes('module') || normalizedPath.includes('registry')
+                            ? 240
+                            : 150;
+                    }
+                    break;
+                case 'generic_adapter':
+                    if (normalizedPath.includes('adapter') || normalizedPath.includes('adaptor')) {
+                        score += 260;
+                    } else if ((combined.includes('generic adapter') || combined.includes('generic adaptor'))
+                        || ((combined.includes('adapter') || combined.includes('adaptor')) && (combined.includes('map') || combined.includes('switch')))) {
+                        score += 140;
+                    }
+                    break;
+                case 'startup_entry':
+                    if (combined.includes('startup')
+                        || combined.includes('entrypoint')
+                        || combined.includes('bootstrap')
+                        || combined.includes('dispatch')
+                        || normalizedPath.includes('main')) {
+                        score += normalizedPath.includes('startup')
+                            || normalizedPath.includes('bootstrap')
+                            || normalizedPath.includes('main')
+                            ? 220
+                            : 120;
+                    }
+                    if ((combined.includes('global args') || combined.includes('global state') || combined.includes('environment'))
+                        && (combined.includes('commands') || combined.includes('parsed run command') || combined.includes('dispatch'))) {
+                        score += 120;
+                    }
+                    break;
+            }
+        }
+
+        return Math.min(score, 420);
+    }
+
+    private normalizeDescriptorText(value: string): string {
+        return value
+            .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+            .replace(/[_./:-]+/g, ' ')
+            .replace(/[^A-Za-z0-9]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
     }
 
     private scoreWeakDescriptorMatches(result: SemanticSearchResult, metadata: QueryRow, weakDescriptors: string[]): number {
@@ -2462,6 +2924,10 @@ export class Context {
     }
 
     private scoreFileRoleMatch(result: SemanticSearchResult, metadata: QueryRow, roleIntent: FileRoleIntent): number {
+        if (roleIntent.disableRoleScoring === true) {
+            return 0;
+        }
+
         const role = this.getFileRole(result, metadata);
         if (isFileRoleExplicitlyRequested(role, roleIntent, result.relativePath)) {
             return role === 'implementation' && roleIntent.preferredRoles.size > 0 ? 0 : 120;
@@ -2518,20 +2984,6 @@ export class Context {
         }
 
         return value.filter((item): item is string => typeof item === 'string');
-    }
-
-    private hasDefinitionMatch(content: string, term: string): boolean {
-        const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const definitionPatterns = [
-            new RegExp(`\\b(?:export\\s+)?(?:default\\s+)?(?:abstract\\s+)?(?:class|interface|function|type|enum|const|let|var)\\s+${escapedTerm}\\b`),
-            new RegExp(`\\b(?:async\\s+)?def\\s+${escapedTerm}\\s*\\(`),
-            new RegExp(`\\bfunc\\s+(?:\\([^)]+\\)\\s*)?${escapedTerm}\\s*\\(`),
-            new RegExp(`\\b(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${escapedTerm}\\s*\\(`),
-            new RegExp(`\\b(?:pub(?:\\([^)]*\\))?\\s+)?(?:struct|enum|trait|mod)\\s+${escapedTerm}\\b`),
-            new RegExp(`\\b(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\\s)+(?:[A-Za-z_$][A-Za-z0-9_$<>\\[\\],.?]*\\s+)+${escapedTerm}\\s*\\(`),
-            new RegExp(`^#{1,6}\\s+${escapedTerm}(?:\\s|$)`, 'm'),
-        ];
-        return definitionPatterns.some(pattern => pattern.test(content));
     }
 
     private getSearchResultKey(result: SemanticSearchResult): string {
@@ -2600,12 +3052,23 @@ export class Context {
 
         progressCallback?.({ phase: 'Removing index data...', current: 50, total: 100, percentage: 50 });
 
+        // Delete the local Merkle snapshot before dropping the collection. If
+        // local snapshot cleanup fails, the remote collection remains intact
+        // and callers do not end up with indexed snapshot state pointing at a
+        // missing collection.
+        await FileSynchronizer.deleteSnapshot(codebasePath);
+
         if (collectionExists) {
             await this.vectorDatabase.dropCollection(collectionName);
         }
 
-        // Delete snapshot file
-        await FileSynchronizer.deleteSnapshot(codebasePath);
+        try {
+            await this.vectorDatabase.deleteIndexManifest?.(collectionName, codebasePath);
+        } catch (error) {
+            console.warn(
+                `[Context] Failed to delete remote manifest for '${codebasePath}': ${error instanceof Error ? error.message : String(error)}`
+            );
+        }
 
         progressCallback?.({ phase: 'Index cleared', current: 100, total: 100, percentage: 100 });
         console.log('[Context] ✅ Index data cleaned');
@@ -3117,8 +3580,7 @@ export class Context {
                         await traverseDirectory(fullPath, depth + 1);
                     }
                 } else if (entry.isFile()) {
-                    const ext = path.extname(entry.name);
-                    if (supportedExtensions.includes(ext)) {
+                    if (isSupportedCodeFileName(entry.name, supportedExtensions)) {
                         files.push(fullPath);
                         if (discoveryMetrics) {
                             const startedAt = this.getMonotonicMs();
@@ -3259,6 +3721,11 @@ export class Context {
         let chunkLimitWarningLogged = false;
         type BatchResult = { ok: true } | { ok: false; error: unknown };
         const activeBatches = new Set<Promise<BatchResult>>();
+        const runCache: IndexingRunCache = {
+            embeddings: new Map(),
+            inFlightEmbeddings: new Map(),
+            definitionIdentifiers: new Map()
+        };
 
         const throwBatchError = (error: unknown, context: string): never => {
             if (error instanceof EmbeddingError) {
@@ -3320,8 +3787,9 @@ export class Context {
             const releaseSlot = await this.acquireIndexingBatchSlot(EMBEDDING_CONCURRENCY);
             const task: Promise<BatchResult> = this.processChunkBuffer(batch, timingMetrics, {
                 deferFlushLoad: options.deferVectorFlushLoad === true,
-                ensureCollectionBeforeInsert: options.ensureCollectionBeforeInsert
-            })
+                ensureCollectionBeforeInsert: options.ensureCollectionBeforeInsert,
+                abortSignal: signal
+            }, runCache)
                 .then(() => ({ ok: true as const }))
                 .catch((error) => ({ ok: false as const, error }))
                 .finally(() => {
@@ -3379,7 +3847,7 @@ export class Context {
                     if (extension === '.ipynb') {
                         content = this.extractNotebookSource(content);
                     }
-                    const language = this.getLanguageFromExtension(extension);
+                    const language = this.getLanguageFromFilePath(filePath);
                     const chunks = this.deduplicateFileChunks(
                         await splitter.split(content, language, filePath),
                         codebasePath,
@@ -3616,7 +4084,8 @@ export class Context {
     private async processChunkBuffer(
         chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }>,
         timingMetrics?: IndexingTimingMetrics,
-        insertOptions: ChunkBatchInsertOptions = {}
+        insertOptions: ChunkBatchInsertOptions = {},
+        runCache?: IndexingRunCache
     ): Promise<void> {
         if (chunkBuffer.length === 0) return;
 
@@ -3630,7 +4099,7 @@ export class Context {
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid' : 'regular';
         console.log(`[Context] 🔄 Processing batch of ${chunks.length} chunks (~${estimatedTokens} tokens) for ${searchType}`);
-        await this.processChunkBatch(chunks, codebasePath, timingMetrics, insertOptions);
+        await this.processChunkBatch(chunks, codebasePath, timingMetrics, insertOptions, runCache);
     }
 
     private async verifyIndexedCollection(codebasePath: string, totalChunks: number): Promise<void> {
@@ -3674,6 +4143,58 @@ export class Context {
         }
     }
 
+    private async writeRemoteIndexManifest(
+        codebasePath: string,
+        status: RemoteIndexManifestStatus,
+        indexedFiles: number,
+        totalChunks: number
+    ): Promise<void> {
+        if (typeof this.vectorDatabase.writeIndexManifest !== 'function') {
+            return;
+        }
+
+        const collectionName = this.getCollectionName(codebasePath);
+        let generation = 1;
+        if (typeof this.vectorDatabase.readIndexManifest === 'function') {
+            const existingManifest = await this.vectorDatabase.readIndexManifest(collectionName, codebasePath);
+            if (existingManifest) {
+                generation = existingManifest.generation + 1;
+            }
+        }
+
+        await this.vectorDatabase.writeIndexManifest({
+            manifestVersion: REMOTE_INDEX_MANIFEST_VERSION,
+            codebasePath,
+            collectionName,
+            status,
+            indexedFiles,
+            totalChunks,
+            schemaVersion: Context.COLLECTION_SCHEMA_VERSION,
+            metadataVersion: Context.COLLECTION_METADATA_VERSION,
+            generation,
+            updatedAt: new Date().toISOString(),
+        });
+    }
+
+    private async refreshRemoteIndexManifestFromSynchronizer(
+        codebasePath: string,
+        collectionName: string,
+        synchronizer: FileSynchronizer
+    ): Promise<void> {
+        const totalChunks = await this.vectorDatabase.getCollectionRowCount(collectionName);
+        if (totalChunks < 0) {
+            throw new IndexingVerificationError(
+                `Incremental indexing completed but collection '${collectionName}' row count could not be verified for manifest update`
+            );
+        }
+        await this.writeRemoteIndexManifest(
+            codebasePath,
+            'completed',
+            synchronizer.getTrackedFileCount(),
+            totalChunks
+        );
+    }
+
     /**
      * Process a batch of chunks
      */
@@ -3681,9 +4202,12 @@ export class Context {
         chunks: CodeChunk[],
         codebasePath: string,
         timingMetrics?: IndexingTimingMetrics,
-        insertOptions: ChunkBatchInsertOptions = {}
+        insertOptions: ChunkBatchInsertOptions = {},
+        runCache?: IndexingRunCache
     ): Promise<void> {
         const isHybrid = this.getIsHybrid();
+        const searchType = isHybrid === true ? 'hybrid' : 'regular';
+        const collectionName = this.getCollectionName(codebasePath);
 
         // Generate embedding vectors
         const chunkContents = chunks.map(chunk => chunk.content);
@@ -3691,10 +4215,16 @@ export class Context {
         let embeddings: EmbeddingVector[];
         const embeddingStartedAt = this.getMonotonicMs();
         try {
-            embeddings = await this.embedding.embedBatch(chunkContents);
+            this.throwIfIndexAborted(insertOptions.abortSignal);
+            console.log(`[Context] 🧠 Embedding ${chunks.length} ${searchType} chunk(s) for ${codebasePath}`);
+            embeddings = await this.embedChunkContents(chunkContents, runCache);
+            console.log(`[Context] ✅ Embedded ${chunks.length} chunk(s) in ${Math.round(this.getMonotonicMs() - embeddingStartedAt)}ms`);
         } catch (error) {
             if (timingMetrics) {
                 this.drainVectorDatabasePerformanceMetrics(timingMetrics);
+            }
+            if (error instanceof EmbeddingError) {
+                throw error;
             }
             const errorMessage = error instanceof Error ? error.message : String(error);
             // Include batch size in the log/error message so operators can
@@ -3706,18 +4236,22 @@ export class Context {
                 timingMetrics.embeddingMs += this.getMonotonicMs() - embeddingStartedAt;
             }
         }
+        this.throwIfIndexAborted(insertOptions.abortSignal);
         this.validateEmbeddings(embeddings, chunks.length);
-        const { ensureCollectionBeforeInsert, ...vectorInsertOptions } = insertOptions;
+        const { ensureCollectionBeforeInsert, abortSignal: _abortSignal, ...vectorInsertOptions } = insertOptions;
         await ensureCollectionBeforeInsert?.(embeddings[0].vector.length);
+        this.throwIfIndexAborted(insertOptions.abortSignal);
 
         if (isHybrid === true) {
             // Create hybrid vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index));
+            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index, runCache));
 
             // Store to vector database
             const insertStartedAt = this.getMonotonicMs();
             try {
-                await this.vectorDatabase.insertHybrid(this.getCollectionName(codebasePath), documents, vectorInsertOptions);
+                console.log(`[Context] 📥 Inserting ${documents.length} hybrid document(s) into ${collectionName}`);
+                await this.vectorDatabase.insertHybrid(collectionName, documents, vectorInsertOptions);
+                console.log(`[Context] ✅ Inserted ${documents.length} hybrid document(s) in ${Math.round(this.getMonotonicMs() - insertStartedAt)}ms`);
             } finally {
                 if (timingMetrics) {
                     const elapsedMs = this.getMonotonicMs() - insertStartedAt;
@@ -3727,12 +4261,14 @@ export class Context {
             }
         } else {
             // Create regular vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index));
+            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index, runCache));
 
             // Store to vector database
             const insertStartedAt = this.getMonotonicMs();
             try {
-                await this.vectorDatabase.insert(this.getCollectionName(codebasePath), documents, vectorInsertOptions);
+                console.log(`[Context] 📥 Inserting ${documents.length} regular document(s) into ${collectionName}`);
+                await this.vectorDatabase.insert(collectionName, documents, vectorInsertOptions);
+                console.log(`[Context] ✅ Inserted ${documents.length} regular document(s) in ${Math.round(this.getMonotonicMs() - insertStartedAt)}ms`);
             } finally {
                 if (timingMetrics) {
                     const elapsedMs = this.getMonotonicMs() - insertStartedAt;
@@ -3743,7 +4279,103 @@ export class Context {
         }
     }
 
-    private createVectorDocument(chunk: CodeChunk, embedding: EmbeddingVector, codebasePath: string, chunkIndex: number): VectorDocument {
+    private async embedChunkContents(
+        chunkContents: string[],
+        runCache?: IndexingRunCache
+    ): Promise<EmbeddingVector[]> {
+        if (!runCache) {
+            return this.embedding.embedBatch(chunkContents);
+        }
+
+        const embeddings = new Array<EmbeddingVector>(chunkContents.length);
+        const waitForInFlight: Promise<void>[] = [];
+        const missingByKey = new Map<string, { content: string; indexes: number[] }>();
+
+        for (let index = 0; index < chunkContents.length; index++) {
+            const content = chunkContents[index];
+            const key = this.createEmbeddingCacheKey(content);
+            const cached = runCache.embeddings.get(key);
+            if (cached) {
+                embeddings[index] = cached;
+                continue;
+            }
+
+            const inFlight = runCache.inFlightEmbeddings.get(key);
+            if (inFlight) {
+                const wait = inFlight.then((embedding) => {
+                    embeddings[index] = embedding;
+                });
+                wait.catch(() => undefined);
+                waitForInFlight.push(wait);
+                continue;
+            }
+
+            const missing = missingByKey.get(key);
+            if (missing) {
+                missing.indexes.push(index);
+            } else {
+                missingByKey.set(key, { content, indexes: [index] });
+            }
+        }
+
+        const missingEntries = [...missingByKey.entries()];
+        if (missingEntries.length > 0) {
+            const deferredByKey = new Map<string, {
+                promise: Promise<EmbeddingVector>;
+                resolve: (embedding: EmbeddingVector) => void;
+                reject: (error: unknown) => void;
+            }>();
+
+            for (const [key] of missingEntries) {
+                let resolve!: (embedding: EmbeddingVector) => void;
+                let reject!: (error: unknown) => void;
+                const promise = new Promise<EmbeddingVector>((promiseResolve, promiseReject) => {
+                    resolve = promiseResolve;
+                    reject = promiseReject;
+                });
+                promise.catch(() => undefined);
+                deferredByKey.set(key, { promise, resolve, reject });
+                runCache.inFlightEmbeddings.set(key, promise);
+            }
+
+            try {
+                const uniqueContents = missingEntries.map(([, entry]) => entry.content);
+                const uniqueEmbeddings = await this.embedding.embedBatch(uniqueContents);
+                this.validateEmbeddings(uniqueEmbeddings, uniqueContents.length);
+
+                missingEntries.forEach(([key, entry], uniqueIndex) => {
+                    const embedding = uniqueEmbeddings[uniqueIndex];
+                    runCache.embeddings.set(key, embedding);
+                    deferredByKey.get(key)?.resolve(embedding);
+                    for (const originalIndex of entry.indexes) {
+                        embeddings[originalIndex] = embedding;
+                    }
+                });
+            } catch (error) {
+                for (const [key] of missingEntries) {
+                    deferredByKey.get(key)?.reject(error);
+                }
+                throw error;
+            } finally {
+                for (const [key] of missingEntries) {
+                    runCache.inFlightEmbeddings.delete(key);
+                }
+            }
+        }
+
+        await Promise.all(waitForInFlight);
+        return embeddings;
+    }
+
+    private createEmbeddingCacheKey(content: string): string {
+        return [
+            this.embedding.getProvider(),
+            this.embedding.getModel(),
+            getNormalizedContentHash(content)
+        ].join(':');
+    }
+
+    private createVectorDocument(chunk: CodeChunk, embedding: EmbeddingVector, codebasePath: string, chunkIndex: number, runCache?: IndexingRunCache): VectorDocument {
         if (!chunk.metadata.filePath) {
             throw new Error(`Missing filePath in chunk metadata at index ${chunkIndex}`);
         }
@@ -3754,7 +4386,7 @@ export class Context {
         const { filePath: _filePath, startLine: _startLine, endLine: _endLine, ...restMetadata } = chunk.metadata;
         const sourceStartLine = chunk.metadata.startLine || 0;
         const sourceEndLine = chunk.metadata.endLine || 0;
-        const searchMetadata = this.createSearchMetadata(normalizedRelativePath, chunk.content, restMetadata);
+        const searchMetadata = this.createSearchMetadata(normalizedRelativePath, chunk.content, restMetadata, runCache);
         const structuredFields = this.createStructuredDocumentFields(searchMetadata);
 
         return {
@@ -3779,12 +4411,19 @@ export class Context {
         };
     }
 
-    private createSearchMetadata(relativePath: string, content: string, chunkMetadata: Record<string, unknown>): QueryRow {
+    private createSearchMetadata(relativePath: string, content: string, chunkMetadata: Record<string, unknown>, runCache?: IndexingRunCache): QueryRow {
         const fileName = path.posix.basename(relativePath);
         const extension = path.posix.extname(fileName);
         const basename = path.posix.basename(fileName, extension);
-        const pathTokens = this.extractPathTokens(relativePath);
-        const definitionIdentifierSet = new Set<string>(this.extractDefinitionIdentifiers(content));
+        const pathTokens = extractPathTokens(relativePath);
+        const contentHash = crypto.createHash('sha1').update(content).digest('hex');
+        const normalizedContentHash = getNormalizedContentHash(content);
+        let definitionIdentifiers = runCache?.definitionIdentifiers.get(contentHash);
+        if (!definitionIdentifiers) {
+            definitionIdentifiers = extractDefinitionIdentifiers(content);
+            runCache?.definitionIdentifiers.set(contentHash, definitionIdentifiers);
+        }
+        const definitionIdentifierSet = new Set<string>(definitionIdentifiers);
         const symbols = new Set<string>(definitionIdentifierSet);
         const isDefinition = chunkMetadata.isDefinition === true;
         const symbolName = typeof chunkMetadata.symbolName === 'string' ? chunkMetadata.symbolName : '';
@@ -3796,8 +4435,8 @@ export class Context {
             }
         }
 
-        const definitionIdentifiers = [...definitionIdentifierSet];
-        const primarySymbol = symbolName || definitionIdentifiers[0] || '';
+        const finalDefinitionIdentifiers = [...definitionIdentifierSet];
+        const primarySymbol = symbolName || finalDefinitionIdentifiers[0] || '';
         const pathSegments = this.extractPathSegments(relativePath);
 
         return {
@@ -3805,13 +4444,13 @@ export class Context {
             basename,
             pathTokens,
             symbols: [...symbols],
-            definitionIdentifiers,
+            definitionIdentifiers: finalDefinitionIdentifiers,
             primarySymbol,
             symbolKind: typeof chunkMetadata.symbolKind === 'string' ? chunkMetadata.symbolKind : '',
             chunkKind: typeof chunkMetadata.chunkKind === 'string' ? chunkMetadata.chunkKind : 'code',
             isDefinition,
-            contentHash: crypto.createHash('sha1').update(content).digest('hex'),
-            normalizedContentHash: getNormalizedContentHash(content),
+            contentHash,
+            normalizedContentHash,
             chunkRole: typeof chunkMetadata.chunkRole === 'string' ? chunkMetadata.chunkRole : 'reference',
             fileRole: classifyFileRole(relativePath, extension, content),
             pathSegment0: pathSegments[0] || '',
@@ -3838,15 +4477,6 @@ export class Context {
         };
     }
 
-    private extractPathTokens(relativePath: string): string[] {
-        return [...new Set(
-            relativePath
-                .split(/[\\/._-]+/)
-                .map(token => token.trim())
-                .filter(token => token.length >= 2)
-        )];
-    }
-
     private extractPathSegments(relativePath: string): string[] {
         return relativePath
             .replace(/\\/g, '/')
@@ -3854,28 +4484,6 @@ export class Context {
             .map(segment => segment.trim())
             .filter(segment => segment.length > 0)
             .slice(0, 5);
-    }
-
-    private extractDefinitionIdentifiers(content: string): string[] {
-        const identifiers = new Set<string>();
-        const definitionPatterns = [
-            /\b(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|function|type|enum|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/g,
-            /\b(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
-            /\bfunc\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
-            /\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
-            /\b(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|mod)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g,
-            /\b(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)+(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
-            /^#{1,6}\s+(.+?)\s*#*\s*$/gm,
-        ];
-
-        for (const pattern of definitionPatterns) {
-            let match: RegExpExecArray | null;
-            while ((match = pattern.exec(content)) !== null) {
-                identifiers.add(match[1].trim());
-            }
-        }
-
-        return [...identifiers];
     }
 
     /**
@@ -3947,11 +4555,17 @@ export class Context {
             '.exs': 'elixir',
             '.lua': 'lua',
             '.luau': 'luau',
+            '.toml': 'toml',
+            '.cmake': 'cmake',
             '.md': 'markdown',
             '.markdown': 'markdown',
             '.ipynb': 'jupyter'
         };
         return languageMap[ext] || 'text';
+    }
+
+    private getLanguageFromFilePath(filePath: string): string {
+        return getKnownFileNameLanguage(filePath) ?? this.getLanguageFromExtension(path.extname(filePath));
     }
 
     /**

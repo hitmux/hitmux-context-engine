@@ -189,14 +189,12 @@ export class OpenAIEmbedding extends Embedding {
     }
 
     private async withRetry<T>(operationName: string, operation: () => Promise<T>): Promise<T> {
-        let lastError: unknown;
         const startedAtMs = Date.now();
         const retryMaxElapsedMs = this.getRetryMaxElapsedMs();
         for (let attempt = 1; ; attempt += 1) {
             try {
                 return await operation();
             } catch (error) {
-                lastError = error;
                 const elapsedMs = Date.now() - startedAtMs;
                 const nextElapsedMs = elapsedMs + OpenAIEmbedding.retryDelayMs;
                 if (!this.isRetryableEmbeddingError(error) || nextElapsedMs > retryMaxElapsedMs) {
@@ -212,8 +210,6 @@ export class OpenAIEmbedding extends Embedding {
                 await this.sleep(OpenAIEmbedding.retryDelayMs);
             }
         }
-
-        throw lastError;
     }
 
     private getRetryMaxElapsedMs(): number {

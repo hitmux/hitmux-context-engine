@@ -1,5 +1,7 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
+import { extractPathTokens } from '../search/path-tokens';
+import { extractDefinitionIdentifiers } from '../search/definition-identifiers';
 import { getNormalizedContentHash } from '../search/result-dedupe';
 import { VectorDocument, STRUCTURED_METADATA_FIELDS } from './types';
 
@@ -37,6 +39,7 @@ const METADATA_HYDRATION_FIELDS = [
     'relativePath',
     'startLine',
     'endLine',
+    'fileExtension',
     ...STRUCTURED_METADATA_FIELDS,
 ] as const;
 
@@ -180,12 +183,18 @@ function mergeContentDerivedMetadata(content: string, result: Record<string, any
         }
     }
 
-    if (!Array.isArray(metadata.definitionIdentifiers)) {
-        metadata.definitionIdentifiers = [...definitionIdentifiers];
+    metadata.definitionIdentifiers = mergeStringArray(metadata.definitionIdentifiers, [...definitionIdentifiers]);
+    metadata.symbols = mergeStringArray(metadata.symbols, [...symbols]);
+}
+
+function mergeStringArray(existing: unknown, additions: string[]): string[] {
+    const merged = new Set(Array.isArray(existing)
+        ? existing.filter((value): value is string => typeof value === 'string')
+        : []);
+    for (const value of additions) {
+        merged.add(value);
     }
-    if (!Array.isArray(metadata.symbols)) {
-        metadata.symbols = [...symbols];
-    }
+    return [...merged];
 }
 
 function getLineNumber(value: unknown): number | undefined {
@@ -196,37 +205,6 @@ function getLineNumber(value: unknown): number | undefined {
         return Number(value.trim());
     }
     return undefined;
-}
-
-function extractPathTokens(relativePath: string): string[] {
-    return [...new Set(
-        relativePath
-            .split(/[\\/._-]+/)
-            .map(token => token.trim())
-            .filter(token => token.length >= 2)
-    )];
-}
-
-function extractDefinitionIdentifiers(content: string): string[] {
-    const identifiers = new Set<string>();
-    const definitionPatterns = [
-        /\b(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|function|type|enum|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/g,
-        /\b(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
-        /\bfunc\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
-        /\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
-        /\b(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|mod)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g,
-        /\b(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)+(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
-        /^#{1,6}\s+(.+?)\s*#*\s*$/gm,
-    ];
-
-    for (const pattern of definitionPatterns) {
-        let match: RegExpExecArray | null;
-        while ((match = pattern.exec(content)) !== null) {
-            identifiers.add(match[1].trim());
-        }
-    }
-
-    return [...identifiers];
 }
 
 export function getStructuredDocumentFields(result: Record<string, any>): Partial<VectorDocument> {

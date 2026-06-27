@@ -21,6 +21,13 @@ test("mcp status smoke default command matches local install wrapper", () => {
     assert.match(installer, /COMMAND_NAME="\$\{COMMAND_NAME:-hitmux-context-engine-mcp\}"/);
 });
 
+test("local install script uses the root MCP build command", () => {
+    const installer = readText("scripts/install-local-global.sh");
+
+    assert.match(installer, /pnpm build:mcp/);
+    assert.equal(installer.includes('pnpm --filter "${PACKAGE_NAME}..." build'), false);
+});
+
 test("build:examples builds core before examples", () => {
     const rootPackage = readJson("package.json");
 

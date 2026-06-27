@@ -8,6 +8,7 @@ import {
     Context,
     Embedding,
     EmbeddingVector,
+    REMOTE_INDEX_MANIFEST_COLLECTION,
     VectorDatabase,
 } from "@hitmux/hitmux-context-engine-core";
 
@@ -96,10 +97,12 @@ function createFakeVectorDatabase(
 
 class FakeContext {
     reindexCalls: unknown[][] = [];
+    indexCalls: unknown[][] = [];
 
     constructor(
         private readonly vectorDatabase?: VectorDatabase,
         private readonly collectionName = "hybrid_code_chunks_app",
+        private readonly hasIndexValue = true,
     ) {}
 
     getCollectionName(): string {
@@ -114,7 +117,14 @@ class FakeContext {
     }
 
     async hasIndex(): Promise<boolean> {
-        return true;
+        return this.hasIndexValue;
+    }
+
+    async indexCodebase(
+        ...args: unknown[]
+    ): Promise<{ indexedFiles: number; totalChunks: number; status: "completed" | "limit_reached" }> {
+        this.indexCalls.push(args);
+        return { indexedFiles: 1, totalChunks: 1, status: "completed" };
     }
 
     async reindexByChange(
@@ -171,6 +181,11 @@ class FakeSnapshotManager {
         this.saved++;
         return true;
     }
+
+    async saveCodebaseSnapshotAsync(): Promise<boolean> {
+        this.saved++;
+        return true;
+    }
 }
 
 function createFakeLock(): McpWriterLock {
@@ -180,7 +195,7 @@ function createFakeLock(): McpWriterLock {
     } as unknown as McpWriterLock;
 }
 
-test("parseCliManageCommand parses list, rm, index, and index --all", () => {
+test("parseCliManageCommand parses list, rm, index, and guarded index --all", () => {
     assert.deepEqual(parseCliManageCommand(["list"]), {
         action: "list",
         target: undefined,
@@ -191,19 +206,47 @@ test("parseCliManageCommand parses list, rm, index, and index --all", () => {
     });
     assert.deepEqual(parseCliManageCommand(["rm", "abc"]), {
         action: "rm",
-        target: "abc",
+        targets: ["abc"],
+    });
+    assert.deepEqual(parseCliManageCommand(["rm", "abc", "/repo/app"]), {
+        action: "rm",
+        targets: ["abc", "/repo/app"],
     });
     assert.deepEqual(parseCliManageCommand(["index"]), {
         action: "index",
         all: false,
+        force: false,
         target: undefined,
+        targets: undefined,
     });
-    assert.deepEqual(parseCliManageCommand(["index", "--all"]), {
+    assert.deepEqual(parseCliManageCommand(["index", "--force"]), {
+        action: "index",
+        all: false,
+        force: true,
+        target: undefined,
+        targets: undefined,
+    });
+    assert.deepEqual(parseCliManageCommand(["index", "--force", "/repo/app", "/repo/lib"]), {
+        action: "index",
+        all: false,
+        force: true,
+        target: "/repo/app",
+        targets: ["/repo/app", "/repo/lib"],
+    });
+    assert.deepEqual(parseCliManageCommand(["index", "--all", "--force"]), {
         action: "index",
         all: true,
+        force: true,
         target: undefined,
+        targets: undefined,
     });
     assert.throws(() => parseCliManageCommand(["rm"]), /Usage: hce rm/);
+    assert.throws(() => parseCliManageCommand(["rm", "--all"]), /Usage: hce rm/);
+    assert.throws(
+        () => parseCliManageCommand(["index", "--all"]),
+        /Refusing to force rebuild all known repo indexes/,
+    );
+    assert.throws(() => parseCliManageCommand(["index", "/repo/app", "/repo/lib"]), /Usage:/);
 });
 
 test("runCliManageCommand list prints collection repo path and chunk count", async () => {
@@ -256,6 +299,41 @@ test("runCliManageCommand list target prints collection details", async () => {
     assert.match(output.join(""), /Splitter: ast/);
 });
 
+test("runCliManageCommand list ignores remote manifest collection", async () => {
+    const output: string[] = [];
+    const vectorDatabase = createFakeVectorDatabase({
+        [REMOTE_INDEX_MANIFEST_COLLECTION]: {
+            queryRows: [
+                {
+                    metadata: {
+                        codebasePath: "/repo/app",
+                        collectionName: "hybrid_code_chunks_app",
+                    },
+                },
+            ],
+            rowCount: 1,
+        },
+        hybrid_code_chunks_app: {
+            description:
+                'codebasePath:/repo/app\nhitmuxContext:{"version":1,"codebasePath":"/repo/app","embedding":{"provider":"OpenAI","model":"text-embedding-3-small","dimension":1536},"schemaVersion":2,"metadataVersion":2,"splitterType":"ast","createdAt":"2026-06-18T00:00:00.000Z"}',
+            rowCount: 42,
+        },
+    });
+
+    const exitCode = await runCliManageCommand(["list", "/repo/app"], {
+        createConfig: () => fakeConfig,
+        createEmbedding: () => new FakeEmbedding(),
+        createVectorDatabase: () => vectorDatabase,
+        createContext: () => new FakeContext() as unknown as Context,
+        createSnapshotManager: () => new FakeSnapshotManager() as unknown as SnapshotManager,
+        stdout: (message) => output.push(message),
+    });
+
+    assert.equal(exitCode, 0);
+    assert.match(output.join(""), /Collection: hybrid_code_chunks_app/);
+    assert.doesNotMatch(output.join(""), new RegExp(REMOTE_INDEX_MANIFEST_COLLECTION));
+});
+
 test("runCliManageCommand rm drops collection and removes snapshot entry", async () => {
     const output: string[] = [];
     const vectorDatabase = createFakeVectorDatabase({
@@ -283,19 +361,73 @@ test("runCliManageCommand rm drops collection and removes snapshot entry", async
     assert.match(output.join(""), /Removed collection 'hybrid_code_chunks_app'/);
 });
 
-test("runCliManageCommand index sync writes recovered chunk and file counts", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "hce-cli-index-"));
+test("runCliManageCommand rm drops multiple collections in one command", async () => {
     const output: string[] = [];
     const vectorDatabase = createFakeVectorDatabase({
         hybrid_code_chunks_app: {
-            rowCount: 3,
-            queryRows: [
-                { relativePath: "src/a.ts" },
-                { relativePath: "src/a.ts" },
-                { relativePath: "src/b.ts" },
-            ],
+            description: "codebasePath:/repo/app",
+            rowCount: 42,
+        },
+        hybrid_code_chunks_lib: {
+            description: "codebasePath:/repo/lib",
+            rowCount: 7,
         },
     });
+    const snapshotManager = new FakeSnapshotManager();
+
+    const exitCode = await runCliManageCommand(
+        ["rm", "hybrid_code_chunks_app", "/repo/lib"],
+        {
+            createConfig: () => fakeConfig,
+            createEmbedding: () => new FakeEmbedding(),
+            createVectorDatabase: () => vectorDatabase,
+            createContext: () => new FakeContext() as unknown as Context,
+            createSnapshotManager: () => snapshotManager as unknown as SnapshotManager,
+            acquireWriterLock: () => createFakeLock(),
+            stdout: (message) => output.push(message),
+        },
+    );
+
+    assert.equal(exitCode, 0);
+    assert.deepEqual(vectorDatabase.dropped, [
+        "hybrid_code_chunks_app",
+        "hybrid_code_chunks_lib",
+    ]);
+    assert.deepEqual(snapshotManager.removed, ["/repo/app", "/repo/lib"]);
+    assert.equal(snapshotManager.saved, 2);
+    assert.match(output.join(""), /Removed collection 'hybrid_code_chunks_app'/);
+    assert.match(output.join(""), /Removed collection 'hybrid_code_chunks_lib'/);
+});
+
+test("runCliManageCommand index sync refreshes snapshot from remote manifest", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "hce-cli-index-"));
+    const output: string[] = [];
+    let metadataQueryCalls = 0;
+    const vectorDatabase = createFakeVectorDatabase({
+        hybrid_code_chunks_app: {
+            rowCount: 3,
+        },
+    });
+    vectorDatabase.readIndexManifest = async (collectionName: string, codebasePath: string) => {
+        assert.equal(collectionName, "hybrid_code_chunks_app");
+        assert.equal(codebasePath, tempDir);
+        return {
+            manifestVersion: 1,
+            codebasePath,
+            collectionName,
+            status: "completed",
+            indexedFiles: 2,
+            totalChunks: 3,
+            schemaVersion: 2,
+            metadataVersion: 2,
+            generation: 1,
+            updatedAt: "2026-06-21T00:00:00.000Z",
+        };
+    };
+    vectorDatabase.query = async () => {
+        metadataQueryCalls++;
+        throw new Error("CLI index sync should not scan row metadata");
+    };
     const snapshotManager = new FakeSnapshotManager();
 
     try {
@@ -320,12 +452,13 @@ test("runCliManageCommand index sync writes recovered chunk and file counts", as
                     indexedFiles: 2,
                     totalChunks: 3,
                     status: "completed",
-                    statsSource: "collection_row_count",
+                    statsSource: "remote_manifest",
                 },
                 indexOptions: {},
             },
         ]);
         assert.equal(snapshotManager.saved, 1);
+        assert.equal(metadataQueryCalls, 0);
     } finally {
         rmSync(tempDir, { recursive: true, force: true });
     }
@@ -336,8 +469,19 @@ test("runCliManageCommand index sync reuses snapshot request options", async () 
     const vectorDatabase = createFakeVectorDatabase({
         hybrid_code_chunks_app: {
             rowCount: 1,
-            queryRows: [{ relativePath: "src/app.vue" }],
         },
+    });
+    vectorDatabase.readIndexManifest = async (collectionName: string, codebasePath: string) => ({
+        manifestVersion: 1,
+        codebasePath,
+        collectionName,
+        status: "completed",
+        indexedFiles: 1,
+        totalChunks: 1,
+        schemaVersion: 2,
+        metadataVersion: 2,
+        generation: 1,
+        updatedAt: "2026-06-21T00:00:00.000Z",
     });
     const context = new FakeContext(vectorDatabase);
     const snapshotManager = new FakeSnapshotManager();
@@ -380,6 +524,103 @@ test("runCliManageCommand index sync reuses snapshot request options", async () 
             requestMaxDepth: 2,
         });
     } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+    }
+});
+
+test("runCliManageCommand index forwards abort signal to full indexing", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "hce-cli-signal-"));
+    const vectorDatabase = createFakeVectorDatabase({});
+    const context = new FakeContext(vectorDatabase, "hybrid_code_chunks_app", false);
+    const controller = new AbortController();
+
+    try {
+        const exitCode = await runCliManageCommand(["index", tempDir], {
+            createConfig: () => fakeConfig,
+            createEmbedding: () => new FakeEmbedding(),
+            createVectorDatabase: () => vectorDatabase,
+            createContext: () => context as unknown as Context,
+            createSnapshotManager: () => new FakeSnapshotManager() as unknown as SnapshotManager,
+            acquireWriterLock: () => createFakeLock(),
+            stdout: () => undefined,
+            signal: controller.signal,
+        });
+
+        assert.equal(exitCode, 0);
+        assert.equal(context.indexCalls.length, 1);
+        assert.equal(context.indexCalls[0][6], controller.signal);
+    } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+    }
+});
+
+test("runCliManageCommand index --force rebuilds multiple targets", async () => {
+    const tempDirA = mkdtempSync(join(tmpdir(), "hce-cli-force-a-"));
+    const tempDirB = mkdtempSync(join(tmpdir(), "hce-cli-force-b-"));
+    const output: string[] = [];
+    const vectorDatabase = createFakeVectorDatabase({});
+    const context = new FakeContext(vectorDatabase);
+    const snapshotManager = new FakeSnapshotManager();
+
+    try {
+        const exitCode = await runCliManageCommand(
+            ["index", "--force", tempDirA, tempDirB],
+            {
+                createConfig: () => fakeConfig,
+                createEmbedding: () => new FakeEmbedding(),
+                createVectorDatabase: () => vectorDatabase,
+                createContext: () => context as unknown as Context,
+                createSnapshotManager: () =>
+                    snapshotManager as unknown as SnapshotManager,
+                acquireWriterLock: () => createFakeLock(),
+                stdout: (message) => output.push(message),
+            },
+        );
+
+        assert.equal(exitCode, 0);
+        assert.equal(context.indexCalls.length, 2);
+        assert.equal(context.reindexCalls.length, 0);
+        assert.equal(context.indexCalls[0][0], tempDirA);
+        assert.equal(context.indexCalls[0][2], true);
+        assert.equal(context.indexCalls[1][0], tempDirB);
+        assert.equal(context.indexCalls[1][2], true);
+        assert.deepEqual(
+            snapshotManager.indexed.map((entry) => entry.codebasePath),
+            [tempDirA, tempDirB],
+        );
+        assert.equal(snapshotManager.saved, 2);
+        assert.match(output.join(""), new RegExp(`Rebuilt '${tempDirA}'`));
+        assert.match(output.join(""), new RegExp(`Rebuilt '${tempDirB}'`));
+    } finally {
+        rmSync(tempDirA, { recursive: true, force: true });
+        rmSync(tempDirB, { recursive: true, force: true });
+    }
+});
+
+test("runCliManageCommand index --force defaults to current directory", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "hce-cli-force-cwd-"));
+    const previousCwd = process.cwd();
+    const vectorDatabase = createFakeVectorDatabase({});
+    const context = new FakeContext(vectorDatabase);
+
+    try {
+        process.chdir(tempDir);
+        const exitCode = await runCliManageCommand(["index", "--force"], {
+            createConfig: () => fakeConfig,
+            createEmbedding: () => new FakeEmbedding(),
+            createVectorDatabase: () => vectorDatabase,
+            createContext: () => context as unknown as Context,
+            createSnapshotManager: () => new FakeSnapshotManager() as unknown as SnapshotManager,
+            acquireWriterLock: () => createFakeLock(),
+            stdout: () => undefined,
+        });
+
+        assert.equal(exitCode, 0);
+        assert.equal(context.indexCalls.length, 1);
+        assert.equal(context.indexCalls[0][0], tempDir);
+        assert.equal(context.indexCalls[0][2], true);
+    } finally {
+        process.chdir(previousCwd);
         rmSync(tempDir, { recursive: true, force: true });
     }
 });

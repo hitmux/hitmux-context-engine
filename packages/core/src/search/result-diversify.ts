@@ -2,6 +2,10 @@ import { SemanticSearchResult } from '../types';
 import { hasValidLineRange } from './line-range';
 
 const DEFAULT_MAX_RESULTS_PER_FILE = 3;
+const FILE_EVIDENCE_SUPPORT_LIMIT = 4;
+const FILE_EVIDENCE_SUPPORT_WEIGHT = 0.35;
+const FILE_EVIDENCE_SUPPORT_CAP = 260;
+const FILE_EVIDENCE_RANK_STEP_PENALTY = 40;
 
 export function diversifySemanticSearchResultsByFile<T extends SemanticSearchResult>(
     results: T[],
@@ -97,6 +101,7 @@ interface OrderedResult<T extends SemanticSearchResult> {
 interface FileBucket<T extends SemanticSearchResult> {
     relativePath: string;
     results: OrderedResult<T>[];
+    aggregateScore: number;
 }
 
 function createFileBuckets<T extends SemanticSearchResult>(results: T[]): FileBucket<T>[] {
@@ -109,6 +114,7 @@ function createFileBuckets<T extends SemanticSearchResult>(results: T[]): FileBu
             bucket = {
                 relativePath: result.relativePath,
                 results: [],
+                aggregateScore: 0,
             };
             bucketByPath.set(result.relativePath, bucket);
             buckets.push(bucket);
@@ -117,7 +123,100 @@ function createFileBuckets<T extends SemanticSearchResult>(results: T[]): FileBu
         bucket.results.push({ result, order });
     });
 
-    return buckets;
+    for (const bucket of buckets) {
+        bucket.aggregateScore = getFileAggregateEvidenceScore(bucket);
+    }
+
+    return buckets.sort((a, b) => {
+        const aggregateDelta = b.aggregateScore - a.aggregateScore;
+        if (aggregateDelta !== 0) return aggregateDelta;
+
+        return a.results[0].order - b.results[0].order;
+    });
+}
+
+function getFileAggregateEvidenceScore<T extends SemanticSearchResult>(bucket: FileBucket<T>): number {
+    const [primary, ...supportingCandidates] = bucket.results;
+    if (!primary) {
+        return 0;
+    }
+
+    let aggregateScore = -primary.order * FILE_EVIDENCE_RANK_STEP_PENALTY;
+    const selectedSupport: SemanticSearchResult[] = [primary.result];
+    const orderedSupport = supportingCandidates
+        .sort((a, b) => {
+            const scoreDelta = getResultFileEvidenceScore(b.result) - getResultFileEvidenceScore(a.result);
+            if (scoreDelta !== 0) return scoreDelta;
+
+            return a.order - b.order;
+        });
+
+    for (const candidate of orderedSupport) {
+        if (selectedSupport.length > FILE_EVIDENCE_SUPPORT_LIMIT || !isDistinctFileSupport(candidate.result, selectedSupport)) {
+            continue;
+        }
+
+        const supportScore = Math.min(
+            getResultFileEvidenceScore(candidate.result) * FILE_EVIDENCE_SUPPORT_WEIGHT,
+            FILE_EVIDENCE_SUPPORT_CAP
+        );
+        aggregateScore += supportScore;
+        selectedSupport.push(candidate.result);
+    }
+
+    return aggregateScore;
+}
+
+function getResultFileEvidenceScore(result: SemanticSearchResult): number {
+    const score = Number.isFinite(result.score) && result.score > 0
+        ? Math.log1p(result.score) * 120
+        : 0;
+    let evidenceScore = score;
+    const reasons = result.scoreReasons ?? (result.scoreReason ? [result.scoreReason] : []);
+
+    if (reasons.includes('exact_filename')) {
+        evidenceScore += 420;
+    }
+    if (reasons.includes('exact_symbol_definition')) {
+        evidenceScore += 360;
+    }
+    if (reasons.includes('path_match')) {
+        evidenceScore += 180;
+    }
+    switch (result.chunkRole) {
+        case 'definition':
+            evidenceScore += 110;
+            break;
+        case 'method_body':
+            evidenceScore += 90;
+            break;
+    }
+
+    if (getLeadingDefinitionSignature(result.content) !== undefined) {
+        evidenceScore += 90;
+    }
+
+    return evidenceScore;
+}
+
+function isDistinctFileSupport(candidate: SemanticSearchResult, selected: SemanticSearchResult[]): boolean {
+    if (!hasStrongEvidence(candidate)) {
+        return false;
+    }
+
+    if (selected.some(existing => hasOverlappingLineRange(candidate, existing))) {
+        return false;
+    }
+
+    const candidateSignature = getEvidenceSignature(candidate);
+    if (!candidateSignature) {
+        return false;
+    }
+
+    return selected.every(existing => {
+        const existingSignature = getEvidenceSignature(existing);
+        return candidateSignature !== existingSignature;
+    });
 }
 
 function isDistinctStrongEvidence(candidate: SemanticSearchResult, selected: SemanticSearchResult[]): boolean {
@@ -137,14 +236,14 @@ function hasStrongEvidence(result: SemanticSearchResult): boolean {
 }
 
 function hasDistinctEvidence(candidate: SemanticSearchResult, existing: SemanticSearchResult): boolean {
+    if (hasOverlappingLineRange(candidate, existing)) {
+        return false;
+    }
+
     const candidateSignature = getEvidenceSignature(candidate);
     const existingSignature = getEvidenceSignature(existing);
     if (candidateSignature && existingSignature && candidateSignature !== existingSignature) {
         return true;
-    }
-
-    if (hasOverlappingLineRange(candidate, existing)) {
-        return false;
     }
 
     return Boolean(candidateSignature && !existingSignature);
@@ -220,12 +319,12 @@ function getLeadingDefinitionSignature(content: string): string | undefined {
         return `fn:${rustMatch[1]}`;
     }
 
-    const methodMatch = firstMeaningfulLine.match(/^(?:public|private|protected|static|async|override|readonly|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^)]*\)\s*(?:\{|=>|:)/);
+    const methodMatch = firstMeaningfulLine.match(/^(?:public|private|protected|static|async|override|readonly|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>[\],.?]*\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^)]*\)\s*(?:\{|=>|:)/);
     if (methodMatch) {
         return `method:${methodMatch[1]}`;
     }
 
-    const typedMethodMatch = firstMeaningfulLine.match(/^(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^)]*\)\s*(?:\{|=>|:)/);
+    const typedMethodMatch = firstMeaningfulLine.match(/^(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^)]*\)\s*(?:\{|=>|:)/);
     if (typedMethodMatch) {
         return `method:${typedMethodMatch[1]}`;
     }

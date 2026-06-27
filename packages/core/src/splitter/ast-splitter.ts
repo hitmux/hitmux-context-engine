@@ -18,8 +18,8 @@ function loadParserLanguage(packageName: string, exportName?: string): any {
 
 // Node types that represent logical code units
 const SPLITTABLE_NODE_TYPES = {
-    javascript: ['function_declaration', 'arrow_function', 'class_declaration', 'method_definition', 'export_statement', 'lexical_declaration', 'variable_declaration'],
-    typescript: ['function_declaration', 'arrow_function', 'class_declaration', 'method_definition', 'export_statement', 'interface_declaration', 'type_alias_declaration', 'lexical_declaration', 'variable_declaration'],
+    javascript: ['function_declaration', 'class_declaration', 'method_definition', 'export_statement', 'lexical_declaration', 'variable_declaration'],
+    typescript: ['function_declaration', 'class_declaration', 'method_definition', 'export_statement', 'interface_declaration', 'type_alias_declaration', 'lexical_declaration', 'variable_declaration'],
     python: ['function_definition', 'class_definition', 'decorated_definition', 'async_function_definition'],
     java: ['package_declaration', 'method_declaration', 'class_declaration', 'interface_declaration', 'constructor_declaration'],
     cpp: ['function_definition', 'class_specifier', 'namespace_definition', 'declaration'],
@@ -292,6 +292,9 @@ export class AstCodeSplitter implements Splitter {
             }
 
             if (['typescript', 'ts', 'tsx', 'javascript', 'js', 'jsx'].includes(normalizedLanguage)) {
+                if (this.getIndentWidth(line) !== 0) {
+                    continue;
+                }
                 if (/^export\s+(?:type\s+)?(?:\*|\{[\s\S]*\})\s+from\s+['"][^'"]+['"];?$/.test(trimmed)) {
                     starts.push({ lineIndex: index, nodeType: 'export_statement' });
                 } else if (/^(?:export\s+)?(?:abstract\s+)?class\s+[A-Za-z_$][A-Za-z0-9_$]*\b/.test(trimmed)) {
@@ -350,7 +353,7 @@ export class AstCodeSplitter implements Splitter {
                     starts.push({ lineIndex: index, nodeType: 'package_declaration' });
                 } else if (/^(?:public|private|protected|internal|static|final|abstract|sealed|\s)*(?:class|interface|struct|enum)\s+[A-Za-z_$][A-Za-z0-9_$]*\b/.test(trimmed)) {
                     starts.push({ lineIndex: index, nodeType: 'class_declaration' });
-                } else if (/^(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+[A-Za-z_$][A-Za-z0-9_$]*\s*\(/.test(trimmed)) {
+                } else if (/^(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>[\],.?]*\s+)+[A-Za-z_$][A-Za-z0-9_$]*\s*\(/.test(trimmed)) {
                     starts.push({ lineIndex: index, nodeType: 'method_declaration' });
                 }
                 continue;
@@ -369,6 +372,14 @@ export class AstCodeSplitter implements Splitter {
     private findRegexChunkEnd(lines: string[], startLine: number, nodeType: string, language: string): number {
         const normalizedLanguage = language.toLowerCase();
         if (nodeType === 'package_clause' || nodeType === 'package_declaration' || nodeType === 'export_statement' || nodeType === 'use_declaration') {
+            return startLine;
+        }
+
+        if (
+            ['typescript', 'ts', 'tsx', 'javascript', 'js', 'jsx'].includes(normalizedLanguage)
+            && (nodeType === 'lexical_declaration' || nodeType === 'variable_declaration')
+            && /;\s*$/.test(lines[startLine].trim())
+        ) {
             return startLine;
         }
 
@@ -467,7 +478,7 @@ export class AstCodeSplitter implements Splitter {
 
         const traverse = (currentNode: Parser.SyntaxNode) => {
             // Check if this node type should be split into a chunk
-            if (this.shouldEmitChunkForNode(currentNode, splittableTypes)) {
+            if (this.shouldEmitChunkForNode(currentNode, splittableTypes, language)) {
                 const leadingCommentStartRow = this.findLeadingCommentStartRow(currentNode, codeLines);
                 const startLine = leadingCommentStartRow + 1;
                 const endLine = currentNode.endPosition.row + 1;
@@ -529,12 +540,31 @@ export class AstCodeSplitter implements Splitter {
         return refinedChunks;
     }
 
-    private shouldEmitChunkForNode(node: Parser.SyntaxNode, splittableTypes: string[]): boolean {
+    private shouldEmitChunkForNode(node: Parser.SyntaxNode, splittableTypes: string[], language: string): boolean {
         if (!splittableTypes.includes(node.type)) {
             return false;
         }
 
+        if (
+            this.isJavaScriptLikeLanguage(language)
+            && (node.type === 'lexical_declaration' || node.type === 'variable_declaration')
+            && !this.isTopLevelVariableDeclaration(node)
+        ) {
+            return false;
+        }
+
         return node.type !== 'export_statement' || !this.hasSplittableDescendant(node, splittableTypes);
+    }
+
+    private isJavaScriptLikeLanguage(language: string): boolean {
+        return ['typescript', 'ts', 'tsx', 'javascript', 'js', 'jsx'].includes(language.toLowerCase());
+    }
+
+    private isTopLevelVariableDeclaration(node: Parser.SyntaxNode): boolean {
+        const parentType = node.parent?.type;
+        return parentType === 'program'
+            || parentType === 'source_file'
+            || parentType === 'export_statement';
     }
 
     private hasSplittableDescendant(node: Parser.SyntaxNode, splittableTypes: string[]): boolean {
@@ -568,7 +598,7 @@ export class AstCodeSplitter implements Splitter {
             { kind: 'const', pattern: /\bconst\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/ },
             { kind: 'let', pattern: /\blet\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/ },
             { kind: 'var', pattern: /\bvar\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/ },
-            { kind: 'method', pattern: /^\s*(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>\[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/m },
+            { kind: 'method', pattern: /^\s*(?:public|private|protected|internal|static|final|abstract|override|virtual|async|sealed|synchronized|\s)*(?:[A-Za-z_$][A-Za-z0-9_$<>[\],.?]*\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/m },
             { kind: 'method', pattern: /^\s*(?:public|private|protected|static|async|override|readonly|\s)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/m },
         ];
 

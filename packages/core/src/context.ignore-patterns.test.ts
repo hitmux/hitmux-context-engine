@@ -49,6 +49,25 @@ class TestSplitter implements Splitter {
     setChunkOverlap(): void { }
 }
 
+function createDescription(codebasePath: string = '/test/project'): string {
+    return [
+        `codebasePath:${codebasePath}`,
+        `hitmuxContext:${JSON.stringify({
+            version: 1,
+            codebasePath,
+            embedding: {
+                provider: 'test',
+                model: 'unknown',
+                dimension: 3,
+            },
+            schemaVersion: 2,
+            metadataVersion: 2,
+            splitterType: 'ast',
+            createdAt: '2026-06-20T00:00:00.000Z',
+        })}`,
+    ].join('\n');
+}
+
 const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     createCollection: jest.fn().mockResolvedValue(undefined),
     createHybridCollection: jest.fn().mockResolvedValue(undefined),
@@ -62,7 +81,7 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     hybridSearch: jest.fn().mockResolvedValue([]),
     delete: jest.fn().mockResolvedValue(undefined),
     query: jest.fn().mockResolvedValue([]),
-    getCollectionDescription: jest.fn().mockResolvedValue(''),
+    getCollectionDescription: jest.fn().mockResolvedValue(createDescription()),
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
     getCollectionRowCount: jest.fn().mockResolvedValue(999),
 });
@@ -96,7 +115,10 @@ describe('Context ignore pattern isolation', () => {
         await fs.mkdir(projectB);
         await fs.writeFile(path.join(projectA, '.hitmux-context-engineignore'), '*.md\n');
 
-        const context = new Context({ vectorDatabase: createVectorDatabase() });
+        const context = new Context({
+            embedding: new TestEmbedding(),
+            vectorDatabase: createVectorDatabase(),
+        });
 
         const projectAIgnores = await context.getEffectiveIgnorePatterns(projectA);
         expect(projectAIgnores).toContain('*.md');
@@ -108,7 +130,10 @@ describe('Context ignore pattern isolation', () => {
     it('does not leak request ignore patterns between calls', async () => {
         const project = path.join(tempRoot, 'project');
         await fs.mkdir(project);
-        const context = new Context({ vectorDatabase: createVectorDatabase() });
+        const context = new Context({
+            embedding: new TestEmbedding(),
+            vectorDatabase: createVectorDatabase(),
+        });
 
         const withRequestIgnores = await context.getEffectiveIgnorePatterns(project, ['*.txt']);
         expect(withRequestIgnores).toContain('*.txt');
@@ -151,6 +176,30 @@ describe('Context ignore pattern isolation', () => {
 
         await context.indexCodebase(projectB);
         expect(vectorDatabase.insert).not.toHaveBeenCalled();
+    });
+
+    it('matches supported extensions case-insensitively', async () => {
+        const project = path.join(tempRoot, 'project-uppercase-extension');
+        await fs.mkdir(project);
+        await fs.writeFile(path.join(project, 'UPPER.TS'), 'export const upper = true;');
+        await fs.writeFile(path.join(project, 'BUILD.CMAKE'), 'set(SOURCES main.c)');
+
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        await context.indexCodebase(project);
+
+        const insertedDocuments = vectorDatabase.insert.mock.calls
+            .flatMap(([, documents]) => documents);
+        expect(insertedDocuments.map(document => document.relativePath).sort()).toEqual([
+            'BUILD.CMAKE',
+            'UPPER.TS',
+        ]);
     });
 
     it('uses target project customExtensions even when Context is constructed outside the project', async () => {
@@ -238,13 +287,47 @@ describe('Context ignore pattern isolation', () => {
         expect(insertedDocuments.map(document => document.relativePath)).toEqual(['kept.ts']);
     });
 
+    it('indexes known build and package metadata files by default without enabling all text files', async () => {
+        const project = path.join(tempRoot, 'project-known-config-files');
+        await fs.mkdir(project);
+        await fs.mkdir(path.join(project, 'src'));
+        await fs.writeFile(path.join(project, 'src', 'CMakeLists.txt'), 'set(SERVER_SOURCES server.c)');
+        await fs.writeFile(path.join(project, 'pyproject.toml'), '[project]\nname = "demo"');
+        await fs.writeFile(path.join(project, 'go.mod'), 'module example.com/demo');
+        await fs.writeFile(path.join(project, 'package.json'), '{"scripts":{"start":"node index.js"}}');
+        await fs.writeFile(path.join(project, 'notes.txt'), 'ordinary text should stay out');
+
+        const vectorDatabase = createVectorDatabase();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TestSplitter(),
+        });
+
+        await context.indexCodebase(project);
+
+        const insertedDocuments = vectorDatabase.insert.mock.calls
+            .flatMap(([, documents]) => documents);
+        expect(insertedDocuments.map(document => document.relativePath).sort()).toEqual([
+            'go.mod',
+            'package.json',
+            'pyproject.toml',
+            'src/CMakeLists.txt',
+        ]);
+        expect(insertedDocuments.find(document => document.relativePath === 'src/CMakeLists.txt')?.metadata.language).toBe('cmake');
+        expect(insertedDocuments.find(document => document.relativePath === 'pyproject.toml')?.metadata.language).toBe('toml');
+        expect(insertedDocuments.find(document => document.relativePath === 'go.mod')?.metadata.language).toBe('go');
+        expect(insertedDocuments.find(document => document.relativePath === 'package.json')?.metadata.language).toBe('json');
+    });
+
     it('indexes configured extension-less files without enabling them globally', async () => {
         const projectA = path.join(tempRoot, 'project-a-extensionless');
         const projectB = path.join(tempRoot, 'project-b-extensionless');
         await fs.mkdir(projectA);
         await fs.mkdir(projectB);
         await fs.writeFile(path.join(projectA, 'Dockerfile'), 'FROM node:20');
-        await fs.writeFile(path.join(projectB, 'Makefile'), 'build:\n\tpnpm build');
+        await fs.writeFile(path.join(projectB, 'Procfile'), 'web: node server.js');
 
         const vectorDatabase = createVectorDatabase();
         const context = new Context({
@@ -272,7 +355,10 @@ describe('Context ignore pattern isolation', () => {
         await fs.writeFile(path.join(project, 'custom.foo'), 'custom extension file');
         await fs.writeFile(path.join(project, 'ignored.ts'), 'ignored by request pattern');
 
-        const context = new Context({ vectorDatabase: createVectorDatabase() });
+        const context = new Context({
+            embedding: new TestEmbedding(),
+            vectorDatabase: createVectorDatabase(),
+        });
 
         try {
             await context.reindexByChange(project, undefined, ['*.ts'], ['foo']);
