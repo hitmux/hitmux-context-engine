@@ -75,6 +75,21 @@ Find functions that handle user authentication
 hce status .
 ```
 
+## CLI 使用
+
+不带参数的 `hce` 会为 MCP client 启动 stdio server。直接在 shell 中使用时传入参数：
+
+| 任务 | 命令 |
+| --- | --- |
+| 显示帮助或版本 | `hce --help`, `hce --version` |
+| 创建或补全全局配置 | `hce init` |
+| 显示 global 和 project config paths | `hce config path` |
+| 检查配置和连通性 | `hce doctor`, `hce doctor --no-connectivity` |
+| 为当前仓库创建索引 | `hce index .` |
+| 查看 index status | `hce status .`, `hce status . --refresh` |
+| 搜索已索引仓库 | `hce search "query" . --limit 5 --target-role implementation` |
+| 管理 indexes 和 collections | `hce list`, `hce list <name-or-path>`, `hce clear <path>`, `hce repair <path>`, `hce rm <name-or-path>`, `hce index --force <path>` |
+
 更多客户端示例，包括 Cursor、Windsurf、Claude Desktop、Gemini CLI、Qwen Code、VS Code MCP、Cline 和 Roo Code，见 [docs/quick-start.zh-CN.md](docs/quick-start.zh-CN.md)。
 
 本地源码 checkout 可运行 `./scripts/install-local-global.sh`，它会构建 workspace，并从当前 checkout 安装用户级 `hitmux-context-engine-mcp` 命令。使用 `sudo` 运行该脚本会全局安装命令。已发布 package 的 Claude Code 和 Codex CLI 设置使用上面展示的全局 `hce` 命令。

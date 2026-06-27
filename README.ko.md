@@ -75,6 +75,21 @@ shell에서도 상태를 확인할 수 있습니다.
 hce status .
 ```
 
+## CLI Usage
+
+인자 없는 `hce`는 MCP clients용 MCP stdio server를 시작합니다. shell에서 직접 사용할 때는 인자를 전달합니다.
+
+| 작업 | 명령 |
+| --- | --- |
+| help 또는 version 표시 | `hce --help`, `hce --version` |
+| global config 생성 또는 보완 | `hce init` |
+| global 및 project config paths 표시 | `hce config path` |
+| config와 connectivity 확인 | `hce doctor`, `hce doctor --no-connectivity` |
+| 현재 repository index | `hce index .` |
+| index status 표시 | `hce status .`, `hce status . --refresh` |
+| index된 repository 검색 | `hce search "query" . --limit 5 --target-role implementation` |
+| indexes와 collections 관리 | `hce list`, `hce list <name-or-path>`, `hce clear <path>`, `hce repair <path>`, `hce rm <name-or-path>`, `hce index --force <path>` |
+
 Cursor, Windsurf, Claude Desktop, Gemini CLI, Qwen Code, VS Code MCP, Cline, Roo Code를 포함한 더 많은 client examples는 [docs/quick-start.ko.md](docs/quick-start.ko.md)에 있습니다.
 
 로컬 source checkout에서는 `./scripts/install-local-global.sh`를 실행하면 workspace를 build하고 현재 checkout에서 user-level `hitmux-context-engine-mcp` 명령을 설치합니다. `sudo`로 실행하면 전역으로 설치합니다. Published package를 쓰는 Claude Code와 Codex CLI setup은 위의 global `hce` 명령을 사용합니다.

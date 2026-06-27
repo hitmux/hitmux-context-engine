@@ -31,6 +31,28 @@ hce
 
 indexing 후 repository root에서 `hce status .`로 상태를 확인할 수 있습니다.
 
+## CLI Usage
+
+인자 없는 `hce`는 client configuration의 MCP stdio server command로만 사용합니다. shell에서는 command를 함께 전달합니다.
+
+| 명령 | 용도 |
+| --- | --- |
+| `hce --help` | command usage를 표시합니다. |
+| `hce --version` | 설치된 MCP package version을 표시합니다. |
+| `hce init` | 기존 값을 덮어쓰지 않고 `~/.hitmux-context-engine/config.conf`를 만들거나 보완합니다. |
+| `hce config path` | global 및 project config paths와 존재 여부를 표시합니다. |
+| `hce doctor [--no-connectivity]` | Node, config parsing, runtime settings, 선택적으로 embedding/vector database connectivity를 확인합니다. |
+| `hce test [embedding\|vectordb]` | connectivity checks를 실행합니다. |
+| `hce index [path]` | index를 sync 또는 생성합니다. 현재 repository는 `hce index .`를 사용합니다. |
+| `hce index --force [path]` | repository index를 force rebuild합니다. |
+| `hce index --all --force` | 알려진 모든 repository indexes를 force rebuild합니다. `--force` 없는 `hce index --all`은 거부됩니다. |
+| `hce status [path] [--refresh]` | path의 indexing status를 표시합니다. 기본값은 현재 directory입니다. |
+| `hce search <query> [path] [--limit n] [--target-role role]` | shell에서 index된 path를 검색합니다. `role`은 `implementation`, `test`, `docs`, `config`, `all`입니다. |
+| `hce list [collection-name\|repo-path]` | collections를 list하거나 collection/path detail을 표시합니다. |
+| `hce clear <path>` | path의 index data를 삭제합니다. |
+| `hce repair <path>` | legacy 또는 missing remote index manifest를 repair합니다. |
+| `hce rm <collection-name\|repo-path> [...]` | collection name 또는 repo path로 하나 이상의 collections를 삭제합니다. |
+
 ## Claude Code
 
 ```bash

@@ -75,6 +75,21 @@ You can also check status from a shell:
 hce status .
 ```
 
+## CLI Usage
+
+`hce` with no arguments starts the MCP stdio server for clients. Use arguments when running it directly from a shell:
+
+| Task | Command |
+| --- | --- |
+| Show help or version | `hce --help`, `hce --version` |
+| Create or complete global config | `hce init` |
+| Show global and project config paths | `hce config path` |
+| Check config and connectivity | `hce doctor`, `hce doctor --no-connectivity` |
+| Index the current repository | `hce index .` |
+| Show index status | `hce status .`, `hce status . --refresh` |
+| Search an indexed repository | `hce search "query" . --limit 5 --target-role implementation` |
+| Manage indexes and collections | `hce list`, `hce list <name-or-path>`, `hce clear <path>`, `hce repair <path>`, `hce rm <name-or-path>`, `hce index --force <path>` |
+
 More client examples, including Cursor, Windsurf, Claude Desktop, Gemini CLI, Qwen Code, VS Code MCP, Cline, and Roo Code, are in [docs/quick-start.md](docs/quick-start.md).
 
 For a local source checkout, run `./scripts/install-local-global.sh` to build the workspace and install a user-level `hitmux-context-engine-mcp` command from the current checkout. Run the script with `sudo` to install the command globally. Published-package Claude Code and Codex CLI setup uses the global `hce` command shown above.

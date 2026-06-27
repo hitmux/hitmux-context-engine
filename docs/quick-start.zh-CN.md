@@ -27,6 +27,28 @@ hce
 
 索引后如需在 shell 中诊断，可在仓库根目录运行 `hce status .`。
 
+## CLI 使用
+
+不带参数的 `hce` 只用于 MCP client 配置中的 stdio server 命令。直接在 shell 中使用时传入 command：
+
+| 命令 | 用途 |
+| --- | --- |
+| `hce --help` | 显示 command usage。 |
+| `hce --version` | 打印已安装 MCP package version。 |
+| `hce init` | 创建或补全 `~/.hitmux-context-engine/config.conf`，不会覆盖已有值。 |
+| `hce config path` | 显示 global 和 project config paths，以及它们是否存在。 |
+| `hce doctor [--no-connectivity]` | 检查 Node、config parsing、runtime settings，并可选检查 embedding/vector database 连通性。 |
+| `hce test [embedding\|vectordb]` | 运行连通性检查。 |
+| `hce index [path]` | 同步或创建 index。当前仓库使用 `hce index .`。 |
+| `hce index --force [path]` | Force rebuild 一个 repository index。 |
+| `hce index --all --force` | Force rebuild all known repository indexes。没有 `--force` 的 `hce index --all` 会被拒绝。 |
+| `hce status [path] [--refresh]` | 显示某个 path 的 indexing status，默认当前目录。 |
+| `hce search <query> [path] [--limit n] [--target-role role]` | 从 shell 搜索已索引 path。`role` 可为 `implementation`、`test`、`docs`、`config` 或 `all`。 |
+| `hce list [collection-name\|repo-path]` | 列出 collections，或显示某个 collection/path 的详情。 |
+| `hce clear <path>` | 清理某个 path 的 index data。 |
+| `hce repair <path>` | 修复 legacy 或缺失的 remote index manifest。 |
+| `hce rm <collection-name\|repo-path> [...]` | 按 collection name 或 repo path 删除一个或多个 collections。 |
+
 ## Claude Code
 
 全局安装并添加 server：

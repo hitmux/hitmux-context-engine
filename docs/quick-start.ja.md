@@ -31,6 +31,28 @@ hce
 
 indexing 後、repository root で `hce status .` を実行すると状態を確認できます。
 
+## CLI Usage
+
+引数なしの `hce` は client configuration の MCP stdio server command としてだけ使います。shell からは command を付けます。
+
+| Command | Use |
+| --- | --- |
+| `hce --help` | command usage を表示。 |
+| `hce --version` | install 済み MCP package version を表示。 |
+| `hce init` | 既存値を上書きせず `~/.hitmux-context-engine/config.conf` を作成または補完。 |
+| `hce config path` | global と project の config paths と存在有無を表示。 |
+| `hce doctor [--no-connectivity]` | Node、config parsing、runtime settings、必要に応じて embedding/vector database connectivity を確認。 |
+| `hce test [embedding\|vectordb]` | connectivity checks を実行。 |
+| `hce index [path]` | index を同期または作成。現在の repository では `hce index .` を使います。 |
+| `hce index --force [path]` | repository index を force rebuild。 |
+| `hce index --all --force` | known repository indexes をすべて force rebuild。`--force` なしの `hce index --all` は拒否されます。 |
+| `hce status [path] [--refresh]` | path の indexing status を表示。default は現在の directory。 |
+| `hce search <query> [path] [--limit n] [--target-role role]` | shell から index 済み path を検索。`role` は `implementation`、`test`、`docs`、`config`、`all`。 |
+| `hce list [collection-name\|repo-path]` | collections を list、または collection/path の detail を表示。 |
+| `hce clear <path>` | path の index data を削除。 |
+| `hce repair <path>` | legacy または missing remote index manifest を repair。 |
+| `hce rm <collection-name\|repo-path> [...]` | collection name または repo path で 1 つ以上の collections を削除。 |
+
 ## Claude Code
 
 ```bash

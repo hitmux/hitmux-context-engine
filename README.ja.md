@@ -75,6 +75,21 @@ shell から status を確認することもできます。
 hce status .
 ```
 
+## CLI Usage
+
+引数なしの `hce` は MCP clients 向けの MCP stdio server を起動します。shell から直接使う場合は引数を付けます。
+
+| Task | Command |
+| --- | --- |
+| help または version を表示 | `hce --help`, `hce --version` |
+| global config を作成または補完 | `hce init` |
+| global と project の config paths を表示 | `hce config path` |
+| config と connectivity を確認 | `hce doctor`, `hce doctor --no-connectivity` |
+| 現在の repository を index | `hce index .` |
+| index status を表示 | `hce status .`, `hce status . --refresh` |
+| index 済み repository を検索 | `hce search "query" . --limit 5 --target-role implementation` |
+| indexes と collections を管理 | `hce list`, `hce list <name-or-path>`, `hce clear <path>`, `hce repair <path>`, `hce rm <name-or-path>`, `hce index --force <path>` |
+
 Cursor、Windsurf、Claude Desktop、Gemini CLI、Qwen Code、VS Code MCP、Cline、Roo Code などの client examples は [docs/quick-start.ja.md](docs/quick-start.ja.md) にあります。
 
 ローカル source checkout では `./scripts/install-local-global.sh` を実行すると、workspace を build し、現在の checkout から user-level の `hitmux-context-engine-mcp` コマンドをインストールします。`sudo` 付きで実行すると global にインストールします。公開 package を使う Claude Code と Codex CLI の setup では、上で示した global `hce` コマンドを使います。

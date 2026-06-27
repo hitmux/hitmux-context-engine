@@ -31,6 +31,28 @@ hce
 
 Nach dem Indexing kann der Status aus dem Repository-Root mit `hce status .` geprüft werden.
 
+## CLI Usage
+
+Nutze `hce` ohne Argumente nur als MCP stdio server-Befehl in der Client-Konfiguration. In der Shell wird ein command übergeben:
+
+| Befehl | Zweck |
+| --- | --- |
+| `hce --help` | Zeigt command usage. |
+| `hce --version` | Gibt die installierte MCP package version aus. |
+| `hce init` | Erstellt oder ergänzt `~/.hitmux-context-engine/config.conf`, ohne vorhandene Werte zu überschreiben. |
+| `hce config path` | Zeigt globale und projektlokale config paths sowie deren Existenz. |
+| `hce doctor [--no-connectivity]` | Prüft Node, config parsing, runtime settings und optional embedding/vector database connectivity. |
+| `hce test [embedding\|vectordb]` | Führt connectivity checks aus. |
+| `hce index [path]` | Synchronisiert oder erstellt einen Index. Für das aktuelle Repository `hce index .` verwenden. |
+| `hce index --force [path]` | Force rebuild eines repository index. |
+| `hce index --all --force` | Force rebuild aller bekannten repository indexes. `hce index --all` ohne `--force` wird abgelehnt. |
+| `hce status [path] [--refresh]` | Zeigt indexing status für einen path, standardmäßig das aktuelle Verzeichnis. |
+| `hce search <query> [path] [--limit n] [--target-role role]` | Durchsucht einen indexierten path aus der Shell. `role` ist `implementation`, `test`, `docs`, `config` oder `all`. |
+| `hce list [collection-name\|repo-path]` | Listet collections oder zeigt Details einer collection/path. |
+| `hce clear <path>` | Löscht index data für einen path. |
+| `hce repair <path>` | Repariert ein legacy oder fehlendes remote index manifest. |
+| `hce rm <collection-name\|repo-path> [...]` | Löscht eine oder mehrere collections per collection name oder repo path. |
+
 ## Claude Code
 
 ```bash
