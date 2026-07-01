@@ -1,2 +1,4 @@
 #!/usr/bin/env node
-import "@hitmux/hitmux-context-engine-mcp";
+import { runHitmuxContextEngineCli } from "@hitmux/hitmux-context-engine-mcp";
+
+runHitmuxContextEngineCli();

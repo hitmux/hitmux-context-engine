@@ -616,7 +616,7 @@ function isDirectExecution(): boolean {
     }
 }
 
-if (isDirectExecution()) {
+export function runHitmuxContextEngineCli(): void {
     // Handle graceful shutdown
     process.on("SIGINT", () => {
         handleShutdownSignal("SIGINT");
@@ -631,4 +631,8 @@ if (isDirectExecution()) {
         console.error("Fatal error:", error);
         process.exit(1);
     });
+}
+
+if (isDirectExecution()) {
+    runHitmuxContextEngineCli();
 }
