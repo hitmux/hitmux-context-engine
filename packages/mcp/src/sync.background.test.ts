@@ -932,6 +932,27 @@ test("project watcher marks ignore file changes unknown so sync falls back to fu
     });
 });
 
+test("project watcher handles ignore file changes without debounce", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const tracker = new ProjectChangeTracker({
+            debounceMs: 1000,
+            usePolling: false
+        });
+
+        tracker.watch(codebasePath);
+        (tracker as any).queueFileEvent(codebasePath, path.join(codebasePath, ".hceignore"));
+
+        const state = tracker.getState(codebasePath);
+        assert.equal(state.kind, "unknown");
+        assert.match(state.kind === "unknown" ? state.reason : "", /ignore file changed: \.hceignore/);
+
+        await tracker.close();
+    });
+});
+
 test("project watcher marks configured ignore file changes unknown", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");
@@ -948,6 +969,70 @@ test("project watcher marks configured ignore file changes unknown", async () =>
         const state = tracker.getState(codebasePath);
         assert.equal(state.kind, "unknown");
         assert.match(state.kind === "unknown" ? state.reason : "", /ignore file changed: extra\.ignore/);
+
+        await tracker.close();
+    });
+});
+
+test("project watcher marks absolute configured ignore file changes unknown", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        const ignoreFilePath = path.join(codebasePath, "extra.ignore");
+        await mkdir(codebasePath, { recursive: true });
+
+        const tracker = new ProjectChangeTracker({
+            debounceMs: 1000,
+            usePolling: false
+        });
+
+        tracker.watch(codebasePath, [ignoreFilePath]);
+        (tracker as any).recordFileEvent(codebasePath, ignoreFilePath);
+
+        const state = tracker.getState(codebasePath);
+        assert.equal(state.kind, "unknown");
+        assert.match(state.kind === "unknown" ? state.reason : "", /ignore file changed: extra\.ignore/);
+
+        await tracker.close();
+    });
+});
+
+test("project watcher does not treat tool-specific ignore files as auto-loaded index rules", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const tracker = new ProjectChangeTracker({
+            debounceMs: 1000,
+            usePolling: false
+        });
+
+        tracker.watch(codebasePath);
+        (tracker as any).recordFileEvent(codebasePath, path.join(codebasePath, ".dockerignore"));
+
+        const state = tracker.getState(codebasePath);
+        assert.equal(state.kind, "dirty");
+        assert.deepEqual(state.kind === "dirty" ? state.paths : [], [".dockerignore"]);
+
+        await tracker.close();
+    });
+});
+
+test("project watcher treats explicit tool-specific ignore files as configured ignore files", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const tracker = new ProjectChangeTracker({
+            debounceMs: 1000,
+            usePolling: false
+        });
+
+        tracker.watch(codebasePath, [".dockerignore"]);
+        (tracker as any).recordFileEvent(codebasePath, path.join(codebasePath, ".dockerignore"));
+
+        const state = tracker.getState(codebasePath);
+        assert.equal(state.kind, "unknown");
+        assert.match(state.kind === "unknown" ? state.reason : "", /ignore file changed: \.dockerignore/);
 
         await tracker.close();
     });

@@ -1,6 +1,6 @@
 {
     "name": "hitmux-context-engine",
-    "version": "0.2.7",
+    "version": "0.2.8",
     "description": "A powerful code indexing tool with multi-platform support",
     "private": true,
     "scripts": {

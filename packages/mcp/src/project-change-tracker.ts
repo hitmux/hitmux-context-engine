@@ -40,6 +40,13 @@ const WATCHER_IGNORED_DIRS = new Set([
     ".vscode",
 ]);
 
+const AUTO_DISCOVERED_IGNORE_FILE_NAMES = new Set([
+    ".gitignore",
+    ".hceignore",
+    ".hitmux-context-engineignore",
+    ".cursorignore",
+]);
+
 export class ProjectChangeTracker {
     private watchers: Map<string, FSWatcher> = new Map();
     private dirtyPaths: Map<string, Map<string, number>> = new Map();
@@ -203,6 +210,11 @@ export class ProjectChangeTracker {
     }
 
     private queueFileEvent(codebasePath: string, eventPath: string): void {
+        if (this.isIgnoreFileEvent(codebasePath, eventPath)) {
+            this.recordFileEvent(codebasePath, eventPath);
+            return;
+        }
+
         const pending = this.getPendingEvents(codebasePath);
         pending.files.push(eventPath);
         this.scheduleFlush(codebasePath);
@@ -280,6 +292,11 @@ export class ProjectChangeTracker {
         this.emitChange(codebasePath);
     }
 
+    private isIgnoreFileEvent(codebasePath: string, eventPath: string): boolean {
+        const relativePath = this.toRelativePath(codebasePath, eventPath);
+        return relativePath !== null && this.isIgnoreFilePath(codebasePath, relativePath);
+    }
+
     private recordDirectoryEvent(codebasePath: string, eventPath: string, reason: string): void {
         const relativePath = this.toRelativePath(codebasePath, eventPath);
         this.markUnknown(codebasePath, relativePath ? `${reason}: ${relativePath}` : `${reason}: unresolved path`, { closeWatcher: false });
@@ -331,9 +348,21 @@ export class ProjectChangeTracker {
 
     private updateIgnoreFiles(codebasePath: string, ignoreFiles: string[]): void {
         const normalized = ignoreFiles
-            .map(ignoreFile => this.normalizeRelativePath(ignoreFile))
+            .map(ignoreFile => this.normalizeIgnoreFilePath(codebasePath, ignoreFile))
             .filter((ignoreFile): ignoreFile is string => ignoreFile !== null);
         this.requestIgnoreFiles.set(codebasePath, new Set(normalized));
+    }
+
+    private normalizeIgnoreFilePath(codebasePath: string, ignoreFile: string): string | null {
+        const trimmedIgnoreFile = ignoreFile.trim();
+        if (trimmedIgnoreFile.length === 0) {
+            return null;
+        }
+
+        const relativePath = path.isAbsolute(trimmedIgnoreFile)
+            ? path.relative(codebasePath, trimmedIgnoreFile)
+            : trimmedIgnoreFile;
+        return this.normalizeRelativePath(relativePath);
     }
 
     private isIgnoreFilePath(codebasePath: string, relativePath: string): boolean {
@@ -346,12 +375,7 @@ export class ProjectChangeTracker {
             return true;
         }
 
-        const basename = path.basename(relativePath);
-        return basename === ".gitignore" ||
-            basename === ".hceignore" ||
-            basename === ".hitmux-context-engineignore" ||
-            basename.endsWith(".ignore") ||
-            (basename.startsWith(".") && basename.endsWith("ignore"));
+        return AUTO_DISCOVERED_IGNORE_FILE_NAMES.has(path.basename(normalizedPath));
     }
 
     private normalizeRelativePath(relativePath: string): string | null {
