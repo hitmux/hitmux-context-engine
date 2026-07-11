@@ -5,7 +5,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { configManager } from "@hitmux/hitmux-context-engine-core";
-import { createMcpConfig } from "./config.js";
+import {
+    createMcpConfig,
+    getEmbeddingApiKeyForRerank,
+    getEmbeddingBaseUrlForRerank,
+} from "./config.js";
 
 async function withTempConfig(
     configs: { global?: Record<string, unknown>; project?: Record<string, unknown> },
@@ -72,6 +76,12 @@ test("createMcpConfig defaults to OpenRouter qwen embeddings", async () => {
         assert.equal(config.embeddingModel, "qwen/qwen3-embedding-4b");
         assert.equal(config.embeddingUseSystemProxy, false);
         assert.equal(config.databaseUseSystemProxy, false);
+        assert.equal(config.rerankEnabled, true);
+        assert.equal(config.rerankModel, "cohere/rerank-4-fast");
+        assert.equal(config.rerankCandidateLimit, 100);
+        assert.equal(config.rerankTimeoutMs, 8000);
+        assert.equal(config.rerankMaxCharsPerDocument, 6000);
+        assert.equal(config.rerankUseSystemProxy, false);
     });
 });
 
@@ -105,11 +115,18 @@ test("ensureGlobalConfigFile creates a commented default global config", async (
         assert.doesNotMatch(content, /\nembeddingConcurrency = /);
         assert.match(content, /# embeddingBatchSize = 64/);
         assert.match(content, /# embeddingConcurrency = 2/);
+        assert.match(content, /# rerankEnabled = true/);
+        assert.match(content, /# rerankModel = cohere\/rerank-4-fast/);
+        assert.match(content, /# rerankCandidateLimit = 100/);
+        assert.match(content, /# rerankTimeoutMs = 8000/);
+        assert.match(content, /# rerankMaxCharsPerDocument = 6000/);
+        assert.match(content, /# rerankUseSystemProxy = false/);
         assert.match(content, /# openrouterApiKey = sk-or-your-openrouter-api-key/);
         assert.match(content, /milvusAddress = localhost:19530/);
         assert.match(content, /embeddingUseSystemProxy = false/);
         assert.match(content, /databaseUseSystemProxy = false/);
         assert.match(content, /# automaticIncrementalEffectiveLineLimit = 5000/);
+        assert.match(content, /restrictToolsWhenUnindexed = true/);
         assert.match(content, /projectWatcher = true/);
         assert.match(content, /projectWatcherDebounceMs = 1000/);
         assert.match(content, /projectWatcherUsePolling = false/);
@@ -148,6 +165,10 @@ test("ensureGlobalConfigFile completes existing config using the default templat
         assert.ok(result.appendedKeys.includes("embeddingBatchSize"));
         assert.ok(result.appendedKeys.includes("embeddingConcurrency"));
         assert.ok(result.appendedKeys.includes("openrouterApiKey"));
+        assert.ok(result.appendedKeys.includes("rerankEnabled"));
+        assert.ok(result.appendedKeys.includes("rerankModel"));
+        assert.ok(result.appendedKeys.includes("rerankCandidateLimit"));
+        assert.ok(result.appendedKeys.includes("restrictToolsWhenUnindexed"));
         assert.ok(!result.appendedKeys.includes("embeddingProvider"));
         assert.ok(!result.appendedKeys.includes("milvusAddress"));
         assert.ok(!result.appendedKeys.includes("customExtensions"));
@@ -160,6 +181,9 @@ test("ensureGlobalConfigFile completes existing config using the default templat
         assert.match(content, /# Index worker defaults\.\nfileProcessingConcurrency = 2/);
         assert.match(content, /# Embedding batch size for index operations\.\n# embeddingBatchSize = 64/);
         assert.match(content, /# Embedding request concurrency for index operations\.\n# embeddingConcurrency = 2/);
+        assert.match(content, /# Enable external rerank after initial search recall\.\n# rerankEnabled = true/);
+        assert.match(content, /# External rerank model name\.\n# rerankModel = cohere\/rerank-4-fast/);
+        assert.match(content, /# Maximum candidates sent to external rerank, capped at 100\.\n# rerankCandidateLimit = 100/);
         assert.match(content, /# Effective-line growth limit before automatic incremental sync pauses for manual review\.\n# automaticIncrementalEffectiveLineLimit = 5000/);
         assert.match(content, /# Background sync defaults\.\nbackgroundSync = true\ntriggerWatcher = true\nprojectWatcher = true\nprojectWatcherDebounceMs = 1000\nprojectWatcherUsePolling = false\nprojectWatcherFallbackScanIntervalMs = 600000/);
         assert.match(content, /# Additional file extensions to index; repeat the field for multiple values\.\ncustomExtensions = \.vue\ncustomExtensions = \.svelte/);
@@ -183,6 +207,66 @@ test("createMcpConfig reads independent proxy toggles", async () => {
         assert.equal(config.embeddingUseSystemProxy, true);
         assert.equal(config.databaseUseSystemProxy, true);
     });
+});
+
+test("createMcpConfig reads rerank fields without exposing API key values", async () => {
+    await withTempConfig({
+        project: {
+            embeddingUseSystemProxy: true,
+            rerankEnabled: true,
+            rerankModel: "cohere/rerank-4-pro",
+            rerankBaseUrl: "https://api.cohere.com/v2/",
+            rerankApiKey: "co-secret",
+            rerankCandidateLimit: 120,
+            rerankTimeoutMs: 9000,
+            rerankMaxCharsPerDocument: 7000
+        }
+    }, () => {
+        const logs: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args: unknown[]) => {
+            logs.push(args.map(String).join(" "));
+        };
+        try {
+            const config = createMcpConfig();
+
+            assert.equal(config.rerankEnabled, true);
+            assert.equal(config.rerankModel, "cohere/rerank-4-pro");
+            assert.equal(config.rerankBaseUrl, "https://api.cohere.com/v2");
+            assert.equal(config.rerankApiKey, "co-secret");
+            assert.equal(config.rerankCandidateLimit, 120);
+            assert.equal(config.rerankTimeoutMs, 9000);
+            assert.equal(config.rerankMaxCharsPerDocument, 7000);
+            assert.equal(config.rerankUseSystemProxy, true);
+            assert.match(logs.join("\n"), /rerankApiKey: Configured/);
+            assert.doesNotMatch(logs.join("\n"), /co-secret|length: 9/);
+        } finally {
+            console.log = originalLog;
+        }
+    });
+});
+
+test("rerank inherits the active embedding provider key for non-OpenRouter providers", () => {
+    const voyageConfig = {
+        embeddingProvider: "VoyageAI" as const,
+        openaiApiKey: "sk-openai",
+        voyageaiApiKey: "pa-voyage",
+        geminiApiKey: "gemini-key",
+        openrouterApiKey: "sk-or",
+    };
+    const geminiConfig = {
+        embeddingProvider: "Gemini" as const,
+        openaiBaseUrl: "https://openai.example.com/v1",
+        geminiBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        openaiApiKey: "sk-openai",
+        voyageaiApiKey: "pa-voyage",
+        geminiApiKey: "gemini-key",
+        openrouterApiKey: "sk-or",
+    };
+
+    assert.equal(getEmbeddingApiKeyForRerank(voyageConfig), "pa-voyage");
+    assert.equal(getEmbeddingApiKeyForRerank(geminiConfig), "gemini-key");
+    assert.equal(getEmbeddingBaseUrlForRerank(geminiConfig), "https://generativelanguage.googleapis.com/v1beta");
 });
 
 test("createMcpConfig accepts OpenAI-compatible base URL from config", async () => {

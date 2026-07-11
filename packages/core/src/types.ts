@@ -45,6 +45,8 @@ export interface SemanticSearchResult {
     chunkRole?: string;
     resultGroup?: SearchResultGroup;
     isPrimary?: boolean;
+    rerankScore?: number;
+    rerankRank?: number;
 }
 
 export type SymbolTraceEvidenceKind = 'definition' | 'reference' | 'import' | 'export' | 'related_test';

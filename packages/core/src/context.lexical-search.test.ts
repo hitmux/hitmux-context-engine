@@ -1,6 +1,10 @@
 import { Context } from './context';
 import { Embedding, EmbeddingVector } from './embedding';
 import { DEFAULT_SEARCH_OUTPUT_FIELDS, VectorDatabase } from './vectordb';
+import { configManager } from './utils/config-manager';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 class TestEmbedding extends Embedding {
     protected maxTokens = 8192;
@@ -136,6 +140,39 @@ function createVectorResult(
 }
 
 describe('Context lexical search supplement', () => {
+    const originalHome = process.env.HOME;
+    const originalUserProfile = process.env.USERPROFILE;
+    const isolatedHome = mkdtempSync(join(tmpdir(), 'hitmux-context-engine-core-search-test-'));
+
+    beforeAll(() => {
+        process.env.HOME = isolatedHome;
+        process.env.USERPROFILE = isolatedHome;
+    });
+
+    afterAll(() => {
+        if (originalHome === undefined) {
+            delete process.env.HOME;
+        } else {
+            process.env.HOME = originalHome;
+        }
+        if (originalUserProfile === undefined) {
+            delete process.env.USERPROFILE;
+        } else {
+            process.env.USERPROFILE = originalUserProfile;
+        }
+        rmSync(isolatedHome, { recursive: true, force: true });
+    });
+
+    beforeEach(() => {
+        jest.spyOn(configManager, 'getString').mockReturnValue(undefined);
+        jest.spyOn(configManager, 'getNumber').mockReturnValue(undefined);
+        jest.spyOn(configManager, 'getBoolean').mockReturnValue(undefined);
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
     it('promotes exact identifier matches that vector search misses', async () => {
         const vectorDatabase = createVectorDatabase();
         const context = new Context({
@@ -272,6 +309,405 @@ describe('Context lexical search supplement', () => {
             expect.objectContaining({ limit: 80 })
         );
         expect(results).toHaveLength(5);
+    });
+
+    it('expands OpenRouter recall to 100 candidates and applies external rerank', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue(Array.from({ length: 100 }, (_, index) => createVectorResult({
+            id: `candidate-${index}`,
+            content: `candidate ${index}`,
+            relativePath: `src/candidates/candidate${index}.ts`,
+            startLine: index + 1,
+            endLine: index + 1,
+            metadata: {
+                language: 'typescript',
+                fileRole: 'implementation',
+            },
+        }, 1 - (index / 1000))));
+        const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                results: Array.from({ length: 100 }, (_, index) => ({
+                    index: 99 - index,
+                    relevance_score: 100 - index,
+                })),
+            }),
+        } as unknown as Response);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            embeddingProvider: 'OpenRouter',
+            embeddingBaseUrl: 'https://openrouter.ai/api/v1',
+            embeddingApiKey: 'sk-or-test',
+        });
+
+        const results = await context.semanticSearch('/repo', 'player ready countdown start', 5, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        expect(vectorDatabase.search).toHaveBeenCalledWith(
+            expect.any(String),
+            [1, 0, 0],
+            expect.objectContaining({ topK: 100, threshold: 0.3 })
+        );
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock.mock.calls[0][0]).toBe('https://openrouter.ai/api/v1/rerank');
+        const request = fetchMock.mock.calls[0][1] as RequestInit;
+        expect(request.headers).toEqual(expect.objectContaining({
+            Authorization: 'Bearer sk-or-test',
+            'Content-Type': 'application/json',
+        }));
+        const body = JSON.parse(String(request.body));
+        expect(body).toMatchObject({
+            model: 'cohere/rerank-4-fast',
+            query: 'player ready countdown start',
+            top_n: 100,
+        });
+        expect(body.documents).toHaveLength(100);
+        expect(results[0]).toMatchObject({
+            relativePath: 'src/candidates/candidate99.ts',
+            rerankScore: 100,
+            rerankRank: 1,
+        });
+    });
+
+    it('uses the active embedding provider key when explicit rerankBaseUrl is configured', async () => {
+        jest.spyOn(configManager, 'getString').mockImplementation((key) => {
+            if (key === 'embeddingProvider') return 'VoyageAI';
+            if (key === 'voyageaiApiKey') return 'pa-voyage-test';
+            return undefined;
+        });
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([
+            createVectorResult({
+                id: 'first',
+                content: 'first candidate',
+                relativePath: 'src/first.ts',
+                startLine: 1,
+                endLine: 3,
+                metadata: { language: 'typescript' },
+            }, 0.9),
+            createVectorResult({
+                id: 'second',
+                content: 'second candidate',
+                relativePath: 'src/second.ts',
+                startLine: 4,
+                endLine: 6,
+                metadata: { language: 'typescript' },
+            }, 0.8),
+        ]);
+        const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                results: [
+                    { index: 1, relevance_score: 0.95 },
+                    { index: 0, relevance_score: 0.5 },
+                ],
+            }),
+        } as unknown as Response);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankBaseUrl: 'https://api.cohere.com/v2',
+        });
+
+        const results = await context.semanticSearch('/repo', 'player ready countdown start', 5, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock.mock.calls[0][0]).toBe('https://api.cohere.com/v2/rerank');
+        expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toEqual(expect.objectContaining({
+            Authorization: 'Bearer pa-voyage-test',
+        }));
+        expect(results[0].relativePath).toBe('src/second.ts');
+    });
+
+    it('passes a proxy dispatcher to native fetch when rerankUseSystemProxy is enabled', async () => {
+        const originalHttpsProxyUpper = process.env.HTTPS_PROXY;
+        const originalNoProxyUpper = process.env.NO_PROXY;
+        const originalHttpsProxy = process.env.https_proxy;
+        const originalNoProxy = process.env.no_proxy;
+        process.env.HTTPS_PROXY = 'http://127.0.0.1:7890';
+        process.env.https_proxy = 'http://127.0.0.1:7890';
+        delete process.env.NO_PROXY;
+        delete process.env.no_proxy;
+
+        try {
+            const vectorDatabase = createVectorDatabase();
+            vectorDatabase.search.mockResolvedValue([
+                createVectorResult({
+                    id: 'first',
+                    content: 'first candidate',
+                    relativePath: 'src/first.ts',
+                    startLine: 1,
+                    endLine: 3,
+                    metadata: { language: 'typescript' },
+                }, 0.9),
+                createVectorResult({
+                    id: 'second',
+                    content: 'second candidate',
+                    relativePath: 'src/second.ts',
+                    startLine: 4,
+                    endLine: 6,
+                    metadata: { language: 'typescript' },
+                }, 0.8),
+            ]);
+            const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    results: [
+                        { index: 0, relevance_score: 0.95 },
+                        { index: 1, relevance_score: 0.5 },
+                    ],
+                }),
+            } as unknown as Response);
+            const context = new Context({
+                hybridMode: false,
+                embedding: new TestEmbedding(),
+                vectorDatabase,
+                rerankApiKey: 'sk-test',
+                rerankBaseUrl: 'https://openrouter.ai/api/v1',
+                rerankUseSystemProxy: true,
+            });
+
+            await context.semanticSearch('/repo', 'player ready countdown start', 5, 0.3, undefined, {
+                enableLexicalSupplement: false,
+            });
+
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+            expect((fetchMock.mock.calls[0][1] as RequestInit & { dispatcher?: unknown }).dispatcher).toBeDefined();
+        } finally {
+            if (originalHttpsProxyUpper === undefined) {
+                delete process.env.HTTPS_PROXY;
+            } else {
+                process.env.HTTPS_PROXY = originalHttpsProxyUpper;
+            }
+            if (originalNoProxyUpper === undefined) {
+                delete process.env.NO_PROXY;
+            } else {
+                process.env.NO_PROXY = originalNoProxyUpper;
+            }
+            if (originalHttpsProxy === undefined) {
+                delete process.env.https_proxy;
+            } else {
+                process.env.https_proxy = originalHttpsProxy;
+            }
+            if (originalNoProxy === undefined) {
+                delete process.env.no_proxy;
+            } else {
+                process.env.no_proxy = originalNoProxy;
+            }
+        }
+    });
+
+    it('does not call external rerank when rerankEnabled is false', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue(Array.from({ length: 80 }, (_, index) => createVectorResult({
+            id: `candidate-${index}`,
+            content: `candidate ${index}`,
+            relativePath: `src/candidates/candidate${index}.ts`,
+            startLine: index + 1,
+            endLine: index + 1,
+            metadata: { language: 'typescript' },
+        }, 1 - (index / 1000))));
+        const fetchMock = jest.spyOn(globalThis, 'fetch');
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankEnabled: false,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+        });
+
+        const results = await context.semanticSearch('/repo', 'player ready countdown start', 5, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        expect(vectorDatabase.search).toHaveBeenCalledWith(
+            expect.any(String),
+            [1, 0, 0],
+            expect.objectContaining({ topK: 80, threshold: 0.3 })
+        );
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(results[0].relativePath).toBe('src/candidates/candidate0.ts');
+    });
+
+    it('clamps rerankCandidateLimit to 100', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue(Array.from({ length: 100 }, (_, index) => createVectorResult({
+            id: `candidate-${index}`,
+            content: `candidate ${index}`,
+            relativePath: `src/candidates/candidate${index}.ts`,
+            startLine: index + 1,
+            endLine: index + 1,
+            metadata: { language: 'typescript' },
+        }, 1 - (index / 1000))));
+        const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                results: Array.from({ length: 100 }, (_, index) => ({
+                    index,
+                    relevance_score: 100 - index,
+                })),
+            }),
+        } as unknown as Response);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+            rerankCandidateLimit: 120,
+        });
+
+        await context.semanticSearch('/repo', 'player ready countdown start', 5, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        expect(vectorDatabase.search).toHaveBeenCalledWith(
+            expect.any(String),
+            [1, 0, 0],
+            expect.objectContaining({ topK: 100 })
+        );
+        const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+        expect(body.documents).toHaveLength(100);
+        expect(body.top_n).toBe(100);
+    });
+
+    it.each([
+        ['429', { ok: false, status: 429, json: async () => ({}) }],
+        ['5xx', { ok: false, status: 503, json: async () => ({}) }],
+        ['unexpected JSON', { ok: true, status: 200, json: async () => ({ items: [] }) }],
+    ])('falls back to original order when external rerank returns %s', async (_label, response) => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([
+            createVectorResult({
+                id: 'first',
+                content: 'first result',
+                relativePath: 'src/first.ts',
+                metadata: { language: 'typescript', fileRole: 'implementation' },
+            }, 0.9),
+            createVectorResult({
+                id: 'second',
+                content: 'second result',
+                relativePath: 'src/second.ts',
+                metadata: { language: 'typescript', fileRole: 'implementation' },
+            }, 0.8),
+        ]);
+        jest.spyOn(globalThis, 'fetch').mockResolvedValue(response as unknown as Response);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+        });
+
+        const results = await context.semanticSearch('/repo', 'player ready countdown start', 2, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        expect(results.map(result => result.relativePath)).toEqual([
+            'src/first.ts',
+            'src/second.ts',
+        ]);
+    });
+
+    it('falls back to original order when external rerank times out', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([
+            createVectorResult({
+                id: 'first',
+                content: 'first result',
+                relativePath: 'src/first.ts',
+                metadata: { language: 'typescript', fileRole: 'implementation' },
+            }, 0.9),
+            createVectorResult({
+                id: 'second',
+                content: 'second result',
+                relativePath: 'src/second.ts',
+                metadata: { language: 'typescript', fileRole: 'implementation' },
+            }, 0.8),
+        ]);
+        jest.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }));
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+            rerankTimeoutMs: 1,
+        });
+
+        const results = await context.semanticSearch('/repo', 'player ready countdown start', 2, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        expect(results.map(result => result.relativePath)).toEqual([
+            'src/first.ts',
+            'src/second.ts',
+        ]);
+    });
+
+    it('keeps role grouping ahead of external rerank scores', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([
+            createVectorResult({
+                id: 'docs',
+                content: 'high rerank documentation',
+                relativePath: 'docs/guide.md',
+                fileExtension: '.md',
+                metadata: {
+                    language: 'markdown',
+                    fileRole: 'docs',
+                },
+            }, 0.9),
+            createVectorResult({
+                id: 'implementation',
+                content: 'implementation search logic',
+                relativePath: 'src/search.ts',
+                metadata: {
+                    language: 'typescript',
+                    fileRole: 'implementation',
+                },
+            }, 0.7),
+        ]);
+        jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                results: [
+                    { index: 0, relevance_score: 0.99 },
+                    { index: 1, relevance_score: 0.1 },
+                ],
+            }),
+        } as unknown as Response);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+        });
+
+        const results = await context.semanticSearch('/repo', 'search implementation', 2, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        expect(results.map(result => result.relativePath)).toEqual([
+            'src/search.ts',
+            'docs/guide.md',
+        ]);
     });
 
     it('caps lexical supplement candidate pools independently from final result limit', async () => {

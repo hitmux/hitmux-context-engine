@@ -14,6 +14,8 @@ import {
     ContextMcpConfig,
     RequestSplitterType,
     createMcpConfig,
+    getEmbeddingApiKeyForRerank,
+    getEmbeddingBaseUrlForRerank,
 } from "./config.js";
 import { createEmbeddingInstance } from "./embedding.js";
 import { createRequestSplitter, resolveRequestSplitterType } from "./splitter.js";
@@ -210,6 +212,19 @@ function createCliRuntime(options: CliManageOptions) {
                     globalName: currentConfig.globalCollectionName,
                     gitRemoteName: currentConfig.gitRemoteName,
                 },
+                rerankEnabled: currentConfig.rerankEnabled,
+                rerankModel: currentConfig.rerankModel,
+                rerankBaseUrl: currentConfig.rerankBaseUrl,
+                rerankApiKey: currentConfig.rerankApiKey,
+                rerankCandidateLimit: currentConfig.rerankCandidateLimit,
+                rerankTimeoutMs: currentConfig.rerankTimeoutMs,
+                rerankMaxCharsPerDocument:
+                    currentConfig.rerankMaxCharsPerDocument,
+                rerankUseSystemProxy: currentConfig.rerankUseSystemProxy,
+                embeddingProvider: currentConfig.embeddingProvider,
+                embeddingBaseUrl: getEmbeddingBaseUrlForRerank(currentConfig),
+                embeddingApiKey: getEmbeddingApiKeyForRerank(currentConfig),
+                embeddingUseSystemProxy: currentConfig.embeddingUseSystemProxy,
             }));
     const context = createContext(config, embedding, vectorDatabase);
     const createSnapshotManager =

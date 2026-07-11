@@ -74,4 +74,43 @@ describe('Context semanticSearch timeout', () => {
             .rejects
             .toBeInstanceOf(SearchTimeoutError);
     });
+
+    it('does not continue into lexical supplement after a timed-out vector search resolves late', async () => {
+        const vectorDatabase = createVectorDatabase();
+        let lexicalQueryCount = 0;
+        vectorDatabase.search.mockImplementation(() => new Promise((resolve) => {
+            setTimeout(() => {
+                resolve([{
+                    document: {
+                        id: 'chunk-1',
+                        content: 'export function SomeSymbol() {}',
+                        vector: [1, 0, 0],
+                        relativePath: 'src/some-symbol.ts',
+                        startLine: 1,
+                        endLine: 1,
+                        fileExtension: '.ts',
+                        metadata: { language: 'typescript' },
+                    },
+                    score: 0.9,
+                }]);
+            }, 30);
+        }));
+        vectorDatabase.query.mockImplementation(async () => {
+            lexicalQueryCount += 1;
+            return [];
+        });
+        const context = new Context({
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            searchTimeoutMs: 10,
+            hybridMode: false,
+        });
+
+        await expect(context.semanticSearch('/repo', 'SomeSymbol'))
+            .rejects
+            .toThrow(/while running vector search/);
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        expect(lexicalQueryCount).toBe(0);
+    });
 });

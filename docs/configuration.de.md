@@ -189,6 +189,6 @@ interactiveIndexing = true
 backgroundSync = true
 projectWatcher = true
 splitterType = ast
-searchTopK = 5
+searchTopK = 10
 searchThreshold = 0
 ```

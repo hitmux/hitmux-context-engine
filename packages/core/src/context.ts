@@ -56,6 +56,12 @@ import {
 } from './search/definition-identifiers';
 import { diversifySemanticSearchResultsByFile } from './search/result-diversify';
 import { deduplicateSemanticSearchResults, getNormalizedContentHash } from './search/result-dedupe';
+import {
+    ExternalRerankConfig,
+    externalRerankSemanticSearchResults,
+    MAX_RERANK_CANDIDATE_LIMIT,
+    resolveExternalRerankConfig
+} from './search/external-rerank';
 import { traceSymbolInFiles } from './search/symbol-trace';
 import { countEffectiveLinesInContent } from './utils/effective-lines';
 import { getKnownFileNameLanguage, isSupportedCodeFileName } from './utils/file-support';
@@ -448,6 +454,18 @@ export interface ContextConfig {
     collectionIdentity?: CodebaseIdentityOptions;
     maxDepth?: number;
     hybridMode?: boolean;
+    rerankEnabled?: boolean;
+    rerankModel?: string;
+    rerankBaseUrl?: string;
+    rerankApiKey?: string;
+    rerankCandidateLimit?: number;
+    rerankTimeoutMs?: number;
+    rerankMaxCharsPerDocument?: number;
+    rerankUseSystemProxy?: boolean;
+    embeddingProvider?: 'OpenAI' | 'VoyageAI' | 'Gemini' | 'Ollama' | 'OpenRouter';
+    embeddingBaseUrl?: string;
+    embeddingApiKey?: string;
+    embeddingUseSystemProxy?: boolean;
 }
 
 export class Context {
@@ -471,6 +489,7 @@ export class Context {
     private searchTimeoutMs: number;
     private maxDepth?: number;
     private hybridMode?: boolean;
+    private rerankConfigOverrides: ContextConfig;
     private activeIndexingBatchCount: number = 0;
     private indexingBatchWaiters: Array<() => void> = [];
 
@@ -518,6 +537,7 @@ export class Context {
         this.collectionIdentity = config.collectionIdentity || {};
         this.maxDepth = this.normalizeMaxDepth(config.maxDepth);
         this.hybridMode = config.hybridMode;
+        this.rerankConfigOverrides = config;
 
         console.log(`[Context] 🔧 Initialized with ${this.supportedExtensions.length} supported extensions and ${this.ignorePatterns.length} ignore patterns`);
         if (configuredCustomExtensions.length > 0) {
@@ -1226,13 +1246,14 @@ export class Context {
     async semanticSearch(
         codebasePath: string,
         query: string,
-        topK: number = 5,
+        topK: number = 10,
         threshold: number = 0.5,
         filterExpr?: string,
         options: SemanticSearchOptions = {}
     ): Promise<SemanticSearchResult[]> {
+        const deadlineMs = Date.now() + this.searchTimeoutMs;
         return this.withSearchTimeout(
-            this.performSemanticSearch(codebasePath, query, topK, threshold, filterExpr, options),
+            this.performSemanticSearch(codebasePath, query, topK, threshold, filterExpr, options, deadlineMs),
             codebasePath,
             query
         );
@@ -1257,33 +1278,52 @@ export class Context {
     private async performSemanticSearch(
         codebasePath: string,
         query: string,
-        topK: number = 5,
+        topK: number = 10,
         threshold: number = 0.5,
         filterExpr?: string,
-        options: SemanticSearchOptions = {}
+        options: SemanticSearchOptions = {},
+        deadlineMs: number = Date.now() + this.searchTimeoutMs
     ): Promise<SemanticSearchResult[]> {
         const outputLimit = this.normalizeSearchOutputLimit(topK);
-        const candidateLimit = this.getSearchCandidateLimit(outputLimit);
         const searchOptions = this.normalizeSemanticSearchOptions(query, options);
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
         console.log(`[Context] 🔍 Executing ${searchType}: "${query}" in ${codebasePath}`);
-        console.log(`[Context] 🔍 Search limits: output=${outputLimit}, candidates=${candidateLimit}`);
 
         const collectionName = this.getCollectionName(codebasePath);
         console.log(`[Context] 🔍 Using collection: ${collectionName}`);
 
         // Check if collection exists and has data
-        const hasCollection = await this.vectorDatabase.hasCollection(collectionName);
+        const hasCollection = await this.withSearchStageTimeout(
+            'checking collection existence',
+            this.vectorDatabase.hasCollection(collectionName),
+            codebasePath,
+            query,
+            deadlineMs
+        );
         if (!hasCollection) {
             console.log(`[Context] ⚠️  Collection '${collectionName}' does not exist. Please index the codebase first.`);
             return [];
         }
 
+        const rerankConfig = this.getExternalRerankConfig(codebasePath);
+        const baseCandidateLimit = this.getSearchCandidateLimit(outputLimit);
+        const candidateLimit = rerankConfig.enabled && !rerankConfig.skipReason
+            ? Math.max(baseCandidateLimit, rerankConfig.candidateLimit)
+            : baseCandidateLimit;
+        console.log(`[Context] 🔍 Search limits: output=${outputLimit}, candidates=${candidateLimit}`);
+        this.logExternalRerankPlan(rerankConfig);
+
         if (isHybrid === true) {
             try {
                 // Check collection stats to see if it has data
-                const rowCount = await this.vectorDatabase.getCollectionRowCount(collectionName);
+                const rowCount = await this.withSearchStageTimeout(
+                    'checking collection row count',
+                    this.vectorDatabase.getCollectionRowCount(collectionName),
+                    codebasePath,
+                    query,
+                    deadlineMs
+                );
                 if (rowCount === 0) {
                     console.log(`[Context] ⚠️  Collection '${collectionName}' exists but has 0 searchable rows. Please re-index the codebase.`);
                     return [];
@@ -1291,7 +1331,13 @@ export class Context {
                 if (rowCount > 0) {
                     console.log(`[Context] 🔍 Collection '${collectionName}' exists and has ${rowCount} searchable rows`);
                 } else {
-                    const sampleRows = await this.vectorDatabase.query(collectionName, '', ['id'], 1);
+                    const sampleRows = await this.withSearchStageTimeout(
+                        'sampling collection rows',
+                        this.vectorDatabase.query(collectionName, '', ['id'], 1),
+                        codebasePath,
+                        query,
+                        deadlineMs
+                    );
                     if (sampleRows.length === 0) {
                         console.log(`[Context] ⚠️  Collection '${collectionName}' exists but returned no sample rows. Please re-index the codebase.`);
                         return [];
@@ -1304,10 +1350,22 @@ export class Context {
 
             // 1. Generate query vector
             console.log(`[Context] 🔍 Generating embeddings for query: "${query}"`);
-            const queryEmbedding: EmbeddingVector = await this.embedding.embed(query);
+            const queryEmbedding: EmbeddingVector = await this.withSearchStageTimeout(
+                'generating query embedding',
+                this.embedding.embed(query),
+                codebasePath,
+                query,
+                deadlineMs
+            );
             console.log(`[Context] ✅ Generated embedding vector with dimension: ${queryEmbedding.vector.length}`);
             console.log(`[Context] 🔍 First 5 embedding values: [${queryEmbedding.vector.slice(0, 5).join(', ')}]`);
-            await this.validateExistingCollectionEmbedding(collectionName, queryEmbedding.vector.length);
+            await this.withSearchStageTimeout(
+                'validating collection embedding metadata',
+                this.validateExistingCollectionEmbedding(collectionName, queryEmbedding.vector.length),
+                codebasePath,
+                query,
+                deadlineMs
+            );
 
             // 2. Prepare hybrid search requests
             const searchRequests: HybridSearchRequest[] = [
@@ -1330,17 +1388,23 @@ export class Context {
 
             // 3. Execute hybrid search
             console.log(`[Context] 🔍 Executing hybrid search with RRF reranking...`);
-            const searchResults: HybridSearchResult[] = await this.vectorDatabase.hybridSearch(
-                collectionName,
-                searchRequests,
-                {
-                    rerank: {
-                        strategy: 'rrf',
-                        params: { k: 100 }
+            const searchResults: HybridSearchResult[] = await this.withSearchStageTimeout(
+                'running hybrid vector search',
+                this.vectorDatabase.hybridSearch(
+                    collectionName,
+                    searchRequests,
+                    {
+                        rerank: {
+                            strategy: 'rrf',
+                            params: { k: 100 }
+                        },
+                        limit: candidateLimit,
+                        filterExpr
                     },
-                    limit: candidateLimit,
-                    filterExpr
-                }
+                ),
+                codebasePath,
+                query,
+                deadlineMs
             );
 
             console.log(`[Context] 🔍 Raw search results count: ${searchResults.length}`);
@@ -1351,8 +1415,21 @@ export class Context {
                 result.score
             ));
 
-            const rankedResults = await this.addLexicalSearchResults(collectionName, query, candidateLimit, outputLimit, filterExpr, results, searchOptions);
-            const dedupedResults = this.applySearchResultGrouping(this.deduplicateResults(rankedResults), searchOptions, query, filterExpr, outputLimit);
+            const rankedResults = await this.withSearchStageTimeout(
+                'adding lexical search results',
+                this.addLexicalSearchResults(collectionName, query, candidateLimit, outputLimit, filterExpr, results, searchOptions),
+                codebasePath,
+                query,
+                deadlineMs
+            );
+            const rerankedResults = await this.withSearchStageTimeout(
+                'external rerank',
+                this.externalRerankResults(query, this.deduplicateResults(rankedResults), rerankConfig),
+                codebasePath,
+                query,
+                deadlineMs
+            );
+            const dedupedResults = this.applySearchResultGrouping(rerankedResults, searchOptions, query, filterExpr, outputLimit);
             console.log(`[Context] ✅ Found ${results.length} results, ${dedupedResults.length} after dedup`);
             if (dedupedResults.length > 0) {
                 console.log(`[Context] 🔍 Top result score: ${dedupedResults[0].score}, path: ${dedupedResults[0].relativePath}`);
@@ -1362,14 +1439,32 @@ export class Context {
         } else {
             // Regular semantic search
             // 1. Generate query vector
-            const queryEmbedding: EmbeddingVector = await this.embedding.embed(query);
-            await this.validateExistingCollectionEmbedding(collectionName, queryEmbedding.vector.length);
+            const queryEmbedding: EmbeddingVector = await this.withSearchStageTimeout(
+                'generating query embedding',
+                this.embedding.embed(query),
+                codebasePath,
+                query,
+                deadlineMs
+            );
+            await this.withSearchStageTimeout(
+                'validating collection embedding metadata',
+                this.validateExistingCollectionEmbedding(collectionName, queryEmbedding.vector.length),
+                codebasePath,
+                query,
+                deadlineMs
+            );
 
             // 2. Search in vector database
-            const searchResults: VectorSearchResult[] = await this.vectorDatabase.search(
-                collectionName,
-                queryEmbedding.vector,
-                { topK: candidateLimit, threshold, filterExpr }
+            const searchResults: VectorSearchResult[] = await this.withSearchStageTimeout(
+                'running vector search',
+                this.vectorDatabase.search(
+                    collectionName,
+                    queryEmbedding.vector,
+                    { topK: candidateLimit, threshold, filterExpr }
+                ),
+                codebasePath,
+                query,
+                deadlineMs
             );
 
             // 3. Convert to semantic search result format
@@ -1378,8 +1473,21 @@ export class Context {
                 result.score
             ));
 
-            const rankedResults = await this.addLexicalSearchResults(collectionName, query, candidateLimit, outputLimit, filterExpr, results, searchOptions);
-            const dedupedResults = this.applySearchResultGrouping(this.deduplicateResults(rankedResults), searchOptions, query, filterExpr, outputLimit);
+            const rankedResults = await this.withSearchStageTimeout(
+                'adding lexical search results',
+                this.addLexicalSearchResults(collectionName, query, candidateLimit, outputLimit, filterExpr, results, searchOptions),
+                codebasePath,
+                query,
+                deadlineMs
+            );
+            const rerankedResults = await this.withSearchStageTimeout(
+                'external rerank',
+                this.externalRerankResults(query, this.deduplicateResults(rankedResults), rerankConfig),
+                codebasePath,
+                query,
+                deadlineMs
+            );
+            const dedupedResults = this.applySearchResultGrouping(rerankedResults, searchOptions, query, filterExpr, outputLimit);
             console.log(`[Context] ✅ Found ${results.length} results, ${dedupedResults.length} after dedup`);
             return dedupedResults;
         }
@@ -1396,6 +1504,75 @@ export class Context {
             Math.max(outputLimit * SEARCH_CANDIDATE_LIMIT_MULTIPLIER, SEARCH_CANDIDATE_LIMIT_MIN),
             SEARCH_CANDIDATE_LIMIT_MAX
         );
+    }
+
+    private getExternalRerankConfig(codebasePath: string): ExternalRerankConfig {
+        const overrides = this.rerankConfigOverrides;
+        const embeddingProvider = overrides.embeddingProvider
+            || configManager.getString('embeddingProvider', codebasePath) as ContextConfig['embeddingProvider']
+            || 'OpenRouter';
+
+        return resolveExternalRerankConfig({
+            rerankEnabled: overrides.rerankEnabled ?? configManager.getBoolean('rerankEnabled', codebasePath),
+            rerankModel: overrides.rerankModel || configManager.getString('rerankModel', codebasePath),
+            rerankBaseUrl: overrides.rerankBaseUrl || configManager.getString('rerankBaseUrl', codebasePath),
+            rerankApiKey: overrides.rerankApiKey || configManager.getString('rerankApiKey', codebasePath),
+            rerankCandidateLimit: overrides.rerankCandidateLimit ?? configManager.getNumber('rerankCandidateLimit', codebasePath),
+            rerankTimeoutMs: overrides.rerankTimeoutMs ?? configManager.getNumber('rerankTimeoutMs', codebasePath),
+            rerankMaxCharsPerDocument: overrides.rerankMaxCharsPerDocument ?? configManager.getNumber('rerankMaxCharsPerDocument', codebasePath),
+            rerankUseSystemProxy: overrides.rerankUseSystemProxy ?? configManager.getBoolean('rerankUseSystemProxy', codebasePath),
+            embeddingProvider,
+            embeddingBaseUrl: overrides.embeddingBaseUrl || this.getEmbeddingBaseUrlForRerank(embeddingProvider, codebasePath),
+            embeddingApiKey: overrides.embeddingApiKey || this.getEmbeddingApiKeyForRerank(embeddingProvider, codebasePath),
+            embeddingUseSystemProxy: overrides.embeddingUseSystemProxy ?? configManager.getBoolean('embeddingUseSystemProxy', codebasePath)
+        });
+    }
+
+    private getEmbeddingBaseUrlForRerank(provider: ContextConfig['embeddingProvider'], codebasePath: string): string | undefined {
+        switch (provider) {
+            case 'OpenAI':
+                return configManager.getString('openaiBaseUrl', codebasePath);
+            case 'Gemini':
+                return configManager.getString('geminiBaseUrl', codebasePath);
+            case 'OpenRouter':
+                return configManager.getString('openaiBaseUrl', codebasePath) || DEFAULT_OPENROUTER_BASE_URL;
+            default:
+                return undefined;
+        }
+    }
+
+    private getEmbeddingApiKeyForRerank(provider: ContextConfig['embeddingProvider'], codebasePath: string): string | undefined {
+        switch (provider) {
+            case 'OpenAI':
+                return configManager.getString('openaiApiKey', codebasePath);
+            case 'VoyageAI':
+                return configManager.getString('voyageaiApiKey', codebasePath);
+            case 'Gemini':
+                return configManager.getString('geminiApiKey', codebasePath);
+            case 'OpenRouter':
+                return configManager.getString('openrouterApiKey', codebasePath) || configManager.getString('openaiApiKey', codebasePath);
+            default:
+                return undefined;
+        }
+    }
+
+    private logExternalRerankPlan(config: ExternalRerankConfig): void {
+        if (config.candidateLimitClamped) {
+            console.log(`[Context] 🔁 rerankCandidateLimit exceeds ${MAX_RERANK_CANDIDATE_LIMIT}; clamped to ${config.candidateLimit}.`);
+        }
+        if (config.skipReason) {
+            console.log(`[Context] 🔁 External rerank skipped: ${config.skipReason}.`);
+            return;
+        }
+        console.log(`[Context] 🔁 External rerank enabled: model=${config.model}, candidates=${config.candidateLimit}, timeoutMs=${config.timeoutMs}`);
+    }
+
+    private async externalRerankResults(
+        query: string,
+        results: SemanticSearchResult[],
+        config: ExternalRerankConfig
+    ): Promise<SemanticSearchResult[]> {
+        return externalRerankSemanticSearchResults(query, results, config);
     }
 
     private normalizeSemanticSearchOptions(query: string, options: SemanticSearchOptions): NormalizedSemanticSearchOptions {
@@ -1555,6 +1732,9 @@ export class Context {
                     const structureDelta = b.structureScore - a.structureScore;
                     if (structureDelta !== 0) return structureDelta;
 
+                    const rerankDelta = this.compareSearchResultRerankScore(a, b);
+                    if (rerankDelta !== 0) return rerankDelta;
+
                     const scoreDelta = b.score - a.score;
                     if (scoreDelta !== 0) return scoreDelta;
 
@@ -1577,6 +1757,9 @@ export class Context {
 
                 const structureDelta = b.structureScore - a.structureScore;
                 if (structureDelta !== 0) return structureDelta;
+
+                const rerankDelta = this.compareSearchResultRerankScore(a, b);
+                if (rerankDelta !== 0) return rerankDelta;
 
                 const scoreDelta = b.score - a.score;
                 if (scoreDelta !== 0) return scoreDelta;
@@ -1613,6 +1796,21 @@ export class Context {
             ...strippedResult
         } = result;
         return strippedResult;
+    }
+
+    private compareSearchResultRerankScore(a: SemanticSearchResult, b: SemanticSearchResult): number {
+        const aScore = typeof a.rerankScore === 'number' && Number.isFinite(a.rerankScore) ? a.rerankScore : undefined;
+        const bScore = typeof b.rerankScore === 'number' && Number.isFinite(b.rerankScore) ? b.rerankScore : undefined;
+        if (aScore === undefined && bScore === undefined) {
+            return 0;
+        }
+        if (aScore === undefined) {
+            return 1;
+        }
+        if (bScore === undefined) {
+            return -1;
+        }
+        return bScore - aScore;
     }
 
     private getRelatedResultReserve(outputLimit: number, primaryCount: number, relatedCount: number): number {
@@ -3078,10 +3276,7 @@ export class Context {
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         const timeoutPromise = new Promise<never>((_resolve, reject) => {
             timeoutHandle = setTimeout(() => {
-                reject(new SearchTimeoutError(
-                    `Search timed out after ${this.searchTimeoutMs}ms for query "${query}" in codebase "${codebasePath}". ` +
-                    'Set searchTimeoutMs in ~/.hitmux-context-engine/config.conf to increase the timeout.'
-                ));
+                reject(this.createSearchTimeoutError(codebasePath, query));
             }, this.searchTimeoutMs);
         });
 
@@ -3092,6 +3287,42 @@ export class Context {
                 clearTimeout(timeoutHandle);
             }
         }
+    }
+
+    private async withSearchStageTimeout<T>(
+        stage: string,
+        operation: Promise<T>,
+        codebasePath: string,
+        query: string,
+        deadlineMs: number
+    ): Promise<T> {
+        const remainingMs = Math.max(0, deadlineMs - Date.now());
+        if (remainingMs === 0) {
+            throw this.createSearchTimeoutError(codebasePath, query, stage);
+        }
+
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<never>((_resolve, reject) => {
+            timeoutHandle = setTimeout(() => {
+                reject(this.createSearchTimeoutError(codebasePath, query, stage));
+            }, Math.max(0, remainingMs - 1));
+        });
+
+        try {
+            return await Promise.race([operation, timeoutPromise]);
+        } finally {
+            if (timeoutHandle) {
+                clearTimeout(timeoutHandle);
+            }
+        }
+    }
+
+    private createSearchTimeoutError(codebasePath: string, query: string, stage?: string): SearchTimeoutError {
+        const stageMessage = stage ? ` while ${stage}` : '';
+        return new SearchTimeoutError(
+            `Search timed out after ${this.searchTimeoutMs}ms${stageMessage} for query "${query}" in codebase "${codebasePath}". ` +
+            'Set searchTimeoutMs in ~/.hitmux-context-engine/config.conf to increase the timeout.'
+        );
     }
 
     private deduplicateResults(results: SemanticSearchResult[]): SemanticSearchResult[] {

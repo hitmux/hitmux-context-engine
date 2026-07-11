@@ -19,6 +19,14 @@ export interface HitmuxConfig {
     geminiBaseUrl?: string;
     openrouterApiKey?: string;
     embeddingUseSystemProxy?: boolean;
+    rerankEnabled?: boolean;
+    rerankModel?: string;
+    rerankBaseUrl?: string;
+    rerankApiKey?: string;
+    rerankCandidateLimit?: number;
+    rerankTimeoutMs?: number;
+    rerankMaxCharsPerDocument?: number;
+    rerankUseSystemProxy?: boolean;
     ollamaModel?: string;
     ollamaHost?: string;
     milvusAddress?: string;
@@ -40,6 +48,7 @@ export interface HitmuxConfig {
     automaticIncrementalEffectiveLineLimit?: number;
     autoIndexing?: boolean;
     interactiveIndexing?: boolean;
+    restrictToolsWhenUnindexed?: boolean;
     backgroundSync?: boolean;
     vectorDatabaseSyncTimeoutMs?: number;
     syncIntervalMs?: number;
@@ -333,6 +342,9 @@ databaseUseSystemProxy = false
 # mcpServerName = Hitmux Context Engine MCP Server
 # mcpServerVersion = 1.0.0
 
+# Keep MCP tool discovery compact until the current directory has an index.
+restrictToolsWhenUnindexed = true
+
 # Index worker defaults.
 fileProcessingConcurrency = 2
 
@@ -414,6 +426,46 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     {
         key: 'embeddingUseSystemProxy',
         description: 'Allow embedding providers to inherit system proxy environment variables.',
+        example: 'false'
+    },
+    {
+        key: 'rerankEnabled',
+        description: 'Enable external rerank after initial search recall.',
+        example: 'true'
+    },
+    {
+        key: 'rerankModel',
+        description: 'External rerank model name.',
+        example: 'cohere/rerank-4-fast'
+    },
+    {
+        key: 'rerankBaseUrl',
+        description: 'External rerank API base URL; /rerank is appended automatically.',
+        example: 'https://openrouter.ai/api/v1'
+    },
+    {
+        key: 'rerankApiKey',
+        description: 'External rerank API key; defaults to the embedding provider key when omitted.',
+        example: 'sk-or-your-openrouter-api-key'
+    },
+    {
+        key: 'rerankCandidateLimit',
+        description: 'Maximum candidates sent to external rerank, capped at 100.',
+        example: '100'
+    },
+    {
+        key: 'rerankTimeoutMs',
+        description: 'External rerank timeout in milliseconds.',
+        example: '8000'
+    },
+    {
+        key: 'rerankMaxCharsPerDocument',
+        description: 'Maximum characters per candidate document sent to rerank.',
+        example: '6000'
+    },
+    {
+        key: 'rerankUseSystemProxy',
+        description: 'Allow external rerank requests to inherit system proxy variables.',
         example: 'false'
     },
     {
@@ -522,6 +574,11 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
         example: 'true'
     },
     {
+        key: 'restrictToolsWhenUnindexed',
+        description: 'Only expose tool_detail and a compact index_codebase tool when the current working directory is not indexed.',
+        example: 'true'
+    },
+    {
         key: 'backgroundSync',
         description: 'Enable startup and periodic background sync; project watcher event sync remains available when false.',
         example: 'true'
@@ -579,7 +636,7 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     {
         key: 'searchTopK',
         description: 'Default maximum search result count.',
-        example: '5'
+        example: '10'
     },
     {
         key: 'searchThreshold',

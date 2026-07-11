@@ -96,6 +96,28 @@ ollamaHost = http://127.0.0.1:11434
 
 Database fields are configured separately in [Vector Database](#vector-database).
 
+## External Rerank
+
+Search uses an external rerank step after dense or hybrid recall, lexical supplement, and dedupe. It is enabled by default when a usable rerank endpoint and API key are available. The default OpenRouter setup calls `https://openrouter.ai/api/v1/rerank` with `cohere/rerank-4-fast`.
+
+```conf
+rerankEnabled = true
+rerankModel = cohere/rerank-4-fast
+rerankCandidateLimit = 100
+rerankTimeoutMs = 8000
+rerankMaxCharsPerDocument = 6000
+```
+
+By default, rerank uses the embedding provider key and base URL when the provider is OpenRouter. Other providers are not called with `/rerank` unless `rerankBaseUrl` is set explicitly. To use Cohere directly:
+
+```conf
+rerankBaseUrl = https://api.cohere.com/v2
+rerankModel = rerank-v4.0-fast
+rerankApiKey = your-cohere-api-key
+```
+
+`rerankCandidateLimit` is capped at `100`. Rerank failures, rate limits, timeout, missing credentials, and unexpected responses fall back to the existing local order.
+
 ## Vector Database
 
 Hitmux Context Engine currently supports Milvus-compatible vector storage through `config.conf`. This includes Local Milvus, self-hosted remote Milvus, and Zilliz Cloud. SQLite, Chroma, Qdrant, LanceDB, and other database backends are not selectable from `config.conf`.
@@ -213,6 +235,7 @@ The proxy controls are split by dependency type:
 | Field | Applies to | Default |
 | --- | --- | --- |
 | `embeddingUseSystemProxy` | Embedding providers such as OpenAI, OpenRouter, VoyageAI, Gemini, and Ollama | `false` |
+| `rerankUseSystemProxy` | External rerank requests | follows `embeddingUseSystemProxy` |
 | `databaseUseSystemProxy` | Milvus-compatible vector database connections, including Local Milvus, self-hosted Milvus, and Zilliz Cloud | `false` |
 
 Enable only the side that actually needs the proxy.
@@ -340,6 +363,14 @@ searchTimeoutMs = 30000
 # embeddingBatchSize = 64
 # embeddingConcurrency = 2
 fileProcessingConcurrency = 2
+rerankEnabled = true
+rerankModel = cohere/rerank-4-fast
+# rerankBaseUrl = https://openrouter.ai/api/v1
+# rerankApiKey = sk-or-your-openrouter-api-key
+rerankCandidateLimit = 100
+rerankTimeoutMs = 8000
+rerankMaxCharsPerDocument = 6000
+# rerankUseSystemProxy = false
 customExtensions = .vue
 customExtensions = .svelte
 customExtensions = .astro
@@ -360,6 +391,6 @@ projectWatcherUsePolling = false
 projectWatcherFallbackScanIntervalMs = 600000
 
 splitterType = ast
-searchTopK = 5
+searchTopK = 10
 searchThreshold = 0
 ```

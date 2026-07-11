@@ -1,6 +1,6 @@
 {
     "name": "@hitmux/hitmux-context-engine-core",
-    "version": "0.2.9",
+    "version": "0.2.10",
     "description": "Core indexing engine for Hitmux Context Engine",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
@@ -30,6 +30,7 @@
         "tree-sitter-rust": "^0.21.0",
         "tree-sitter-scala": "^0.24.0",
         "tree-sitter-typescript": "^0.21.0",
+        "undici": "^6.27.0",
         "voyageai": "^0.0.4"
     },
     "devDependencies": {

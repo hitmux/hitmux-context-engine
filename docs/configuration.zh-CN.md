@@ -96,6 +96,28 @@ ollamaHost = http://127.0.0.1:11434
 
 数据库字段在 [Vector Database](#vector-database) 中单独配置。
 
+## External Rerank
+
+Search 会在 dense 或 hybrid recall、lexical supplement 和 dedupe 之后执行外部 rerank。默认开启，但只有解析到可用 rerank endpoint 和 API key 时才会调用。默认 OpenRouter 配置会请求 `https://openrouter.ai/api/v1/rerank`，模型为 `cohere/rerank-4-fast`。
+
+```conf
+rerankEnabled = true
+rerankModel = cohere/rerank-4-fast
+rerankCandidateLimit = 100
+rerankTimeoutMs = 8000
+rerankMaxCharsPerDocument = 6000
+```
+
+默认情况下，embedding provider 为 OpenRouter 时，rerank 会沿用 embedding 的 API key 和 base URL。其他 provider 不会默认盲打 `/rerank`；需要显式设置 `rerankBaseUrl`。直连 Cohere 时可以这样配置：
+
+```conf
+rerankBaseUrl = https://api.cohere.com/v2
+rerankModel = rerank-v4.0-fast
+rerankApiKey = your-cohere-api-key
+```
+
+`rerankCandidateLimit` 会被限制在 `100`。rerank 失败、rate limit、timeout、缺少凭据或响应格式异常时，会回退到本地原排序，不让搜索失败。
+
 <a id="vector-database"></a>
 
 ## Vector Database
@@ -217,6 +239,7 @@ Hitmux Context Engine 默认忽略系统代理环境变量。这可以避免 Loc
 | Field | Applies to | Default |
 | --- | --- | --- |
 | `embeddingUseSystemProxy` | OpenAI、OpenRouter、VoyageAI、Gemini 和 Ollama 等 embedding providers | `false` |
+| `rerankUseSystemProxy` | External rerank requests | 跟随 `embeddingUseSystemProxy` |
 | `databaseUseSystemProxy` | Milvus-compatible vector database connections，包括 Local Milvus、self-hosted Milvus 和 Zilliz Cloud | `false` |
 
 只启用实际需要代理的一侧。
@@ -344,6 +367,14 @@ searchTimeoutMs = 30000
 # embeddingBatchSize = 64
 # embeddingConcurrency = 2
 fileProcessingConcurrency = 2
+rerankEnabled = true
+rerankModel = cohere/rerank-4-fast
+# rerankBaseUrl = https://openrouter.ai/api/v1
+# rerankApiKey = sk-or-your-openrouter-api-key
+rerankCandidateLimit = 100
+rerankTimeoutMs = 8000
+rerankMaxCharsPerDocument = 6000
+# rerankUseSystemProxy = false
 customExtensions = .vue
 customExtensions = .svelte
 customExtensions = .astro
@@ -364,6 +395,6 @@ projectWatcherUsePolling = false
 projectWatcherFallbackScanIntervalMs = 600000
 
 splitterType = ast
-searchTopK = 5
+searchTopK = 10
 searchThreshold = 0
 ```

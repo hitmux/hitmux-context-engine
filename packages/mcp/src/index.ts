@@ -32,6 +32,12 @@ import { SyncManager } from "./sync.js";
 import { ToolHandlers } from "./handlers.js";
 import { dispatchMcpTool } from "./tool-dispatch.js";
 import { isHceDebugEnabled } from "./logger.js";
+import {
+    CURRENT_DIRECTORY_NOT_INDEXED_NOTICE,
+    getCurrentDirectoryIndexNotice,
+    prependStartupIndexNotice,
+    UNINDEXED_TOOL_DETAIL_DESCRIPTION,
+} from "./startup-index-notice.js";
 import { UpdateChecker } from "./update-checker.js";
 
 applySystemProxyPolicy(false);
@@ -251,6 +257,112 @@ Index a directory/context root to enable semantic search over indexed context.
 - Use force=true only when a full rebuild is required, such as after changing embedding configuration, splitter/schema compatibility, or when index/snapshot state is no longer trustworthy. Force re-indexing drops the existing index and should not be the default fix for ordinary file changes.
 `;
 
+        const indexCodebaseInputSchema = {
+            type: "object",
+            properties: {
+                path: {
+                    type: "string",
+                    description: `ABSOLUTE path to the directory/context root to index.`,
+                },
+                force: {
+                    type: "boolean",
+                    description:
+                        "Full rebuild for exceptional cases only. Drops and recreates the existing index; prefer incremental=true for ordinary added, modified, removed, or newly ignored files.",
+                    default: false,
+                },
+                incremental: {
+                    type: "boolean",
+                    description:
+                        "Manually sync an already indexed directory/context root without dropping or rebuilding the full index. Handles added, modified, removed, and newly ignored files. Use this for normal index updates and after reviewing a large automatic incremental-sync warning. Cannot be combined with force=true or dryRun=true.",
+                    default: false,
+                },
+                splitter: {
+                    type: "string",
+                    description:
+                        "Optional code splitter override: 'ast' for syntax-aware splitting with automatic fallback, 'langchain' for character-based splitting. Omit to use config.splitterType, then ast.",
+                    enum: ["ast", "langchain"],
+                },
+                customExtensions: {
+                    type: "array",
+                    items: {
+                        type: "string",
+                    },
+                    description:
+                        "Optional: Additional file extensions to include beyond defaults (e.g., ['.vue', '.svelte', '.astro']). Extensions should include the dot prefix or will be automatically added",
+                    default: [],
+                },
+                ignorePatterns: {
+                    type: "array",
+                    items: {
+                        type: "string",
+                    },
+                    description:
+                        "Optional: Additional ignore patterns to exclude specific files/directories beyond defaults. Only include this parameter if the user explicitly requests custom ignore patterns (e.g., ['static/**', '*.tmp', 'private/**'])",
+                    default: [],
+                },
+                ignoreFiles: {
+                    type: "array",
+                    items: {
+                        type: "string",
+                    },
+                    description:
+                        "Optional: Additional ignore files to load beyond automatically discovered .*ignore files. Relative paths are resolved from the context root (e.g., ['config/index.ignore']).",
+                    default: [],
+                },
+                maxDepth: {
+                    type: "number",
+                    description:
+                        "Optional: Maximum directory depth to traverse from the context root. 0 indexes only files directly in the root.",
+                    minimum: 0,
+                },
+                dryRun: {
+                    type: "boolean",
+                    description:
+                        "Preview the files that would be indexed without creating collections, embedding, or writing index data.",
+                    default: false,
+                },
+            },
+            required: ["path"],
+        };
+
+        const compactIndexCodebaseInputSchema = {
+            type: "object",
+            properties: {
+                path: {
+                    type: "string",
+                },
+            },
+            required: ["path"],
+            additionalProperties: false,
+        };
+
+        const toolDetailInputSchema = {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+        };
+
+        const toolDetailResponse = () => ({
+            content: [
+                {
+                    type: "text",
+                    text: [
+                        CURRENT_DIRECTORY_NOT_INDEXED_NOTICE,
+                        "Complete index_codebase details:",
+                        JSON.stringify(
+                            {
+                                name: "index_codebase",
+                                description: index_description.trim(),
+                                inputSchema: indexCodebaseInputSchema,
+                            },
+                            null,
+                            2,
+                        ),
+                    ].join("\n\n"),
+                },
+            ],
+        });
+
         const search_description = `
 Search indexed context within a specified absolute path.
 
@@ -279,82 +391,44 @@ This tool is versatile and can be used before completing various tasks to retrie
 
         // Define available tools
         this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+            const startupIndexNotice = getCurrentDirectoryIndexNotice(
+                this.snapshotManager,
+            );
+            if (
+                startupIndexNotice &&
+                (configManager.getBoolean("restrictToolsWhenUnindexed") ?? true)
+            ) {
+                return {
+                    tools: [
+                        {
+                            name: "tool_detail",
+                            description: UNINDEXED_TOOL_DETAIL_DESCRIPTION,
+                            inputSchema: toolDetailInputSchema,
+                        },
+                        {
+                            name: "index_codebase",
+                            inputSchema: compactIndexCodebaseInputSchema,
+                        },
+                    ],
+                };
+            }
+
             return {
                 tools: [
                     {
                         name: "index_codebase",
-                        description: index_description,
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                path: {
-                                    type: "string",
-                                    description: `ABSOLUTE path to the directory/context root to index.`,
-                                },
-                                force: {
-                                    type: "boolean",
-                                    description:
-                                        "Full rebuild for exceptional cases only. Drops and recreates the existing index; prefer incremental=true for ordinary added, modified, removed, or newly ignored files.",
-                                    default: false,
-                                },
-                                incremental: {
-                                    type: "boolean",
-                                    description:
-                                        "Manually sync an already indexed directory/context root without dropping or rebuilding the full index. Handles added, modified, removed, and newly ignored files. Use this for normal index updates and after reviewing a large automatic incremental-sync warning. Cannot be combined with force=true or dryRun=true.",
-                                    default: false,
-                                },
-                                splitter: {
-                                    type: "string",
-                                    description:
-                                        "Optional code splitter override: 'ast' for syntax-aware splitting with automatic fallback, 'langchain' for character-based splitting. Omit to use config.splitterType, then ast.",
-                                    enum: ["ast", "langchain"],
-                                },
-                                customExtensions: {
-                                    type: "array",
-                                    items: {
-                                        type: "string",
-                                    },
-                                    description:
-                                        "Optional: Additional file extensions to include beyond defaults (e.g., ['.vue', '.svelte', '.astro']). Extensions should include the dot prefix or will be automatically added",
-                                    default: [],
-                                },
-                                ignorePatterns: {
-                                    type: "array",
-                                    items: {
-                                        type: "string",
-                                    },
-                                    description:
-                                        "Optional: Additional ignore patterns to exclude specific files/directories beyond defaults. Only include this parameter if the user explicitly requests custom ignore patterns (e.g., ['static/**', '*.tmp', 'private/**'])",
-                                    default: [],
-                                },
-                                ignoreFiles: {
-                                    type: "array",
-                                    items: {
-                                        type: "string",
-                                    },
-                                    description:
-                                        "Optional: Additional ignore files to load beyond automatically discovered .*ignore files. Relative paths are resolved from the context root (e.g., ['config/index.ignore']).",
-                                    default: [],
-                                },
-                                maxDepth: {
-                                    type: "number",
-                                    description:
-                                        "Optional: Maximum directory depth to traverse from the context root. 0 indexes only files directly in the root.",
-                                    minimum: 0,
-                                },
-                                dryRun: {
-                                    type: "boolean",
-                                    description:
-                                        "Preview the files that would be indexed without creating collections, embedding, or writing index data.",
-                                    default: false,
-                                },
-                            },
-                            required: ["path"],
-                        },
+                        description: prependStartupIndexNotice(
+                            index_description,
+                            startupIndexNotice,
+                        ),
+                        inputSchema: indexCodebaseInputSchema,
                     },
                     {
                         name: "search_context",
-                        description: search_description,
+                        description: prependStartupIndexNotice(
+                            search_description,
+                            startupIndexNotice,
+                        ),
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -447,6 +521,21 @@ This tool is versatile and can be used before completing various tasks to retrie
             CallToolRequestSchema,
             async (request) => {
                 const { name, arguments: args } = request.params;
+                if (name === "tool_detail") {
+                    const startupIndexNotice = getCurrentDirectoryIndexNotice(
+                        this.snapshotManager,
+                    );
+                    if (
+                        startupIndexNotice &&
+                        (configManager.getBoolean("restrictToolsWhenUnindexed") ?? true)
+                    ) {
+                        return this.withUpdateNotice(toolDetailResponse());
+                    }
+                    return this.withUpdateNotice(
+                        this.formatToolError("Unknown tool", name),
+                    );
+                }
+
                 let runtime: NonNullable<ContextMcpServer["runtime"]>;
                 try {
                     runtime = await this.getRuntime();

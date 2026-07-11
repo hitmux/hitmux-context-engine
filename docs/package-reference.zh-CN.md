@@ -152,6 +152,8 @@ interface SemanticSearchResult {
     isPrimary?: boolean;
     fileRole?: string;
     chunkRole?: "definition" | "method_body" | "reference" | "test_case" | "assertion" | "re_export" | "module_decl" | string;
+    rerankScore?: number;
+    rerankRank?: number;
 }
 ```
 

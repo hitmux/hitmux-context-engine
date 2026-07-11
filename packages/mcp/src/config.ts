@@ -23,6 +23,15 @@ export interface ContextMcpConfig {
     // OpenRouter configuration
     openrouterApiKey?: string;
     embeddingUseSystemProxy: boolean;
+    // External rerank configuration
+    rerankEnabled?: boolean;
+    rerankModel?: string;
+    rerankBaseUrl?: string;
+    rerankApiKey?: string;
+    rerankCandidateLimit?: number;
+    rerankTimeoutMs?: number;
+    rerankMaxCharsPerDocument?: number;
+    rerankUseSystemProxy?: boolean;
     // Ollama configuration
     ollamaModel?: string;
     ollamaHost?: string;
@@ -206,6 +215,44 @@ function getCodebaseIdentityModeFromConfig(): CodebaseIdentityMode | undefined {
     return undefined;
 }
 
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+        ? Math.floor(value)
+        : fallback;
+}
+
+export function getEmbeddingBaseUrlForRerank(
+    config: Pick<ContextMcpConfig, "embeddingProvider" | "openaiBaseUrl" | "geminiBaseUrl">,
+): string | undefined {
+    switch (config.embeddingProvider) {
+        case "OpenAI":
+            return config.openaiBaseUrl;
+        case "Gemini":
+            return config.geminiBaseUrl;
+        case "OpenRouter":
+            return "https://openrouter.ai/api/v1";
+        default:
+            return undefined;
+    }
+}
+
+export function getEmbeddingApiKeyForRerank(
+    config: Pick<ContextMcpConfig, "embeddingProvider" | "openaiApiKey" | "voyageaiApiKey" | "geminiApiKey" | "openrouterApiKey">,
+): string | undefined {
+    switch (config.embeddingProvider) {
+        case "OpenAI":
+            return config.openaiApiKey;
+        case "VoyageAI":
+            return config.voyageaiApiKey;
+        case "Gemini":
+            return config.geminiApiKey;
+        case "OpenRouter":
+            return config.openrouterApiKey || config.openaiApiKey;
+        default:
+            return undefined;
+    }
+}
+
 export function createMcpConfig(defaultServerVersion = "0.0.0"): ContextMcpConfig {
     console.log(
         `[DEBUG] Global config file: ${configManager.getGlobalConfigFilePath()}`,
@@ -223,16 +270,22 @@ export function createMcpConfig(defaultServerVersion = "0.0.0"): ContextMcpConfi
         `[DEBUG] ollamaModel: ${configManager.getString("ollamaModel") || "NOT SET"}`,
     );
     console.log(
-        `[DEBUG] geminiApiKey: ${configManager.getString("geminiApiKey") ? "SET (length: " + configManager.getString("geminiApiKey")!.length + ")" : "NOT SET"}`,
+        `[DEBUG] geminiApiKey: ${configManager.getString("geminiApiKey") ? "Configured" : "Missing"}`,
     );
     console.log(
-        `[DEBUG] openaiApiKey: ${configManager.getString("openaiApiKey") ? "SET (length: " + configManager.getString("openaiApiKey")!.length + ")" : "NOT SET"}`,
+        `[DEBUG] openaiApiKey: ${configManager.getString("openaiApiKey") ? "Configured" : "Missing"}`,
     );
     console.log(
         `[DEBUG] milvusAddress: ${configManager.getString("milvusAddress") || "NOT SET"}`,
     );
     console.log(
         `[DEBUG] embeddingUseSystemProxy: ${getBooleanFromConfig("embeddingUseSystemProxy", false)}`,
+    );
+    console.log(
+        `[DEBUG] rerankEnabled: ${getBooleanFromConfig("rerankEnabled", true)}`,
+    );
+    console.log(
+        `[DEBUG] rerankApiKey: ${configManager.getString("rerankApiKey") ? "Configured" : "Missing"}`,
     );
     console.log(
         `[DEBUG] databaseUseSystemProxy: ${getBooleanFromConfig("databaseUseSystemProxy", false)}`,
@@ -270,6 +323,28 @@ export function createMcpConfig(defaultServerVersion = "0.0.0"): ContextMcpConfi
             "embeddingUseSystemProxy",
             false,
         ),
+        // External rerank configuration
+        rerankEnabled: getBooleanFromConfig("rerankEnabled", true),
+        rerankModel:
+            configManager.getString("rerankModel") || "cohere/rerank-4-fast",
+        rerankBaseUrl: getUrlFromConfig("rerankBaseUrl"),
+        rerankApiKey: configManager.getString("rerankApiKey"),
+        rerankCandidateLimit: normalizePositiveInteger(
+            configManager.getNumber("rerankCandidateLimit"),
+            100,
+        ),
+        rerankTimeoutMs: normalizePositiveInteger(
+            configManager.getNumber("rerankTimeoutMs"),
+            8000,
+        ),
+        rerankMaxCharsPerDocument: normalizePositiveInteger(
+            configManager.getNumber("rerankMaxCharsPerDocument"),
+            6000,
+        ),
+        rerankUseSystemProxy: getBooleanFromConfig(
+            "rerankUseSystemProxy",
+            getBooleanFromConfig("embeddingUseSystemProxy", false),
+        ),
         // Ollama configuration
         ollamaModel: configManager.getString("ollamaModel"),
         ollamaHost: configManager.getString("ollamaHost"),
@@ -302,6 +377,17 @@ export function logConfigurationSummary(config: ContextMcpConfig): void {
     console.log(
         `[MCP] Embedding System Proxy: ${config.embeddingUseSystemProxy ? "enabled" : "disabled"}`,
     );
+    const rerankEnabled = config.rerankEnabled !== false;
+    console.log(`[MCP] Rerank: ${rerankEnabled ? "enabled" : "disabled"}`);
+    if (rerankEnabled) {
+        console.log(`[MCP] Rerank Model: ${config.rerankModel || "cohere/rerank-4-fast"}`);
+        console.log(
+            `[MCP] Rerank API Key: ${config.rerankApiKey ? "Configured" : "Using embedding provider key if available"}`,
+        );
+        if (config.rerankBaseUrl) {
+            console.log(`[MCP] Rerank Base URL: ${config.rerankBaseUrl}`);
+        }
+    }
     console.log(
         `[MCP] Milvus Address: ${config.milvusAddress || (config.milvusToken ? "[Auto-resolve from token]" : "[Not configured]")}`,
     );
@@ -414,6 +500,18 @@ Common config.conf fields:
  Allow embedding providers to inherit system proxy
  environment variables (default: false)
 
+ Rerank Configuration:
+ rerankEnabled Enable external rerank after initial search recall (default: true)
+ rerankModel Rerank model name (default: cohere/rerank-4-fast)
+ rerankBaseUrl Rerank API base URL; /rerank is appended automatically
+ rerankApiKey Rerank API key (defaults to embedding provider key)
+ rerankCandidateLimit Candidates sent to rerank, capped at 100 (default: 100)
+ rerankTimeoutMs Rerank timeout in milliseconds (default: 8000)
+ rerankMaxCharsPerDocument Max characters per rerank document (default: 6000)
+ rerankUseSystemProxy
+ Allow rerank requests to inherit system proxy variables
+ (default: follows embeddingUseSystemProxy)
+
  Ollama Configuration:
  ollamaHost Ollama server host (default: http://127.0.0.1:11434)
  ollamaModel Ollama model name (preferred over embeddingModel for Ollama)
@@ -474,6 +572,9 @@ Example config.conf:
  # embeddingBatchSize = 64
  # embeddingConcurrency = 2
  openrouterApiKey = sk-or-xxx
+ # rerankEnabled = true
+ # rerankModel = cohere/rerank-4-fast
+ # rerankCandidateLimit = 100
  milvusAddress = localhost:19530
  milvusToken = your-token
  embeddingUseSystemProxy = false

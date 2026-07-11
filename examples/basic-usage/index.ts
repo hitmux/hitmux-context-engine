@@ -12,7 +12,7 @@ async function main() {
         const milvusAddress = configManager.getString('milvusAddress') || 'localhost:19530';
         const milvusToken = configManager.getString('milvusToken');
         const splitterType = configManager.getString('splitterType')?.toLowerCase() || 'ast';
-        const topK = configManager.getNumber('searchTopK') || 5;
+        const topK = configManager.getNumber('searchTopK') || 10;
         const threshold = configManager.getNumber('searchThreshold') || 0;
 
         console.log(`🔧 Using ${useRestfulApi ? 'RESTful API' : 'gRPC'} implementation`);
@@ -117,7 +117,7 @@ async function main() {
             console.log('   - milvusToken: Milvus authentication token (optional)');
             console.log('   - milvusUseRestful: Use Milvus REST API (default: false)');
             console.log('   - splitterType: Code splitter type - "ast" or "langchain" (default: ast)');
-            console.log('   - searchTopK: Number of search results per query (default: 5)');
+            console.log('   - searchTopK: Number of search results per query (default: 10)');
             console.log('   - searchThreshold: Minimum score threshold (default: 0)');
         }
 
