@@ -1,11 +1,4 @@
-import corePackage from "@hitmux/hitmux-context-engine-core";
-import type {
-    Embedding as EmbeddingInstance,
-    EmbeddingVector,
-} from "@hitmux/hitmux-context-engine-core";
-import { ContextMcpConfig } from "./config.js";
-
-const {
+import {
     Embedding,
     OpenAIEmbedding,
     VoyageAIEmbedding,
@@ -14,7 +7,12 @@ const {
     applySystemProxyPolicy,
     restoreProxyEnvironment,
     withSystemProxyPolicy,
-} = corePackage;
+} from "@hitmux/hitmux-context-engine-core";
+import type {
+    Embedding as EmbeddingInstance,
+    EmbeddingVector,
+} from "@hitmux/hitmux-context-engine-core";
+import { ContextMcpConfig } from "./config.js";
 
 const HITMUX_CLIENT_HEADERS = {
     "X-Hitmux-Client": "Hitmux Context Engine",

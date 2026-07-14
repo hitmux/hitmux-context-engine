@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import {
     Context,
     MilvusVectorDatabase,
+    type SearchAutoTopKDecision,
     type SymbolTraceEvidence,
     type SymbolTraceResult
 } from "@hitmux/hitmux-context-engine-core";
@@ -51,6 +52,8 @@ interface CaseReport {
     testFirst: boolean;
     barrelFirst: boolean;
     relatedTestsPresent: boolean;
+    returnedResults: number;
+    autoTopK?: Pick<SearchAutoTopKDecision, "selectedResults" | "maxResults" | "signal" | "reason">;
     traceEvidence: TraceEvidenceReport;
     topResults: Array<{
         rank: number;
@@ -99,6 +102,7 @@ interface BenchmarkReport {
     fixture: string;
     codebasePath: string;
     generatedAt: string;
+    mode: "fixed" | "auto";
     limit: number;
     threshold: number;
     traceEvidenceEnabled: boolean;
@@ -112,9 +116,21 @@ interface BenchmarkReport {
         testFirstRate: number;
         barrelFirstRate: number;
         relatedTestsPresent: number;
+        averageResults: number;
     };
     cases: CaseReport[];
 }
+
+interface BenchmarkComparisonReport {
+    fixture: string;
+    codebasePath: string;
+    generatedAt: string;
+    fixed: BenchmarkReport;
+    automatic: BenchmarkReport;
+    averageResultReduction: number;
+}
+
+type BenchmarkMode = "fixed" | "auto" | "compare";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CASES_PATH = path.join(SCRIPT_DIR, "cannonwar-cases.json");
@@ -131,11 +147,17 @@ function parseArgs(argv: string[]) {
         limit: number;
         threshold: number;
         includeTraceEvidence: boolean;
+        mode: BenchmarkMode;
+        autoTopKMin: number;
+        autoTopKMax: number;
     } = {
         casesPath: DEFAULT_CASES_PATH,
-        limit: 20,
+        limit: 12,
         threshold: 0.3,
         includeTraceEvidence: true,
+        mode: "fixed",
+        autoTopKMin: 3,
+        autoTopKMax: 12,
     };
 
     for (let index = 0; index < argv.length; index += 1) {
@@ -156,6 +178,22 @@ function parseArgs(argv: string[]) {
         } else if (arg === "--limit" && next) {
             options.limit = parsePositiveInteger(next, "--limit");
             index += 1;
+        } else if (arg === "--mode" && next) {
+            if (!isBenchmarkMode(next)) {
+                throw new Error("--mode must be one of: fixed, auto, compare");
+            }
+            options.mode = next;
+            index += 1;
+        } else if (arg === "--auto-topk") {
+            options.mode = "auto";
+        } else if (arg === "--compare-auto-topk") {
+            options.mode = "compare";
+        } else if (arg === "--auto-topk-min" && next) {
+            options.autoTopKMin = parsePositiveInteger(next, "--auto-topk-min");
+            index += 1;
+        } else if (arg === "--auto-topk-max" && next) {
+            options.autoTopKMax = parsePositiveInteger(next, "--auto-topk-max");
+            index += 1;
         } else if (arg === "--threshold" && next) {
             options.threshold = parseFiniteNumber(next, "--threshold");
             index += 1;
@@ -167,6 +205,13 @@ function parseArgs(argv: string[]) {
         } else {
             throw new Error(`Unknown or incomplete argument: ${arg}`);
         }
+    }
+
+    if (options.autoTopKMin > options.autoTopKMax) {
+        throw new Error("--auto-topk-min cannot exceed --auto-topk-max");
+    }
+    if (options.autoTopKMax > 50) {
+        throw new Error("--auto-topk-max cannot exceed runtime limit 50");
     }
 
     return options;
@@ -190,6 +235,10 @@ function parseFiniteNumber(value: string, name: string): number {
     return parsed;
 }
 
+function isBenchmarkMode(value: string): value is BenchmarkMode {
+    return value === "fixed" || value === "auto" || value === "compare";
+}
+
 function printHelp(): void {
     console.log(`Usage:
   pnpm --dir packages/mcp exec tsx ../../evaluation/search-quality/run-cannonwar-search-quality.ts [options]
@@ -197,7 +246,12 @@ function printHelp(): void {
 Options:
   --cases <path>       Fixture JSON path.
   --codebase <path>    Codebase path. Defaults to the fixture codebasePath.
-  --limit <n>          Visible search result limit. Default: 20.
+  --limit <n>          Fixed visible result limit. Default: 12.
+  --mode <mode>        fixed, auto, or compare. Default: fixed.
+  --auto-topk          Alias for --mode auto.
+  --compare-auto-topk  Run fixed-12 and automatic 3-12 reports in one output.
+  --auto-topk-min <n>  Automatic TopK lower bound. Default: 3.
+  --auto-topk-max <n>  Automatic TopK upper bound. Default: 12.
   --threshold <n>      Search threshold. Default: 0.3.
   --no-trace-evidence  Skip trace_symbol-based auxiliary evidence for top5 misses.
   --out <path>         Write JSON report to this path.
@@ -321,6 +375,7 @@ async function summarizeCase(
         testFirst: firstResultRole === "test",
         barrelFirst: firstResultRole === "barrel",
         relatedTestsPresent: resultRoles.includes("test"),
+        returnedResults: results.length,
         traceEvidence,
         topResults: results.slice(0, 10).map((result, index) => ({
             rank: index + 1,
@@ -686,6 +741,9 @@ function buildSummary(cases: CaseReport[]): BenchmarkReport["summary"] {
         testFirstRate: totalCases === 0 ? 0 : testFirstCount / totalCases,
         barrelFirstRate: totalCases === 0 ? 0 : barrelFirstCount / totalCases,
         relatedTestsPresent,
+        averageResults: totalCases === 0
+            ? 0
+            : cases.reduce((sum, item) => sum + item.returnedResults, 0) / totalCases,
     };
 }
 
@@ -713,28 +771,73 @@ async function main(): Promise<void> {
         },
     });
 
-    const caseReports: CaseReport[] = [];
-    for (const benchmarkCase of fixture.cases) {
-        const results = await context.semanticSearch(codebasePath, benchmarkCase.query, options.limit, options.threshold);
-        caseReports.push(await summarizeCase(
-            context,
-            codebasePath,
-            benchmarkCase,
-            results,
-            options.includeTraceEvidence
-        ));
-    }
+    const runBenchmark = async (mode: "fixed" | "auto"): Promise<BenchmarkReport> => {
+        const caseReports: CaseReport[] = [];
+        for (const benchmarkCase of fixture.cases) {
+            let autoTopKDecision: SearchAutoTopKDecision | undefined;
+            const results = await context.semanticSearch(
+                codebasePath,
+                benchmarkCase.query,
+                mode === "auto" ? options.autoTopKMax : options.limit,
+                options.threshold,
+                undefined,
+                mode === "auto" ? {
+                    autoTopK: {
+                        minResults: options.autoTopKMin,
+                        useVectorFallback: true,
+                        onDecision: (decision) => {
+                            autoTopKDecision = decision;
+                        },
+                    },
+                } : {},
+            );
+            const caseReport = await summarizeCase(
+                context,
+                codebasePath,
+                benchmarkCase,
+                results,
+                options.includeTraceEvidence,
+            );
+            if (autoTopKDecision) {
+                caseReport.autoTopK = {
+                    selectedResults: autoTopKDecision.selectedResults,
+                    maxResults: autoTopKDecision.maxResults,
+                    signal: autoTopKDecision.signal,
+                    reason: autoTopKDecision.reason,
+                };
+            }
+            caseReports.push(caseReport);
+        }
 
-    const report: BenchmarkReport = {
-        fixture: fixture.name,
-        codebasePath,
-        generatedAt: new Date().toISOString(),
-        limit: options.limit,
-        threshold: options.threshold,
-        traceEvidenceEnabled: options.includeTraceEvidence,
-        summary: buildSummary(caseReports),
-        cases: caseReports,
+        return {
+            fixture: fixture.name,
+            codebasePath,
+            generatedAt: new Date().toISOString(),
+            mode,
+            limit: mode === "auto" ? options.autoTopKMax : options.limit,
+            threshold: options.threshold,
+            traceEvidenceEnabled: options.includeTraceEvidence,
+            summary: buildSummary(caseReports),
+            cases: caseReports,
+        };
     };
+
+    const report: BenchmarkReport | BenchmarkComparisonReport = options.mode === "compare"
+        ? await (async () => {
+            const fixed = await runBenchmark("fixed");
+            const automatic = await runBenchmark("auto");
+            return {
+                fixture: fixture.name,
+                codebasePath,
+                generatedAt: new Date().toISOString(),
+                fixed,
+                automatic,
+                averageResultReduction: fixed.summary.averageResults === 0
+                    ? 0
+                    : 1 - (automatic.summary.averageResults / fixed.summary.averageResults),
+            };
+        })()
+        : await runBenchmark(options.mode);
 
     const output = JSON.stringify(report, null, 2);
     if (options.outPath) {

@@ -118,6 +118,18 @@ rerankApiKey = your-cohere-api-key
 
 `rerankCandidateLimit` 会被限制在 `100`。rerank 失败、rate limit、timeout、缺少凭据或响应格式异常时，会回退到本地原排序，不让搜索失败。
 
+## Automatic TopK
+
+调用方省略 `limit` 时，搜索会按本次查询的分数分布返回 `3-12` 条。完整外部 rerank 优先使用 `rerankScore`；rerank 不可用时使用 dense vector score 或 hybrid RRF score。显式传入 `limit` 始终强制使用该数量。
+
+```conf
+searchAutoTopK = true
+searchAutoTopKMin = 3
+searchAutoTopKMax = 12
+```
+
+`searchAutoTopKMax` 运行时上限为 `50`。设置 `searchAutoTopK = false` 后，固定返回数量由 `searchTopK` 控制。
+
 <a id="vector-database"></a>
 
 ## Vector Database
@@ -395,6 +407,9 @@ projectWatcherUsePolling = false
 projectWatcherFallbackScanIntervalMs = 600000
 
 splitterType = ast
-searchTopK = 10
+searchAutoTopK = true
+searchAutoTopKMin = 3
+searchAutoTopKMax = 12
+# searchTopK = 10
 searchThreshold = 0
 ```

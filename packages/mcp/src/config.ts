@@ -1,10 +1,8 @@
-import corePackage from "@hitmux/hitmux-context-engine-core";
+import { configManager } from "@hitmux/hitmux-context-engine-core";
 import type {
     CodebaseIdentityMode,
     IncrementalIndexFileChange,
 } from "@hitmux/hitmux-context-engine-core";
-
-const { configManager } = corePackage;
 
 export interface ContextMcpConfig {
     name: string;

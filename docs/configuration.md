@@ -118,6 +118,18 @@ rerankApiKey = your-cohere-api-key
 
 `rerankCandidateLimit` is capped at `100`. Rerank failures, rate limits, timeout, missing credentials, and unexpected responses fall back to the existing local order.
 
+## Automatic TopK
+
+Search selects `3-12` results from the score distribution of the current query when callers omit `limit`. Complete external rerank scores are preferred; dense vector scores or hybrid RRF scores are used when rerank is unavailable. Passing `limit` always forces that exact count.
+
+```conf
+searchAutoTopK = true
+searchAutoTopKMin = 3
+searchAutoTopKMax = 12
+```
+
+`searchAutoTopKMax` is capped at `50` at runtime. Set `searchAutoTopK = false` to use the fixed `searchTopK` value instead.
+
 ## Vector Database
 
 Hitmux Context Engine currently supports Milvus-compatible vector storage through `config.conf`. This includes Local Milvus, self-hosted remote Milvus, and Zilliz Cloud. SQLite, Chroma, Qdrant, LanceDB, and other database backends are not selectable from `config.conf`.
@@ -391,6 +403,9 @@ projectWatcherUsePolling = false
 projectWatcherFallbackScanIntervalMs = 600000
 
 splitterType = ast
-searchTopK = 10
+searchAutoTopK = true
+searchAutoTopKMin = 3
+searchAutoTopKMax = 12
+# searchTopK = 10
 searchThreshold = 0
 ```

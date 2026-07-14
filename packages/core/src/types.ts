@@ -28,6 +28,30 @@ export interface SemanticSearchOptions {
     includeRelated?: boolean;
     filenameLikeQuery?: SemanticSearchFilenameLikeQuery;
     enableLexicalSupplement?: boolean;
+    autoTopK?: SearchAutoTopKOptions;
+}
+
+export type SearchAutoTopKSignal = 'rerank' | 'vector' | 'hybrid_rrf' | 'none';
+
+export type SearchAutoTopKReason =
+    | 'significant_score_gap'
+    | 'no_reliable_score_gap'
+    | 'insufficient_finite_scores'
+    | 'no_score_signal';
+
+export interface SearchAutoTopKDecision {
+    selectedResults: number;
+    minResults: number;
+    maxResults: number;
+    availableResults: number;
+    signal: SearchAutoTopKSignal;
+    reason: SearchAutoTopKReason;
+}
+
+export interface SearchAutoTopKOptions {
+    minResults: number;
+    useVectorFallback: boolean;
+    onDecision?: (decision: SearchAutoTopKDecision) => void;
 }
 
 export interface SemanticSearchResult {
@@ -47,6 +71,8 @@ export interface SemanticSearchResult {
     isPrimary?: boolean;
     rerankScore?: number;
     rerankRank?: number;
+    /** Internal retrieval score retained so local TopK selection ignores lexical-only scores. */
+    retrievalScore?: number;
 }
 
 export type SymbolTraceEvidenceKind = 'definition' | 'reference' | 'import' | 'export' | 'related_test';

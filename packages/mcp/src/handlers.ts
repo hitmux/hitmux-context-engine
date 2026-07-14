@@ -14,6 +14,8 @@ import {
     type IncrementalIndexFileChange,
     type RemoteIndexManifest,
     type SearchTargetRole,
+    type SearchAutoTopKDecision,
+    type SearchAutoTopKOptions,
     type SymbolTraceEvidence,
     type SymbolTraceResult,
 } from "@hitmux/hitmux-context-engine-core";
@@ -66,6 +68,9 @@ import {
 } from "./indexing-worker-runner.js";
 
 const DEFAULT_SEARCH_RESULT_LIMIT = 10;
+const DEFAULT_SEARCH_AUTO_TOP_K_MIN = 3;
+const DEFAULT_SEARCH_AUTO_TOP_K_MAX = 12;
+const MAX_SEARCH_AUTO_TOP_K = 50;
 const SOURCE_CONTEXT_WINDOW_LINES = 4;
 const SEARCH_CONTEXT_MAX_CHARS = 5000;
 const SEARCH_TRACE_EVIDENCE_RESULT_LIMIT = 3;
@@ -109,6 +114,11 @@ interface SearchToolOptions {
     toolName: "search_code" | "search_context";
     defaultTargetRole: SearchTargetRole;
     useScope: boolean;
+}
+
+interface ResolvedSearchResultLimit {
+    limit: number;
+    autoTopK?: SearchAutoTopKOptions;
 }
 
 function getVectorDatabaseSyncTimeoutMs(): number {
@@ -1119,12 +1129,23 @@ export class ToolHandlers {
         return resolvedPath;
     }
 
-    private async resolveSearchResultLimit(
+    private resolveSearchResultLimit(
         explicitLimit: number | undefined,
         codebasePath: string,
-    ): Promise<number> {
+    ): ResolvedSearchResultLimit {
         if (explicitLimit !== undefined) {
-            return explicitLimit;
+            return { limit: explicitLimit };
+        }
+
+        const autoTopK = this.resolveSearchAutoTopK(codebasePath);
+        if (autoTopK) {
+            return {
+                limit: autoTopK.maxResults,
+                autoTopK: {
+                    minResults: autoTopK.minResults,
+                    useVectorFallback: true,
+                },
+            };
         }
 
         const configuredLimit = configManager.getNumber(
@@ -1133,7 +1154,7 @@ export class ToolHandlers {
         );
         if (configuredLimit !== undefined) {
             if (Number.isInteger(configuredLimit) && configuredLimit > 0) {
-                return configuredLimit;
+                return { limit: configuredLimit };
             }
 
             console.warn(
@@ -1141,7 +1162,70 @@ export class ToolHandlers {
             );
         }
 
-        return DEFAULT_SEARCH_RESULT_LIMIT;
+        return { limit: DEFAULT_SEARCH_RESULT_LIMIT };
+    }
+
+    private resolveSearchAutoTopK(codebasePath: string): {
+        minResults: number;
+        maxResults: number;
+    } | undefined {
+        const rawEnabled = configManager.get("searchAutoTopK", codebasePath);
+        const enabled = configManager.getBoolean("searchAutoTopK", codebasePath);
+        if (rawEnabled !== undefined && enabled === undefined) {
+            console.warn(
+                `[SEARCH] Ignoring invalid config.searchAutoTopK value '${rawEnabled}'. Falling back to ${DEFAULT_SEARCH_AUTO_TOP_K_MIN}/${DEFAULT_SEARCH_AUTO_TOP_K_MAX}.`,
+            );
+            return {
+                minResults: DEFAULT_SEARCH_AUTO_TOP_K_MIN,
+                maxResults: DEFAULT_SEARCH_AUTO_TOP_K_MAX,
+            };
+        }
+        if (enabled === false) {
+            return undefined;
+        }
+
+        const rawMin = configManager.get("searchAutoTopKMin", codebasePath);
+        const rawMax = configManager.get("searchAutoTopKMax", codebasePath);
+        const configuredMin = configManager.getNumber("searchAutoTopKMin", codebasePath);
+        const configuredMax = configManager.getNumber("searchAutoTopKMax", codebasePath);
+        const hasInvalidBounds = (
+            rawMin !== undefined
+            && !this.isPositiveInteger(configuredMin)
+        ) || (
+            rawMax !== undefined
+            && !this.isPositiveInteger(configuredMax)
+        );
+        if (hasInvalidBounds) {
+            console.warn(
+                `[SEARCH] Ignoring invalid automatic TopK bounds (min='${rawMin}', max='${rawMax}'). Falling back to ${DEFAULT_SEARCH_AUTO_TOP_K_MIN}/${DEFAULT_SEARCH_AUTO_TOP_K_MAX}.`,
+            );
+            return {
+                minResults: DEFAULT_SEARCH_AUTO_TOP_K_MIN,
+                maxResults: DEFAULT_SEARCH_AUTO_TOP_K_MAX,
+            };
+        }
+
+        const requestedMax = configuredMax ?? DEFAULT_SEARCH_AUTO_TOP_K_MAX;
+        const maxResults = Math.min(requestedMax, MAX_SEARCH_AUTO_TOP_K);
+        if (requestedMax > MAX_SEARCH_AUTO_TOP_K) {
+            console.warn(
+                `[SEARCH] Clamping config.searchAutoTopKMax from ${requestedMax} to runtime limit ${MAX_SEARCH_AUTO_TOP_K}.`,
+            );
+        }
+        const requestedMin = configuredMin ?? DEFAULT_SEARCH_AUTO_TOP_K_MIN;
+        if (requestedMin > maxResults) {
+            console.warn(
+                `[SEARCH] config.searchAutoTopKMin (${requestedMin}) exceeds searchAutoTopKMax (${maxResults}); using ${maxResults} for both.`,
+            );
+        }
+        return {
+            minResults: Math.min(requestedMin, maxResults),
+            maxResults,
+        };
+    }
+
+    private isPositiveInteger(value: unknown): value is number {
+        return typeof value === "number" && Number.isInteger(value) && value > 0;
     }
 
     private resolveSearchThreshold(codebasePath: string): number {
@@ -3562,10 +3646,11 @@ export class ToolHandlers {
             const filterExpr =
                 filterParts.length > 0 ? filterParts.join(" and ") : undefined;
 
-            const resultLimit = await this.resolveSearchResultLimit(
+            const resolvedResultLimit = this.resolveSearchResultLimit(
                 normalizedLimit.limit,
                 searchCodebasePath,
             );
+            let autoTopKDecision: SearchAutoTopKDecision | undefined;
             const searchThreshold =
                 this.resolveSearchThreshold(searchCodebasePath);
             const filenameQueryStatus = await analyzeFilenameLikeQuery({
@@ -3580,12 +3665,20 @@ export class ToolHandlers {
             const searchResults = await this.context.semanticSearch(
                 searchCodebasePath,
                 query,
-                resultLimit,
+                resolvedResultLimit.limit,
                 searchThreshold,
                 filterExpr,
                 {
                     targetRole: searchTargetRole,
                     includeRelated: normalizedIncludeRelated.includeRelated,
+                    ...(resolvedResultLimit.autoTopK ? {
+                        autoTopK: {
+                            ...resolvedResultLimit.autoTopK,
+                            onDecision: (decision) => {
+                                autoTopKDecision = decision;
+                            },
+                        },
+                    } : {}),
                     ...(filenameQueryStatus
                         ? { filenameLikeQuery: filenameQueryStatus.query }
                         : {}),
@@ -3713,6 +3806,11 @@ export class ToolHandlers {
             }
             if (searchCodebasePath !== absolutePath) {
                 resultMessage += `\nRequested path '${absolutePath}' is covered by indexed ${searchRootLabel} '${searchCodebasePath}'.`;
+            }
+            if (autoTopKDecision) {
+                const autoTopKMessage = `Auto TopK: ${autoTopKDecision.selectedResults}/${autoTopKDecision.maxResults}, signal=${autoTopKDecision.signal}, reason=${autoTopKDecision.reason}`;
+                console.log(`[SEARCH] ${autoTopKMessage}`);
+                resultMessage += `\n${autoTopKMessage}`;
             }
             if (syncSearchPrefixBlock.length > 0) {
                 resultMessage = `${syncSearchPrefixBlock}${resultMessage}`;

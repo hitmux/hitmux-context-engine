@@ -140,8 +140,8 @@ export async function externalRerankSemanticSearchResults<T extends SemanticSear
 
         const payload = await response.json() as unknown;
         const rerankResponse = parseRerankResponse(payload, limitedResults.length);
-        if (!rerankResponse) {
-            console.log('[Context] ⚠️  External rerank returned an unexpected response; using original search order.');
+        if (!rerankResponse || !isCompleteRerankResponse(rerankResponse, limitedResults.length)) {
+            console.log('[Context] ⚠️  External rerank returned an incomplete or unexpected response; using original search order.');
             return results;
         }
 
@@ -211,6 +211,14 @@ function parseRerankResponse(payload: unknown, candidateCount: number): RerankRe
     }
 
     return { results };
+}
+
+function isCompleteRerankResponse(response: RerankResponse, candidateCount: number): boolean {
+    if (response.results.length !== candidateCount) {
+        return false;
+    }
+
+    return new Set(response.results.map(result => result.index)).size === candidateCount;
 }
 
 function formatRerankDocument(result: SemanticSearchResult, maxChars: number): string {

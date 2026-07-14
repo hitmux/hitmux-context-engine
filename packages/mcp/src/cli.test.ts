@@ -67,6 +67,7 @@ test("help and version write clean stdout without starting runtime", async () =>
     assert.equal(versionExit, 0);
     assert.equal(runtimeStarted, false);
     assert.match(output.join(""), /Usage:/);
+    assert.match(output.join(""), /automatic TopK/);
     assert.match(output.join(""), /1\.2\.3/);
     assert.doesNotMatch(output.join(""), /\[LOG\]/);
     assert.equal(errors.join(""), "");

@@ -60,6 +60,9 @@ export interface HitmuxConfig {
     projectWatcherFallbackScanIntervalMs?: number;
     projectWatcherIgnoredDirs?: string[];
     splitterType?: string;
+    searchAutoTopK?: boolean;
+    searchAutoTopKMin?: number;
+    searchAutoTopKMax?: number;
     searchTopK?: number;
     searchThreshold?: number;
 }
@@ -635,8 +638,23 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     },
     {
         key: 'searchTopK',
-        description: 'Default maximum search result count.',
+        description: 'Fixed search result count when searchAutoTopK is false.',
         example: '10'
+    },
+    {
+        key: 'searchAutoTopK',
+        description: 'Automatically select the result count from the current query score distribution.',
+        example: 'true'
+    },
+    {
+        key: 'searchAutoTopKMin',
+        description: 'Minimum results returned by automatic TopK selection.',
+        example: '3'
+    },
+    {
+        key: 'searchAutoTopKMax',
+        description: 'Maximum results returned by automatic TopK selection, capped at 50.',
+        example: '12'
     },
     {
         key: 'searchThreshold',

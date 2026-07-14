@@ -419,9 +419,8 @@ Search indexed context in an absolute path. If the root is unindexed, the tool r
                                 },
                                 limit: {
                                     type: "number",
-                                    default: 10,
                                     description:
-                                        "Maximum results. Default to 10; change only when the user explicitly asks for more or fewer.",
+                                        "Optional exact result count. When omitted, automatic TopK selects 3-12 results from the current score distribution.",
                                 },
                                 scope: {
                                     type: "string",

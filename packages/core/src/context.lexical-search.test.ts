@@ -589,6 +589,7 @@ describe('Context lexical search supplement', () => {
         ['429', { ok: false, status: 429, json: async () => ({}) }],
         ['5xx', { ok: false, status: 503, json: async () => ({}) }],
         ['unexpected JSON', { ok: true, status: 200, json: async () => ({ items: [] }) }],
+        ['partial JSON', { ok: true, status: 200, json: async () => ({ results: [{ index: 0, relevance_score: 0.99 }] }) }],
     ])('falls back to original order when external rerank returns %s', async (_label, response) => {
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.search.mockResolvedValue([
@@ -660,6 +661,169 @@ describe('Context lexical search supplement', () => {
             'src/first.ts',
             'src/second.ts',
         ]);
+    });
+
+    it('uses rerank scores for automatic TopK only after a complete rerank response', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([0.99, 0.97, 0.95, 0.45, 0.44, 0.43, 0.42, 0.41]
+            .map((score, index) => createVectorResult({
+                id: `candidate-${index}`,
+                content: `candidate ${index}`,
+                relativePath: `src/candidate-${index}.ts`,
+                metadata: { language: 'typescript', fileRole: 'implementation' },
+            }, score)));
+        jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                results: [0.99, 0.97, 0.95, 0.45, 0.44, 0.43, 0.42, 0.41]
+                    .map((relevance_score, index) => ({ index, relevance_score })),
+            }),
+        } as unknown as Response);
+        const onDecision = jest.fn();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+        });
+
+        const results = await context.semanticSearch('/repo', 'candidate search', 12, 0.3, undefined, {
+            enableLexicalSupplement: false,
+            autoTopK: { minResults: 3, useVectorFallback: true, onDecision },
+        });
+
+        expect(results).toHaveLength(4);
+        expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
+            selectedResults: 4,
+            signal: 'rerank',
+            reason: 'significant_score_gap',
+        }));
+    });
+
+    it('keeps room for four primary results when automatic TopK reserves a related result', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([
+            ...[0.99, 0.97, 0.95, 0.45, 0.44, 0.43].map((score, index) => createVectorResult({
+                id: `implementation-${index}`,
+                content: `export function implementation${index}() {}`,
+                relativePath: `src/implementation-${index}.ts`,
+                metadata: { language: 'typescript', fileRole: 'implementation' },
+            }, score)),
+            createVectorResult({
+                id: 'related-test',
+                content: 'it("covers implementation", () => implementation0());',
+                relativePath: 'src/implementation.test.ts',
+                metadata: { language: 'typescript', fileRole: 'test' },
+            }, 0.42),
+        ]);
+        jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                results: [0.99, 0.97, 0.95, 0.45, 0.44, 0.43, 0.42]
+                    .map((relevance_score, index) => ({ index, relevance_score })),
+            }),
+        } as unknown as Response);
+        const onDecision = jest.fn();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+        });
+
+        const results = await context.semanticSearch('/repo', 'candidate search', 12, 0.3, undefined, {
+            enableLexicalSupplement: false,
+            autoTopK: { minResults: 3, useVectorFallback: true, onDecision },
+        });
+
+        expect(results).toHaveLength(5);
+        expect(results.slice(0, 4).every(result => result.isPrimary)).toBe(true);
+        expect(results[4]).toMatchObject({
+            relativePath: 'src/implementation.test.ts',
+            resultGroup: 'related_tests',
+            isPrimary: false,
+        });
+        expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
+            selectedResults: 5,
+            signal: 'rerank',
+            reason: 'significant_score_gap',
+        }));
+    });
+
+    it('uses dense vector scores when rerank is incomplete or unavailable', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([0.99, 0.97, 0.95, 0.45, 0.44, 0.43, 0.42, 0.41]
+            .map((score, index) => createVectorResult({
+                id: `candidate-${index}`,
+                content: `candidate ${index}`,
+                relativePath: `src/candidate-${index}.ts`,
+                metadata: { language: 'typescript', fileRole: 'implementation' },
+            }, score)));
+        jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({ results: [{ index: 0, relevance_score: 0.99 }] }),
+        } as unknown as Response);
+        const onDecision = jest.fn();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+        });
+
+        const results = await context.semanticSearch('/repo', 'candidate search', 12, 0.3, undefined, {
+            enableLexicalSupplement: false,
+            autoTopK: { minResults: 3, useVectorFallback: true, onDecision },
+        });
+
+        expect(results).toHaveLength(4);
+        expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
+            selectedResults: 4,
+            signal: 'vector',
+            reason: 'significant_score_gap',
+        }));
+    });
+
+    it('uses hybrid RRF scores for automatic TopK fallback', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.hybridSearch.mockResolvedValue([0.99, 0.97, 0.95, 0.45, 0.44, 0.43, 0.42, 0.41]
+            .map((score, index) => ({
+                document: {
+                    id: `candidate-${index}`,
+                    vector: [1, 0, 0],
+                    content: `candidate ${index}`,
+                    relativePath: `src/candidate-${index}.ts`,
+                    startLine: index + 1,
+                    endLine: index + 1,
+                    fileExtension: '.ts',
+                    metadata: { language: 'typescript', fileRole: 'implementation' },
+                },
+                score,
+            })));
+        const onDecision = jest.fn();
+        const context = new Context({
+            hybridMode: true,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+        });
+
+        const results = await context.semanticSearch('/repo', 'candidate search', 12, 0.3, undefined, {
+            enableLexicalSupplement: false,
+            autoTopK: { minResults: 3, useVectorFallback: true, onDecision },
+        });
+
+        expect(results).toHaveLength(4);
+        expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
+            selectedResults: 4,
+            signal: 'hybrid_rrf',
+            reason: 'significant_score_gap',
+        }));
     });
 
     it('keeps role grouping ahead of external rerank scores', async () => {

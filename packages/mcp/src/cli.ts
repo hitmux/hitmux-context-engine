@@ -96,6 +96,7 @@ export function getCliHelpText(): string {
         "Notes:",
         " Run plain hce only from MCP clients; it stays in stdio server mode.",
         " Config is read from ~/.hitmux-context-engine/config.conf and ./.hitmux-context-engine/config.conf.",
+        " Omit --limit to use automatic TopK (default range: 3-12); pass --limit to force an exact count.",
         "",
     ].join("\n");
 }

@@ -8,6 +8,7 @@ import {
     assertBenchmarkPreflightAllowsRun,
     auditFreshness,
     auditProjectsForPlan,
+    buildAutoTopKComparison,
     classifyFailure,
     clearCompletedProjectIndex,
     ensureProjectIndex,
@@ -740,4 +741,75 @@ test("resultNeedsAuditRefresh detects records missing anchor audit fields", () =
     };
 
     assert.equal(resultNeedsAuditRefresh(legacyRecord as Parameters<typeof resultNeedsAuditRefresh>[0]), true);
+});
+
+test("buildAutoTopKComparison reports quality deltas and automatic selection telemetry", () => {
+    const base = {
+        runId: "run",
+        fixture: "fixture",
+        project: "CLIProxyAPI",
+        projectRoot: "/repo",
+        question: "q",
+        status: "completed" as const,
+        startedAt: "2026-07-14T00:00:00.000Z",
+        finishedAt: "2026-07-14T00:00:00.001Z",
+        durationMs: 1,
+        suggestedScore: 5,
+        scoringReason: "primary",
+        firstAcceptableRank: null,
+        firstPrimarySymbolRank: null,
+        firstAcceptableSymbolRank: null,
+        symbolHitCount: 0,
+        needsManualReview: false,
+        scoreExcluded: false,
+        freshness: {
+            missingExpectedPaths: [],
+            missingPrimaryPaths: [],
+            missingAcceptablePaths: [],
+            staleResultPaths: [],
+            scorable: true,
+        },
+        failureTaxonomy: "expected_hit" as const,
+        failureDiagnostics: [],
+        failureReasons: [],
+        queryAnchors: [],
+        anchorCoverage: { extracted: [], recalled: [], missing: [] },
+        topResults: [topResult({ path: "src/target.go", matched: "primary" })],
+        scoreVersion: "file-rank-v4",
+    };
+    const comparison = buildAutoTopKComparison(
+        [{
+            ...base,
+            caseId: "case-a",
+            searchMode: "fixed" as const,
+            selectedTopK: 12,
+            firstPrimaryRank: 2,
+        }],
+        [{
+            ...base,
+            caseId: "case-a",
+            searchMode: "auto" as const,
+            selectedTopK: 5,
+            firstPrimaryRank: 2,
+            autoTopKDecision: {
+                selectedResults: 5,
+                minResults: 3,
+                maxResults: 12,
+                availableResults: 12,
+                signal: "rerank" as const,
+                reason: "significant_score_gap" as const,
+            },
+        }]
+    );
+
+    assert.deepEqual(comparison.deltas, {
+        primaryTop3: 0,
+        primaryTop5: 0,
+        expectedTop5: 0,
+        missingExpectedPathCount: 0,
+        averageSelectedTopK: -7,
+        averageSelectedTopKReductionPercent: 58.33,
+    });
+    assert.equal(comparison.auto.autoTopKSignals.rerank, 1);
+    assert.equal(comparison.acceptance.averageResultReductionAtLeast15Percent, true);
 });

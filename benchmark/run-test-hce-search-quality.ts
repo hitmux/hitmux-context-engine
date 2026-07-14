@@ -3,6 +3,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 type CaseStatus = "completed" | "error" | "skipped";
+type SearchMode = "fixed" | "auto";
+type RequestedSearchMode = SearchMode | "compare";
+type AutoTopKSignal = "rerank" | "vector" | "hybrid_rrf" | "none";
+type AutoTopKReason =
+    | "significant_score_gap"
+    | "no_reliable_score_gap"
+    | "insufficient_finite_scores"
+    | "no_score_signal";
 type FailureTaxonomy =
     | "expected_hit"
     | "search_miss"
@@ -55,6 +63,24 @@ interface SearchResultRecord {
     endLine?: number;
 }
 
+interface AutoTopKDecisionRecord {
+    selectedResults: number;
+    minResults: number;
+    maxResults: number;
+    availableResults: number;
+    signal: AutoTopKSignal;
+    reason: AutoTopKReason;
+}
+
+interface BenchmarkSearchOptions {
+    enableLexicalSupplement?: boolean;
+    autoTopK?: {
+        minResults: number;
+        useVectorFallback: boolean;
+        onDecision?: (decision: AutoTopKDecisionRecord) => void;
+    };
+}
+
 interface BenchmarkContext {
     semanticSearch(
         projectRoot: string,
@@ -62,7 +88,7 @@ interface BenchmarkContext {
         limit: number,
         threshold: number,
         filterExpr?: string,
-        options?: { enableLexicalSupplement?: boolean }
+        options?: BenchmarkSearchOptions
     ): Promise<SearchResultRecord[]>;
     getCollectionName(projectRoot: string): string;
     hasIndex(projectRoot: string): Promise<boolean>;
@@ -84,6 +110,9 @@ interface CaseResult {
     startedAt: string;
     finishedAt: string;
     durationMs: number;
+    searchMode: SearchMode;
+    selectedTopK: number;
+    autoTopKDecision?: AutoTopKDecisionRecord;
     suggestedScore: number;
     scoringReason: string;
     firstPrimaryRank: number | null;
@@ -172,7 +201,7 @@ interface ProjectFreshnessSummary {
 }
 
 type LegacyCaseResult = Omit<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons" | "scoreExcluded" | "scoreExclusionReason">
-    & Partial<Pick<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons" | "queryAnchors" | "anchorCoverage" | "scoreExcluded" | "scoreExclusionReason">>;
+    & Partial<Pick<CaseResult, "freshness" | "failureTaxonomy" | "failureDiagnostics" | "failureReasons" | "queryAnchors" | "anchorCoverage" | "scoreExcluded" | "scoreExclusionReason" | "searchMode" | "selectedTopK" | "autoTopKDecision">>;
 
 interface CaseLookup {
     benchmarkCase: BenchmarkCase;
@@ -184,7 +213,10 @@ interface RunnerOptions {
     outDir: string;
     workspaceRoot?: string;
     run: boolean;
+    mode: RequestedSearchMode;
     limit: number;
+    autoTopKMin: number;
+    autoTopKMax: number;
     threshold: number;
     projects: Set<string>;
     retryErrors: boolean;
@@ -205,7 +237,10 @@ function parseArgs(argv: string[]): RunnerOptions {
         casesPath: DEFAULT_CASES_PATH,
         outDir: DEFAULT_OUT_DIR,
         run: false,
-        limit: 20,
+        mode: "fixed",
+        limit: 12,
+        autoTopKMin: 3,
+        autoTopKMax: 12,
         threshold: 0.3,
         projects: new Set(),
         retryErrors: false,
@@ -235,8 +270,19 @@ function parseArgs(argv: string[]): RunnerOptions {
         } else if (arg === "--project" && next) {
             options.projects.add(next);
             index += 1;
+        } else if (arg === "--mode" && next) {
+            options.mode = parseSearchMode(next);
+            index += 1;
+        } else if (arg === "--compare-auto-topk") {
+            options.mode = "compare";
         } else if (arg === "--limit" && next) {
             options.limit = parsePositiveInteger(next, "--limit");
+            index += 1;
+        } else if (arg === "--auto-top-k-min" && next) {
+            options.autoTopKMin = parsePositiveInteger(next, "--auto-top-k-min");
+            index += 1;
+        } else if (arg === "--auto-top-k-max" && next) {
+            options.autoTopKMax = parsePositiveInteger(next, "--auto-top-k-max");
             index += 1;
         } else if (arg === "--threshold" && next) {
             options.threshold = parseFiniteNumber(next, "--threshold");
@@ -259,6 +305,10 @@ function parseArgs(argv: string[]): RunnerOptions {
         }
     }
 
+    if (options.autoTopKMin > options.autoTopKMax) {
+        throw new Error("--auto-top-k-min must not exceed --auto-top-k-max");
+    }
+
     return options;
 }
 
@@ -272,7 +322,12 @@ Options:
   --out-dir <path>         Output directory. Default: benchmark/results/test-hce
   --workspace-root <path>  Override fixture workspaceRoot.
   --project <name>         Run one project. Repeatable.
-  --limit <n>              Search result limit. Default: 20
+  --mode <fixed|auto|compare>
+                            Search mode. compare runs fixed and auto into separate directories. Default: fixed
+  --compare-auto-topk      Alias for --mode compare.
+  --limit <n>              Fixed-mode result limit. Default: 12
+  --auto-top-k-min <n>     Automatic minimum result count. Default: 3
+  --auto-top-k-max <n>     Automatic maximum result count. Default: 12
   --threshold <n>          Search threshold. Default: 0.3
   --retry-errors           Re-run cases that have previous error records.
   --retry-empty            Re-run cases whose latest record completed with an empty result.
@@ -290,6 +345,13 @@ function parsePositiveInteger(value: string, name: string): number {
         throw new Error(`${name} must be a positive integer`);
     }
     return parsed;
+}
+
+function parseSearchMode(value: string): RequestedSearchMode {
+    if (value === "fixed" || value === "auto" || value === "compare") {
+        return value;
+    }
+    throw new Error("--mode must be one of: fixed, auto, compare");
 }
 
 function parseFiniteNumber(value: string, name: string): number {
@@ -931,13 +993,25 @@ async function runCase(
     const startedAt = startedAtDate.toISOString();
 
     try {
+        let autoTopKDecision: AutoTopKDecisionRecord | undefined;
         const results = await context.semanticSearch(
             projectRoot,
             benchmarkCase.question,
-            options.limit,
+            options.mode === "auto" ? options.autoTopKMax : options.limit,
             options.threshold,
             undefined,
-            { enableLexicalSupplement: false }
+            {
+                enableLexicalSupplement: false,
+                ...(options.mode === "auto" ? {
+                    autoTopK: {
+                        minResults: options.autoTopKMin,
+                        useVectorFallback: true,
+                        onDecision: (decision) => {
+                            autoTopKDecision = decision;
+                        },
+                    },
+                } : {}),
+            }
         );
         const finishedAtDate = new Date();
         const scoring = scoreResult(projectRoot, benchmarkCase, results);
@@ -956,6 +1030,9 @@ async function runCase(
             startedAt,
             finishedAt: finishedAtDate.toISOString(),
             durationMs: finishedAtDate.getTime() - startedAtDate.getTime(),
+            searchMode: options.mode,
+            selectedTopK: results.length,
+            ...(autoTopKDecision ? { autoTopKDecision } : {}),
             ...scoring,
             scoreExcluded: !freshness.scorable,
             ...(freshness.scoreExclusionReason ? { scoreExclusionReason: freshness.scoreExclusionReason } : {}),
@@ -982,6 +1059,8 @@ async function runCase(
             startedAt,
             finishedAt: finishedAtDate.toISOString(),
             durationMs: finishedAtDate.getTime() - startedAtDate.getTime(),
+            searchMode: options.mode,
+            selectedTopK: 0,
             suggestedScore: 0,
             scoringReason: "search failed",
             firstPrimaryRank: null,
@@ -1125,6 +1204,31 @@ function createEmptyDiagnosticCounts(): Record<FailureDiagnostic, number> {
         anchor_not_recalled: 0,
         anchor_recalled_but_reranked: 0,
     };
+}
+
+function createEmptyAutoTopKSignalCounts(): Record<AutoTopKSignal, number> {
+    return {
+        rerank: 0,
+        vector: 0,
+        hybrid_rrf: 0,
+        none: 0,
+    };
+}
+
+function createEmptyAutoTopKReasonCounts(): Record<AutoTopKReason, number> {
+    return {
+        significant_score_gap: 0,
+        no_reliable_score_gap: 0,
+        insufficient_finite_scores: 0,
+        no_score_signal: 0,
+    };
+}
+
+function getSelectedTopK(result: LegacyCaseResult): number | undefined {
+    if (Number.isInteger(result.selectedTopK) && result.selectedTopK >= 0) {
+        return result.selectedTopK;
+    }
+    return Array.isArray(result.topResults) ? result.topResults.length : undefined;
 }
 
 function createEmptyFreshnessSummary(): ProjectFreshnessSummary {
@@ -1283,8 +1387,12 @@ function writeReport(resultsPath: string, reportPath: string, activeCaseKeys?: S
         completed: number;
         errors: number;
         suggestedScore: number;
+        selectedTopKTotal: number;
+        selectedTopKCount: number;
         primaryTop5: number;
+        primaryTop3: number;
         primaryTop8: number;
+        expectedTop5: number;
         primarySymbolTop5: number;
         primarySymbolTop8: number;
         expectedTop10: number;
@@ -1292,6 +1400,8 @@ function writeReport(resultsPath: string, reportPath: string, activeCaseKeys?: S
         manualReview: number;
         failureTaxonomy: Record<FailureTaxonomy, number>;
         failureDiagnostics: Record<FailureDiagnostic, number>;
+        autoTopKSignals: Record<AutoTopKSignal, number>;
+        autoTopKReasons: Record<AutoTopKReason, number>;
         freshness: ProjectFreshnessSummary;
     }>();
 
@@ -1303,8 +1413,12 @@ function writeReport(resultsPath: string, reportPath: string, activeCaseKeys?: S
             completed: 0,
             errors: 0,
             suggestedScore: 0,
+            selectedTopKTotal: 0,
+            selectedTopKCount: 0,
             primaryTop5: 0,
+            primaryTop3: 0,
             primaryTop8: 0,
+            expectedTop5: 0,
             primarySymbolTop5: 0,
             primarySymbolTop8: 0,
             expectedTop10: 0,
@@ -1312,6 +1426,8 @@ function writeReport(resultsPath: string, reportPath: string, activeCaseKeys?: S
             manualReview: 0,
             failureTaxonomy: createEmptyTaxonomyCounts(),
             failureDiagnostics: createEmptyDiagnosticCounts(),
+            autoTopKSignals: createEmptyAutoTopKSignalCounts(),
+            autoTopKReasons: createEmptyAutoTopKReasonCounts(),
             freshness: createEmptyFreshnessSummary(),
         };
         const taxonomy = ensureResultTaxonomy(result);
@@ -1360,6 +1476,15 @@ function writeReport(resultsPath: string, reportPath: string, activeCaseKeys?: S
         }
         if (result.status === "completed") {
             summary.completed += 1;
+            const selectedTopK = getSelectedTopK(result);
+            if (selectedTopK !== undefined) {
+                summary.selectedTopKTotal += selectedTopK;
+                summary.selectedTopKCount += 1;
+            }
+            if (result.autoTopKDecision) {
+                summary.autoTopKSignals[result.autoTopKDecision.signal] += 1;
+                summary.autoTopKReasons[result.autoTopKDecision.reason] += 1;
+            }
             if (result.scoreExcluded) {
                 summary.scoreExcluded += 1;
                 byProject.set(result.project, summary);
@@ -1367,8 +1492,17 @@ function writeReport(resultsPath: string, reportPath: string, activeCaseKeys?: S
             }
             summary.scorableTotal += 1;
             summary.suggestedScore += result.suggestedScore;
+            if (result.firstPrimaryRank !== null && result.firstPrimaryRank <= 3) {
+                summary.primaryTop3 += 1;
+            }
             if (result.firstPrimaryRank !== null && result.firstPrimaryRank <= 5) {
                 summary.primaryTop5 += 1;
+            }
+            if (
+                (result.firstPrimaryRank !== null && result.firstPrimaryRank <= 5) ||
+                (result.firstAcceptableRank !== null && result.firstAcceptableRank <= 5)
+            ) {
+                summary.expectedTop5 += 1;
             }
             if (result.firstPrimaryRank !== null && result.firstPrimaryRank <= 8) {
                 summary.primaryTop8 += 1;
@@ -1407,12 +1541,210 @@ function writeReport(resultsPath: string, reportPath: string, activeCaseKeys?: S
         projects: Array.from(byProject.entries()).map(([project, summary]) => ({
             project,
             ...summary,
+            averageSelectedTopK: summary.selectedTopKCount > 0
+                ? Math.round((summary.selectedTopKTotal / summary.selectedTopKCount) * 100) / 100
+                : null,
             maxScore: summary.scorableTotal * 5,
             scorePercent: summary.scorableTotal > 0
                 ? Math.round((summary.suggestedScore / (summary.scorableTotal * 5)) * 1000) / 10
                 : null,
         })),
     });
+}
+
+interface AutoTopKComparisonSummary {
+    totalCases: number;
+    completedCases: number;
+    scorableCompletedCases: number;
+    primaryTop3: number;
+    primaryTop5: number;
+    expectedTop5: number;
+    missingExpectedPathCases: number;
+    missingExpectedPathCount: number;
+    averageSelectedTopK: number | null;
+    autoTopKSignals: Record<AutoTopKSignal, number>;
+    autoTopKReasons: Record<AutoTopKReason, number>;
+}
+
+interface AutoTopKComparison {
+    fixed: AutoTopKComparisonSummary;
+    auto: AutoTopKComparisonSummary;
+    deltas: {
+        primaryTop3: number;
+        primaryTop5: number;
+        expectedTop5: number;
+        missingExpectedPathCount: number;
+        averageSelectedTopK: number | null;
+        averageSelectedTopKReductionPercent: number | null;
+    };
+    acceptance: {
+        primaryTop3NotLower: boolean;
+        primaryTop5NotLower: boolean;
+        missingExpectedPathsNotIncreased: boolean;
+        averageResultReductionAtLeast15Percent: boolean;
+    };
+    cases: Array<{
+        project: string | undefined;
+        caseId: string | undefined;
+        fixed?: {
+            status: CaseStatus;
+            selectedTopK: number | undefined;
+            firstPrimaryRank: number | null;
+            firstAcceptableRank: number | null;
+        };
+        auto?: {
+            status: CaseStatus;
+            selectedTopK: number | undefined;
+            firstPrimaryRank: number | null;
+            firstAcceptableRank: number | null;
+            signal: AutoTopKSignal | undefined;
+            reason: AutoTopKReason | undefined;
+        };
+    }>;
+}
+
+function summarizeAutoTopKComparison(results: readonly LegacyCaseResult[]): AutoTopKComparisonSummary {
+    let completedCases = 0;
+    let scorableCompletedCases = 0;
+    let primaryTop3 = 0;
+    let primaryTop5 = 0;
+    let expectedTop5 = 0;
+    let missingExpectedPathCases = 0;
+    let missingExpectedPathCount = 0;
+    let selectedTopKTotal = 0;
+    let selectedTopKCount = 0;
+    const autoTopKSignals = createEmptyAutoTopKSignalCounts();
+    const autoTopKReasons = createEmptyAutoTopKReasonCounts();
+
+    for (const result of results) {
+        const taxonomy = ensureResultTaxonomy(result);
+        if (taxonomy.freshness.missingExpectedPaths.length > 0) {
+            missingExpectedPathCases += 1;
+            missingExpectedPathCount += taxonomy.freshness.missingExpectedPaths.length;
+        }
+        if (result.status !== "completed") {
+            continue;
+        }
+
+        completedCases += 1;
+        const selectedTopK = getSelectedTopK(result);
+        if (selectedTopK !== undefined) {
+            selectedTopKTotal += selectedTopK;
+            selectedTopKCount += 1;
+        }
+        if (result.autoTopKDecision) {
+            autoTopKSignals[result.autoTopKDecision.signal] += 1;
+            autoTopKReasons[result.autoTopKDecision.reason] += 1;
+        }
+        if (result.scoreExcluded) {
+            continue;
+        }
+
+        scorableCompletedCases += 1;
+        if (result.firstPrimaryRank !== null && result.firstPrimaryRank <= 3) {
+            primaryTop3 += 1;
+        }
+        if (result.firstPrimaryRank !== null && result.firstPrimaryRank <= 5) {
+            primaryTop5 += 1;
+        }
+        if (
+            (result.firstPrimaryRank !== null && result.firstPrimaryRank <= 5) ||
+            (result.firstAcceptableRank !== null && result.firstAcceptableRank <= 5)
+        ) {
+            expectedTop5 += 1;
+        }
+    }
+
+    return {
+        totalCases: results.length,
+        completedCases,
+        scorableCompletedCases,
+        primaryTop3,
+        primaryTop5,
+        expectedTop5,
+        missingExpectedPathCases,
+        missingExpectedPathCount,
+        averageSelectedTopK: selectedTopKCount > 0
+            ? Math.round((selectedTopKTotal / selectedTopKCount) * 100) / 100
+            : null,
+        autoTopKSignals,
+        autoTopKReasons,
+    };
+}
+
+function buildAutoTopKComparison(
+    fixedResults: readonly LegacyCaseResult[],
+    autoResults: readonly LegacyCaseResult[]
+): AutoTopKComparison {
+    const fixed = summarizeAutoTopKComparison(fixedResults);
+    const auto = summarizeAutoTopKComparison(autoResults);
+    const fixedByCase = new Map(fixedResults.map((result) => [resultKey(result.project, result.caseId), result]));
+    const autoByCase = new Map(autoResults.map((result) => [resultKey(result.project, result.caseId), result]));
+    const caseKeys = [...new Set([...fixedByCase.keys(), ...autoByCase.keys()])].sort();
+    const averageReductionPercent = fixed.averageSelectedTopK !== null &&
+        auto.averageSelectedTopK !== null &&
+        fixed.averageSelectedTopK > 0
+        ? Math.round(((fixed.averageSelectedTopK - auto.averageSelectedTopK) / fixed.averageSelectedTopK) * 10_000) / 100
+        : null;
+
+    return {
+        fixed,
+        auto,
+        deltas: {
+            primaryTop3: auto.primaryTop3 - fixed.primaryTop3,
+            primaryTop5: auto.primaryTop5 - fixed.primaryTop5,
+            expectedTop5: auto.expectedTop5 - fixed.expectedTop5,
+            missingExpectedPathCount: auto.missingExpectedPathCount - fixed.missingExpectedPathCount,
+            averageSelectedTopK: fixed.averageSelectedTopK !== null && auto.averageSelectedTopK !== null
+                ? Math.round((auto.averageSelectedTopK - fixed.averageSelectedTopK) * 100) / 100
+                : null,
+            averageSelectedTopKReductionPercent: averageReductionPercent,
+        },
+        acceptance: {
+            primaryTop3NotLower: auto.primaryTop3 >= fixed.primaryTop3,
+            primaryTop5NotLower: auto.primaryTop5 >= fixed.primaryTop5,
+            missingExpectedPathsNotIncreased: auto.missingExpectedPathCount <= fixed.missingExpectedPathCount,
+            averageResultReductionAtLeast15Percent: averageReductionPercent !== null && averageReductionPercent >= 15,
+        },
+        cases: caseKeys.map((key) => {
+            const fixedResult = fixedByCase.get(key);
+            const autoResult = autoByCase.get(key);
+            return {
+                project: fixedResult?.project ?? autoResult?.project,
+                caseId: fixedResult?.caseId ?? autoResult?.caseId,
+                fixed: fixedResult ? {
+                    status: fixedResult.status,
+                    selectedTopK: getSelectedTopK(fixedResult),
+                    firstPrimaryRank: fixedResult.firstPrimaryRank,
+                    firstAcceptableRank: fixedResult.firstAcceptableRank,
+                } : undefined,
+                auto: autoResult ? {
+                    status: autoResult.status,
+                    selectedTopK: getSelectedTopK(autoResult),
+                    firstPrimaryRank: autoResult.firstPrimaryRank,
+                    firstAcceptableRank: autoResult.firstAcceptableRank,
+                    signal: autoResult.autoTopKDecision?.signal,
+                    reason: autoResult.autoTopKDecision?.reason,
+                } : undefined,
+            };
+        }),
+    };
+}
+
+function writeAutoTopKComparison(outDir: string): string {
+    const fixedResultsPath = path.join(outDir, "fixed", "results.jsonl");
+    const autoResultsPath = path.join(outDir, "auto", "results.jsonl");
+    const comparisonPath = path.join(outDir, "comparison.json");
+    writeJson(comparisonPath, {
+        generatedAt: new Date().toISOString(),
+        fixedResultsPath,
+        autoResultsPath,
+        ...buildAutoTopKComparison(
+            Array.from(getLatestResults(fixedResultsPath).values()),
+            Array.from(getLatestResults(autoResultsPath).values()),
+        ),
+    });
+    return comparisonPath;
 }
 
 function buildCaseLookup(projects: ResolvedBenchmarkProject[]): Map<string, CaseLookup> {
@@ -1685,8 +2017,7 @@ function rescoreExistingResults(
     console.log(`Wrote report to ${reportPath}`);
 }
 
-async function main(): Promise<void> {
-    const options = parseArgs(process.argv.slice(2));
+async function runBenchmark(options: RunnerOptions): Promise<void> {
     const fixture = readFixture(options.casesPath);
     const resultsPath = path.join(options.outDir, "results.jsonl");
     const statePath = path.join(options.outDir, "state.json");
@@ -1714,7 +2045,7 @@ async function main(): Promise<void> {
     console.log(`Cases: ${totalCases}`);
     console.log(`Already recorded: ${recordedSelectedCases}`);
     console.log(`Pending: ${pendingCases}`);
-    console.log(`Mode: ${options.run ? "run" : "plan"}`);
+    console.log(`Mode: ${options.run ? "run" : "plan"}, search=${options.mode}`);
 
     for (const project of projects) {
         const pendingInProject = project.cases.filter((benchmarkCase) => !completedKeys.has(resultKey(project.name, benchmarkCase.id))).length;
@@ -1879,6 +2210,32 @@ async function main(): Promise<void> {
     console.log(`Wrote report to ${reportPath}`);
 }
 
+async function main(): Promise<void> {
+    const options = parseArgs(process.argv.slice(2));
+    if (options.mode !== "compare") {
+        await runBenchmark(options);
+        return;
+    }
+
+    const fixedOptions: RunnerOptions = {
+        ...options,
+        mode: "fixed",
+        outDir: path.join(options.outDir, "fixed"),
+    };
+    const autoOptions: RunnerOptions = {
+        ...options,
+        mode: "auto",
+        outDir: path.join(options.outDir, "auto"),
+    };
+    await runBenchmark(fixedOptions);
+    await runBenchmark(autoOptions);
+
+    if (options.run || options.rescoreExisting) {
+        const comparisonPath = writeAutoTopKComparison(options.outDir);
+        console.log(`Wrote fixed-vs-auto comparison to ${comparisonPath}`);
+    }
+}
+
 const isMainModule = process.argv[1] !== undefined
     && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
@@ -1896,6 +2253,7 @@ export {
     auditProjectsForPlan,
     classifyFailure,
     clearCompletedProjectIndex,
+    buildAutoTopKComparison,
     ensureProjectIndex,
     getAuditRefreshNeededRecords,
     getUnscorableBenchmarkCases,

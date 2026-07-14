@@ -442,12 +442,13 @@ test("get_indexing_status not-indexed response recommends project ignore file", 
     });
 });
 
-test("search_code uses a bounded default when limit is omitted", async () => {
+test("search_code enables automatic TopK with the default 3/12 bounds when limit is omitted", async () => {
     await withTempDir(async (tempRoot) => {
         const project = path.join(tempRoot, "repo");
         await mkdir(project, { recursive: true });
 
         let requestedTopK: number | undefined;
+        let requestedAutoTopK: any;
         const context = {
             getVectorDatabase: () => ({
                 listCollections: async () => []
@@ -455,8 +456,17 @@ test("search_code uses a bounded default when limit is omitted", async () => {
             getEmbedding: () => ({
                 getProvider: () => "test"
             }),
-            semanticSearch: async (_codebasePath: string, _query: string, topK: number) => {
+            semanticSearch: async (_codebasePath: string, _query: string, topK: number, _threshold: number, _filter: unknown, options: any) => {
                 requestedTopK = topK;
+                requestedAutoTopK = options.autoTopK;
+                options.autoTopK?.onDecision({
+                    selectedResults: 5,
+                    minResults: 3,
+                    maxResults: 12,
+                    availableResults: 8,
+                    signal: "rerank",
+                    reason: "significant_score_gap",
+                });
                 return [{
                     content: "function runSearch() {}",
                     relativePath: "src/search.ts",
@@ -482,8 +492,11 @@ test("search_code uses a bounded default when limit is omitted", async () => {
         });
 
         assert.equal(result.isError, undefined);
-        assert.equal(requestedTopK, 10);
+        assert.equal(requestedTopK, 12);
+        assert.equal(requestedAutoTopK.minResults, 3);
+        assert.equal(requestedAutoTopK.useVectorFallback, true);
         assert.match(result.content[0].text, /Found 1 results/);
+        assert.match(result.content[0].text, /Auto TopK: 5\/12, signal=rerank, reason=significant_score_gap/);
     });
 });
 
@@ -854,17 +867,19 @@ test("search_code uses collection metadata to recover the real indexed root for 
     });
 });
 
-test("search_code uses project searchTopK and searchThreshold when explicit limit is omitted", async () => {
+test("search_code uses project automatic TopK bounds and searchThreshold when limit is omitted", async () => {
     await withTempDir(async (tempRoot) => {
         const project = path.join(tempRoot, "repo");
         await mkdir(project, { recursive: true });
         await writeProjectConfig(project, {
-            searchTopK: 7,
+            searchAutoTopKMin: 4,
+            searchAutoTopKMax: 9,
             searchThreshold: 0.12
         });
 
         let requestedTopK: number | undefined;
         let requestedThreshold: number | undefined;
+        let requestedAutoTopK: any;
         const context = {
             getVectorDatabase: () => ({
                 listCollections: async () => []
@@ -876,10 +891,13 @@ test("search_code uses project searchTopK and searchThreshold when explicit limi
                 _codebasePath: string,
                 _query: string,
                 topK: number,
-                threshold: number
+                threshold: number,
+                _filter: unknown,
+                options: any,
             ) => {
                 requestedTopK = topK;
                 requestedThreshold = threshold;
+                requestedAutoTopK = options.autoTopK;
                 return [{
                     content: "function runSearch() {}",
                     relativePath: "src/search.ts",
@@ -905,17 +923,19 @@ test("search_code uses project searchTopK and searchThreshold when explicit limi
         });
 
         assert.equal(result.isError, undefined);
-        assert.equal(requestedTopK, 7);
+        assert.equal(requestedTopK, 9);
         assert.equal(requestedThreshold, 0.12);
+        assert.equal(requestedAutoTopK.minResults, 4);
     });
 });
 
-test("search_code falls back when configured searchTopK or searchThreshold are invalid", async () => {
+test("search_code falls back to automatic 3/12 bounds when automatic configuration is invalid", async () => {
     await withTempDir(async (tempRoot) => {
         const project = path.join(tempRoot, "repo");
         await mkdir(project, { recursive: true });
         await writeProjectConfig(project, {
-            searchTopK: -1,
+            searchAutoTopKMin: -1,
+            searchAutoTopKMax: 99,
             searchThreshold: -0.5
         });
 
@@ -932,10 +952,13 @@ test("search_code falls back when configured searchTopK or searchThreshold are i
                 _codebasePath: string,
                 _query: string,
                 topK: number,
-                threshold: number
+                threshold: number,
+                _filter: unknown,
+                options: any,
             ) => {
                 requestedTopK = topK;
                 requestedThreshold = threshold;
+                assert.equal(options.autoTopK.minResults, 3);
                 return [{
                     content: "function runSearch() {}",
                     relativePath: "src/search.ts",
@@ -961,7 +984,7 @@ test("search_code falls back when configured searchTopK or searchThreshold are i
         });
 
         assert.equal(result.isError, undefined);
-        assert.equal(requestedTopK, 10);
+        assert.equal(requestedTopK, 12);
         assert.equal(requestedThreshold, 0.3);
     });
 });
@@ -1398,6 +1421,7 @@ test("search_code keeps explicit limit as an override", async () => {
         await mkdir(project, { recursive: true });
 
         let requestedTopK: number | undefined;
+        let requestedAutoTopK: any;
         const context = {
             getVectorDatabase: () => ({
                 listCollections: async () => []
@@ -1405,8 +1429,9 @@ test("search_code keeps explicit limit as an override", async () => {
             getEmbedding: () => ({
                 getProvider: () => "test"
             }),
-            semanticSearch: async (_codebasePath: string, _query: string, topK: number) => {
+            semanticSearch: async (_codebasePath: string, _query: string, topK: number, _threshold: number, _filter: unknown, options: any) => {
                 requestedTopK = topK;
+                requestedAutoTopK = options.autoTopK;
                 return [{
                     content: "function runSearch() {}",
                     relativePath: "src/search.ts",
@@ -1434,6 +1459,51 @@ test("search_code keeps explicit limit as an override", async () => {
 
         assert.equal(result.isError, undefined);
         assert.equal(requestedTopK, 3);
+        assert.equal(requestedAutoTopK, undefined);
+    });
+});
+
+test("search_code uses searchTopK only when automatic TopK is disabled", async () => {
+    await withTempDir(async (tempRoot) => {
+        const project = path.join(tempRoot, "repo");
+        await mkdir(project, { recursive: true });
+        await writeProjectConfig(project, {
+            searchAutoTopK: false,
+            searchTopK: 7,
+        });
+
+        let requestedTopK: number | undefined;
+        let requestedAutoTopK: unknown;
+        const context = {
+            getVectorDatabase: () => ({ listCollections: async () => [] }),
+            getEmbedding: () => ({ getProvider: () => "test" }),
+            semanticSearch: async (_codebasePath: string, _query: string, topK: number, _threshold: number, _filter: unknown, options: any) => {
+                requestedTopK = topK;
+                requestedAutoTopK = options.autoTopK;
+                return [{
+                    content: "function runSearch() {}",
+                    relativePath: "src/search.ts",
+                    startLine: 1,
+                    endLine: 1,
+                    language: "typescript",
+                    score: 1,
+                }];
+            },
+        } as any;
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(project, {
+            indexedFiles: 4,
+            totalChunks: 37,
+            status: "completed",
+        });
+        snapshotManager.saveCodebaseSnapshot();
+        const handlers = new ToolHandlers(context, snapshotManager);
+
+        const result = await handlers.handleSearchCode({ path: project, query: "runSearch" });
+
+        assert.equal(result.isError, undefined);
+        assert.equal(requestedTopK, 7);
+        assert.equal(requestedAutoTopK, undefined);
     });
 });
 
@@ -1703,10 +1773,10 @@ test("search_code passes target role options and formats grouped results", async
         });
 
         assert.equal(result.isError, undefined);
-        assert.deepEqual(requestedOptions, {
-            targetRole: "test",
-            includeRelated: false
-        });
+        assert.equal(requestedOptions.targetRole, "test");
+        assert.equal(requestedOptions.includeRelated, false);
+        assert.equal(requestedOptions.autoTopK.minResults, 3);
+        assert.equal(requestedOptions.autoTopK.useVectorFallback, true);
         assert.match(result.content[0].text, /## Implementation matches/);
         assert.match(result.content[0].text, /## Related tests/);
         assert.match(result.content[0].text, /Match signals: semantic_match/);

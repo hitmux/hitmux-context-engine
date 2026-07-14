@@ -23,6 +23,8 @@ import {
 } from './vectordb';
 import {
     SearchResultGroup,
+    SearchAutoTopKDecision,
+    SearchAutoTopKOptions,
     SearchScoreReason,
     SearchTargetRole,
     SemanticSearchFilenameLikeQuery,
@@ -59,6 +61,7 @@ import {
 } from './search/definition-identifiers';
 import { diversifySemanticSearchResultsByFile } from './search/result-diversify';
 import { deduplicateSemanticSearchResults, getNormalizedContentHash } from './search/result-dedupe';
+import { selectAutoTopK } from './search/auto-top-k';
 import {
     ExternalRerankConfig,
     externalRerankSemanticSearchResults,
@@ -294,6 +297,7 @@ interface NormalizedSemanticSearchOptions {
     includeRelated: boolean;
     enableLexicalSupplement: boolean;
     filenameLikeQuery?: SemanticSearchFilenameLikeQuery;
+    autoTopK?: SearchAutoTopKOptions;
 }
 
 interface StructuralSearchTerms {
@@ -358,6 +362,8 @@ const LEXICAL_SUPPLEMENT_TIMEOUT_MS = 1500;
 const SEARCH_CANDIDATE_LIMIT_MULTIPLIER = 4;
 const SEARCH_CANDIDATE_LIMIT_MIN = 80;
 const SEARCH_CANDIDATE_LIMIT_MAX = 200;
+const AUTO_TOP_K_STRUCTURAL_MINIMUM = 4;
+const AUTO_TOP_K_STRUCTURAL_MINIMUM_WITH_RELATED_RESULTS = 5;
 
 const DEFAULT_SUPPORTED_EXTENSIONS = [
     // Programming languages
@@ -1415,10 +1421,10 @@ export class Context {
             console.log(`[Context] 🔍 Raw search results count: ${searchResults.length}`);
 
             // 4. Convert to semantic search result format
-            const results: SemanticSearchResult[] = searchResults.map(result => this.vectorSearchResultToSemanticSearchResult(
-                result.document,
-                result.score
-            ));
+            const results: SemanticSearchResult[] = searchResults.map(result => ({
+                ...this.vectorSearchResultToSemanticSearchResult(result.document, result.score),
+                retrievalScore: result.score,
+            }));
 
             const rankedResults = await this.withSearchStageTimeout(
                 'adding lexical search results',
@@ -1434,7 +1440,15 @@ export class Context {
                 query,
                 deadlineMs
             );
-            const dedupedResults = this.applySearchResultGrouping(rerankedResults, searchOptions, query, filterExpr, outputLimit);
+            const selectedLimit = this.resolveAutoTopKLimit(
+                rerankedResults,
+                outputLimit,
+                searchOptions,
+                true,
+                query,
+                filterExpr,
+            );
+            const dedupedResults = this.applySearchResultGrouping(rerankedResults, searchOptions, query, filterExpr, selectedLimit);
             console.log(`[Context] ✅ Found ${results.length} results, ${dedupedResults.length} after dedup`);
             if (dedupedResults.length > 0) {
                 console.log(`[Context] 🔍 Top result score: ${dedupedResults[0].score}, path: ${dedupedResults[0].relativePath}`);
@@ -1473,10 +1487,10 @@ export class Context {
             );
 
             // 3. Convert to semantic search result format
-            const results: SemanticSearchResult[] = searchResults.map(result => this.vectorSearchResultToSemanticSearchResult(
-                result.document,
-                result.score
-            ));
+            const results: SemanticSearchResult[] = searchResults.map(result => ({
+                ...this.vectorSearchResultToSemanticSearchResult(result.document, result.score),
+                retrievalScore: result.score,
+            }));
 
             const rankedResults = await this.withSearchStageTimeout(
                 'adding lexical search results',
@@ -1492,7 +1506,15 @@ export class Context {
                 query,
                 deadlineMs
             );
-            const dedupedResults = this.applySearchResultGrouping(rerankedResults, searchOptions, query, filterExpr, outputLimit);
+            const selectedLimit = this.resolveAutoTopKLimit(
+                rerankedResults,
+                outputLimit,
+                searchOptions,
+                false,
+                query,
+                filterExpr,
+            );
+            const dedupedResults = this.applySearchResultGrouping(rerankedResults, searchOptions, query, filterExpr, selectedLimit);
             console.log(`[Context] ✅ Found ${results.length} results, ${dedupedResults.length} after dedup`);
             return dedupedResults;
         }
@@ -1500,6 +1522,115 @@ export class Context {
 
     private normalizeSearchOutputLimit(topK: number): number {
         return Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 5;
+    }
+
+    private resolveAutoTopKLimit(
+        results: SemanticSearchResult[],
+        outputLimit: number,
+        options: NormalizedSemanticSearchOptions,
+        isHybrid: boolean,
+        query: string,
+        filterExpr: string | undefined,
+    ): number {
+        if (!options.autoTopK) {
+            return outputLimit;
+        }
+
+        const decision = this.preserveAutoTopKResultStructure(
+            selectAutoTopK(results, outputLimit, options.autoTopK, isHybrid),
+            results,
+            options,
+            query,
+            filterExpr,
+        );
+        this.notifyAutoTopKDecision(options.autoTopK.onDecision, decision);
+        console.log(
+            `[Context] Auto TopK: ${decision.selectedResults}/${decision.maxResults}, signal=${decision.signal}, reason=${decision.reason}`,
+        );
+        return decision.selectedResults;
+    }
+
+    private preserveAutoTopKResultStructure(
+        decision: SearchAutoTopKDecision,
+        results: SemanticSearchResult[],
+        options: NormalizedSemanticSearchOptions,
+        query: string,
+        filterExpr: string | undefined,
+    ): SearchAutoTopKDecision {
+        const structuralMinimum = this.getAutoTopKStructuralMinimum(
+            decision,
+            results,
+            options,
+            query,
+            filterExpr,
+        );
+        if (
+            decision.selectedResults >= structuralMinimum
+            || options.targetRole === 'all'
+            || !options.includeRelated
+            || this.hasStrongScoreEvidence(results.slice(0, decision.selectedResults))
+        ) {
+            return decision;
+        }
+
+        return {
+            ...decision,
+            selectedResults: Math.min(
+                structuralMinimum,
+                decision.maxResults,
+                decision.availableResults,
+            ),
+        };
+    }
+
+    private getAutoTopKStructuralMinimum(
+        decision: SearchAutoTopKDecision,
+        results: SemanticSearchResult[],
+        options: NormalizedSemanticSearchOptions,
+        query: string,
+        filterExpr: string | undefined,
+    ): number {
+        if (options.targetRole === 'all' || !options.includeRelated) {
+            return AUTO_TOP_K_STRUCTURAL_MINIMUM;
+        }
+
+        const roleIntent = this.getSearchFileRoleIntent(query, filterExpr, options.targetRole);
+        let primaryCount = 0;
+        let relatedCount = 0;
+        for (const result of results) {
+            const fileRole = this.resolveResultFileRole(result);
+            if (this.isPrimarySearchResult(fileRole, options.targetRole, roleIntent, result.relativePath, query)) {
+                primaryCount += 1;
+            } else {
+                relatedCount += 1;
+            }
+        }
+
+        // A related reserve in a four-result response would displace the fourth
+        // primary implementation. Keep room for four primary results plus one related result.
+        return relatedCount > 0 && primaryCount >= decision.selectedResults
+            ? AUTO_TOP_K_STRUCTURAL_MINIMUM_WITH_RELATED_RESULTS
+            : AUTO_TOP_K_STRUCTURAL_MINIMUM;
+    }
+
+    private hasStrongScoreEvidence(results: SemanticSearchResult[]): boolean {
+        return results.some(result => {
+            const reasons = result.scoreReasons ?? (result.scoreReason ? [result.scoreReason] : []);
+            return reasons.includes('exact_filename')
+                || reasons.includes('exact_symbol_definition')
+                || reasons.includes('path_match');
+        });
+    }
+
+    private notifyAutoTopKDecision(
+        onDecision: ((decision: SearchAutoTopKDecision) => void) | undefined,
+        decision: SearchAutoTopKDecision,
+    ): void {
+        try {
+            onDecision?.(decision);
+        } catch (error) {
+            console.warn(`[Context] Auto TopK decision callback failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }
 
     private getSearchCandidateLimit(outputLimit: number): number {
@@ -1592,6 +1723,7 @@ export class Context {
             targetRole: this.isSearchTargetRole(options.targetRole) ? options.targetRole : 'implementation',
             includeRelated: options.includeRelated !== false,
             enableLexicalSupplement: options.enableLexicalSupplement !== false,
+            ...(options.autoTopK ? { autoTopK: options.autoTopK } : {}),
             ...(explicitFilenameLikeQuery ?? inferredFilenameLikeQuery
                 ? { filenameLikeQuery: explicitFilenameLikeQuery ?? inferredFilenameLikeQuery }
                 : {})
@@ -1798,6 +1930,7 @@ export class Context {
             roleSortPriority: _roleSortPriority,
             ownerSignalPriority: _ownerSignalPriority,
             structureScore: _structureScore,
+            retrievalScore: _retrievalScore,
             ...strippedResult
         } = result;
         return strippedResult;
