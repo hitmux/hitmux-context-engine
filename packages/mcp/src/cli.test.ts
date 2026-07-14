@@ -179,7 +179,7 @@ test("status, clear, repair, and search map to ToolHandlers", async () => {
         createRuntime: () => createFakeRuntime(calls),
     };
 
-    assert.equal(await runCliCommand(["status", "/tmp", "--refresh"], options), 0);
+    assert.equal(await runCliCommand(["status", "/tmp", "--refresh", "--details"], options), 0);
     assert.equal(await runCliCommand(["clear", "/tmp"], options), 0);
     assert.equal(await runCliCommand(["repair", "/tmp"], options), 0);
     assert.equal(
@@ -199,7 +199,7 @@ test("status, clear, repair, and search map to ToolHandlers", async () => {
     );
 
     assert.deepEqual(calls, [
-        { tool: "status", args: { path: "/tmp", refresh: true } },
+        { tool: "status", args: { path: "/tmp", refresh: true, details: true } },
         { tool: "clear", args: { path: "/tmp" } },
         { tool: "repair", args: { path: "/tmp" } },
         {

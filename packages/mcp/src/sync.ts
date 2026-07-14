@@ -449,7 +449,10 @@ export class SyncManager {
                     lockScope,
                 );
                 console.log(`[SYNC-DEBUG] Skipping automatic sync: ${warning}`);
-                this.snapshotManager.setCodebaseSyncWarning(codebasePath, warning);
+                this.snapshotManager.setCodebaseSyncWarning(
+                    codebasePath,
+                    warning,
+                );
                 await this.snapshotManager.saveCodebaseSnapshotAsync();
                 return { added: 0, removed: 0, modified: 0, warning };
             }
@@ -551,7 +554,11 @@ export class SyncManager {
                 }
                 const warning = `Automatic incremental indexing paused: detected ${error.effectiveLines} effective lines across ${error.changedFiles} added/modified file(s), exceeding the ${error.threshold} line limit. Check whether this is a large batch of files that should be added to .hceignore. If the files should be indexed, review the change set and run index_codebase with incremental=true from MCP.`;
                 console.warn(`[SYNC] ${warning}`);
-                this.snapshotManager.setCodebaseSyncWarning(codebasePath, warning);
+                this.snapshotManager.setCodebaseSyncWarning(
+                    codebasePath,
+                    warning,
+                    error.fileChanges,
+                );
                 await this.snapshotManager.saveCodebaseSnapshotAsync();
                 return { added: 0, removed: 0, modified: 0 };
             }

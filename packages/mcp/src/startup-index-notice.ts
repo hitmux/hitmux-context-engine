@@ -1,10 +1,16 @@
 import { resolve } from "node:path";
 
 export const CURRENT_DIRECTORY_NOT_INDEXED_NOTICE =
-    "The current working directory is not indexed; use index_codebase with its absolute path to create an index.";
+    "Current working directory is not indexed; use index_codebase with its absolute path to create an index.";
+
+export const CURRENT_DIRECTORY_INDEXED_NOTICE =
+    "Current working directory is indexed; use the available tools directly.";
+
+export const UNINDEXED_TOOL_LIST_NOTICE =
+    "Current working directory is not indexed; create an index only when the user explicitly requests it.";
 
 export const UNINDEXED_TOOL_DETAIL_DESCRIPTION =
-    "The current working directory is not indexed; call tool_detail only when you need the complete index_codebase parameters.";
+    `${UNINDEXED_TOOL_LIST_NOTICE} Call tool_detail only for complete index_codebase parameters.`;
 
 interface IndexedCodebaseLookup {
     findIndexedCodebasePath(codebasePath: string): string | undefined;

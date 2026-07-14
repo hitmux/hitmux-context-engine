@@ -33,9 +33,11 @@ import { ToolHandlers } from "./handlers.js";
 import { dispatchMcpTool } from "./tool-dispatch.js";
 import { isHceDebugEnabled } from "./logger.js";
 import {
+    CURRENT_DIRECTORY_INDEXED_NOTICE,
     CURRENT_DIRECTORY_NOT_INDEXED_NOTICE,
     getCurrentDirectoryIndexNotice,
     prependStartupIndexNotice,
+    UNINDEXED_TOOL_LIST_NOTICE,
     UNINDEXED_TOOL_DETAIL_DESCRIPTION,
 } from "./startup-index-notice.js";
 import { UpdateChecker } from "./update-checker.js";
@@ -244,17 +246,7 @@ class ContextMcpServer {
 
     private setupTools() {
         const index_description = `
-Index a directory/context root to enable semantic search over indexed context.
-
-**IMPORTANT**:
-- You MUST provide an absolute path to the target directory/context root.
-
-**Usage Guidance**:
-- This tool is typically used when search fails due to an unindexed directory/context root.
-- Before first indexing, create a project ignore file such as .hceignore when generated, large, or private paths should be excluded.
-- The indexer automatically loads .*ignore files it finds in the project tree, including .hceignore, .gitignore, and .cursorignore. Use ignoreFiles only for extra non-default ignore file paths.
-- For an already indexed directory/context root, prefer incremental=true to manually sync added, modified, removed, or newly ignored files without rebuilding the full index.
-- Use force=true only when a full rebuild is required, such as after changing embedding configuration, splitter/schema compatibility, or when index/snapshot state is no longer trustworthy. Force re-indexing drops the existing index and should not be the default fix for ordinary file changes.
+Index an absolute directory/context root for semantic search. Before first indexing, add .hceignore for generated, large, or private paths. The indexer automatically loads discovered .*ignore files, including .hceignore, .gitignore, and .cursorignore; use ignoreFiles only for additional files. Use incremental=true to sync an indexed root without rebuilding after added, modified, removed, or newly ignored files. Use force=true only after embedding, splitter/schema compatibility changes or when index/snapshot state is untrusted; it drops and recreates the index.
 `;
 
         const indexCodebaseInputSchema = {
@@ -262,24 +254,24 @@ Index a directory/context root to enable semantic search over indexed context.
             properties: {
                 path: {
                     type: "string",
-                    description: `ABSOLUTE path to the directory/context root to index.`,
+                    description: "Absolute directory/context root to index.",
                 },
                 force: {
                     type: "boolean",
                     description:
-                        "Full rebuild for exceptional cases only. Drops and recreates the existing index; prefer incremental=true for ordinary added, modified, removed, or newly ignored files.",
+                        "Exceptional full rebuild that drops and recreates the index. Use incremental=true for ordinary file or ignore changes.",
                     default: false,
                 },
                 incremental: {
                     type: "boolean",
                     description:
-                        "Manually sync an already indexed directory/context root without dropping or rebuilding the full index. Handles added, modified, removed, and newly ignored files. Use this for normal index updates and after reviewing a large automatic incremental-sync warning. Cannot be combined with force=true or dryRun=true.",
+                        "Sync an indexed root without rebuilding for normal updates or after reviewing a large automatic-sync warning. Handles added, modified, removed, and newly ignored files. Cannot combine with force=true or dryRun=true.",
                     default: false,
                 },
                 splitter: {
                     type: "string",
                     description:
-                        "Optional code splitter override: 'ast' for syntax-aware splitting with automatic fallback, 'langchain' for character-based splitting. Omit to use config.splitterType, then ast.",
+                        "Optional override: ast for syntax-aware splitting with fallback; langchain for character-based splitting. Defaults to config.splitterType, then ast.",
                     enum: ["ast", "langchain"],
                 },
                 customExtensions: {
@@ -288,7 +280,7 @@ Index a directory/context root to enable semantic search over indexed context.
                         type: "string",
                     },
                     description:
-                        "Optional: Additional file extensions to include beyond defaults (e.g., ['.vue', '.svelte', '.astro']). Extensions should include the dot prefix or will be automatically added",
+                        "Additional extensions beyond defaults (e.g., ['.vue', '.svelte', '.astro']). Include the dot prefix or it is added automatically.",
                     default: [],
                 },
                 ignorePatterns: {
@@ -297,7 +289,7 @@ Index a directory/context root to enable semantic search over indexed context.
                         type: "string",
                     },
                     description:
-                        "Optional: Additional ignore patterns to exclude specific files/directories beyond defaults. Only include this parameter if the user explicitly requests custom ignore patterns (e.g., ['static/**', '*.tmp', 'private/**'])",
+                        "Additional ignore patterns beyond defaults. Set only when the user explicitly requests them (e.g., ['static/**', '*.tmp', 'private/**']).",
                     default: [],
                 },
                 ignoreFiles: {
@@ -306,19 +298,19 @@ Index a directory/context root to enable semantic search over indexed context.
                         type: "string",
                     },
                     description:
-                        "Optional: Additional ignore files to load beyond automatically discovered .*ignore files. Relative paths are resolved from the context root (e.g., ['config/index.ignore']).",
+                        "Additional ignore files beyond automatically discovered .*ignore files. Relative paths use the context root (e.g., ['config/index.ignore']).",
                     default: [],
                 },
                 maxDepth: {
                     type: "number",
                     description:
-                        "Optional: Maximum directory depth to traverse from the context root. 0 indexes only files directly in the root.",
+                        "Maximum traversal depth from the context root. 0 indexes only files directly in the root.",
                     minimum: 0,
                 },
                 dryRun: {
                     type: "boolean",
                     description:
-                        "Preview the files that would be indexed without creating collections, embedding, or writing index data.",
+                        "Preview files that would be indexed without creating collections, embedding, or writing index data.",
                     default: false,
                 },
             },
@@ -364,29 +356,7 @@ Index a directory/context root to enable semantic search over indexed context.
         });
 
         const search_description = `
-Search indexed context within a specified absolute path.
-
-**IMPORTANT**:
-- You MUST provide an absolute path.
-
-**When to Use**:
-This tool is versatile and can be used before completing various tasks to retrieve relevant context:
-- **Documents and notes**: Find relevant sections in indexed Markdown, text, notebooks, and other supported files
-- **Code search**: Find functions, classes, implementations, tests, or configuration
-- **Context-aware assistance**: Gather relevant context before answering, editing, or reviewing
-
-**Usage Guidance**:
-- If the directory/context root is not indexed, this tool will return a clear error message indicating that indexing is required first and recommending a project ignore file such as .hceignore.
-- You can then use the index_codebase tool to index the directory/context root before searching again.
-- What gets indexed is controlled by ignore files such as .hceignore, .gitignore, and other .*ignore files.
-- By default this tool searches all indexed context. Use scope='docs' for docs only or scope='code' for code only.
-- Use focused queries with relevant filenames, headings, identifiers, path words, or domain terms.
-
-**Good query style**:
-- "authentication middleware token validation"
-- "AuthMiddleware validateToken bearer token"
-- "pricing table renewal policy"
-- "database migration schema version rollback"
+Search indexed context in an absolute path. If the root is unindexed, the tool reports that indexing is required and recommends .hceignore; then use index_codebase before searching again. Indexed files follow .hceignore, .gitignore, and other discovered .*ignore files. It searches all context by default; use scope='docs' or scope='code' to filter. Use focused filenames, headings, identifiers, path words, or domain terms.
 `;
 
         // Define available tools
@@ -394,6 +364,11 @@ This tool is versatile and can be used before completing various tasks to retrie
             const startupIndexNotice = getCurrentDirectoryIndexNotice(
                 this.snapshotManager,
             );
+            const fullToolListNotice =
+                startupIndexNotice ?? CURRENT_DIRECTORY_INDEXED_NOTICE;
+            const indexedToolListNotice = startupIndexNotice
+                ? undefined
+                : CURRENT_DIRECTORY_INDEXED_NOTICE;
             if (
                 startupIndexNotice &&
                 (configManager.getBoolean("restrictToolsWhenUnindexed") ?? true)
@@ -407,6 +382,7 @@ This tool is versatile and can be used before completing various tasks to retrie
                         },
                         {
                             name: "index_codebase",
+                            description: UNINDEXED_TOOL_LIST_NOTICE,
                             inputSchema: compactIndexCodebaseInputSchema,
                         },
                     ],
@@ -419,7 +395,7 @@ This tool is versatile and can be used before completing various tasks to retrie
                         name: "index_codebase",
                         description: prependStartupIndexNotice(
                             index_description,
-                            startupIndexNotice,
+                            fullToolListNotice,
                         ),
                         inputSchema: indexCodebaseInputSchema,
                     },
@@ -427,25 +403,25 @@ This tool is versatile and can be used before completing various tasks to retrie
                         name: "search_context",
                         description: prependStartupIndexNotice(
                             search_description,
-                            startupIndexNotice,
+                            fullToolListNotice,
                         ),
                         inputSchema: {
                             type: "object",
                             properties: {
                                 path: {
                                     type: "string",
-                                    description: `ABSOLUTE path to the indexed directory to search in.`,
+                                    description: "Absolute indexed directory/context root to search.",
                                 },
                                 query: {
                                     type: "string",
                                     description:
-                                        "Focused search query. Include relevant filenames, headings, identifiers, path words, or domain terms when useful.",
+                                        "Focused query; include filenames, headings, identifiers, path words, or domain terms when useful.",
                                 },
                                 limit: {
                                     type: "number",
                                     default: 10,
                                     description:
-                                        "Maximum number of results to return. Default to 10 and use 10 for normal searches; set a different value only when the user explicitly asks for more or fewer results.",
+                                        "Maximum results. Default to 10; change only when the user explicitly asks for more or fewer.",
                                 },
                                 scope: {
                                     type: "string",
@@ -455,7 +431,7 @@ This tool is versatile and can be used before completing various tasks to retrie
                                         "code",
                                     ],
                                     description:
-                                        "Optional search scope. Defaults to all. Use docs for docs only, code for code only, or all for every indexed file role.",
+                                        "Optional scope: all by default, docs for docs only, code for code only.",
                                     default: "all",
                                 },
                             },
@@ -465,13 +441,16 @@ This tool is versatile and can be used before completing various tasks to retrie
                     },
                     {
                         name: "clear_index",
-                        description: `Clear the search index. IMPORTANT: You MUST provide an absolute path.`,
+                        description: prependStartupIndexNotice(
+                            "Clear the search index for an absolute directory/context root.",
+                            indexedToolListNotice,
+                        ),
                         inputSchema: {
                             type: "object",
                             properties: {
                                 path: {
                                     type: "string",
-                                    description: `ABSOLUTE path to the indexed directory/context root to clear.`,
+                                    description: "Absolute directory/context root to clear.",
                                 },
                             },
                             required: ["path"],
@@ -479,18 +458,27 @@ This tool is versatile and can be used before completing various tasks to retrie
                     },
                     {
                         name: "get_indexing_status",
-                        description: `Get the current indexing status of a directory/context root. Shows progress percentage for active indexing and completion status for indexed context roots.`,
+                        description: prependStartupIndexNotice(
+                            "Get indexing status for an absolute directory/context root, including active progress or completion.",
+                            indexedToolListNotice,
+                        ),
                         inputSchema: {
                             type: "object",
                             properties: {
                                 path: {
                                     type: "string",
-                                    description: `ABSOLUTE path to the directory/context root to check status for.`,
+                                    description: "Absolute directory/context root to check.",
                                 },
                                 refresh: {
                                     type: "boolean",
                                     description:
-                                        "Optional. Defaults to false for fast local snapshot/job status. Set true to probe the vector database and recover remote collection/manifest state.",
+                                        "Defaults to false for fast local snapshot/job status. True probes the vector database and recovers remote collection/manifest state.",
+                                    default: false,
+                                },
+                                details: {
+                                    type: "boolean",
+                                    description:
+                                        "Defaults to false. True lists files and effective-line increases from an oversized automatic incremental-sync warning.",
                                     default: false,
                                 },
                             },
@@ -499,14 +487,16 @@ This tool is versatile and can be used before completing various tasks to retrie
                     },
                     {
                         name: "repair_index_manifest",
-                        description:
-                            "Explicitly migrate or repair legacy remote status for an indexed directory/context root by scanning chunk metadata once and writing the remote index manifest. Use only when get_indexing_status reports a missing remote manifest for an existing collection.",
+                        description: prependStartupIndexNotice(
+                            "Migrate or repair a legacy remote manifest by scanning chunk metadata once and writing the index manifest. Use only when get_indexing_status reports a missing remote manifest for an existing collection.",
+                            indexedToolListNotice,
+                        ),
                         inputSchema: {
                             type: "object",
                             properties: {
                                 path: {
                                     type: "string",
-                                    description: `ABSOLUTE path to the directory/context root whose remote index manifest should be repaired.`,
+                                    description: "Absolute directory/context root whose remote manifest to repair.",
                                 },
                             },
                             required: ["path"],

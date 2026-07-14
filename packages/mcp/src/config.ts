@@ -1,5 +1,8 @@
 import corePackage from "@hitmux/hitmux-context-engine-core";
-import type { CodebaseIdentityMode } from "@hitmux/hitmux-context-engine-core";
+import type {
+    CodebaseIdentityMode,
+    IncrementalIndexFileChange,
+} from "@hitmux/hitmux-context-engine-core";
 
 const { configManager } = corePackage;
 
@@ -86,6 +89,7 @@ export interface CodebaseInfoIndexed extends CodebaseInfoBase {
     indexStatus: "completed" | "limit_reached"; // Status from indexing result
     statsSource?: CodebaseStatsSource; // Missing means a normal full index from older snapshots
     syncWarning?: string; // Warning from automatic incremental sync while preserving the existing index
+    syncWarningDetails?: IncrementalIndexFileChange[]; // Affected files from an oversized automatic incremental sync
 }
 
 // Index failed state - when indexing failed

@@ -10,6 +10,16 @@ export const DEFAULT_RERANK_TIMEOUT_MS = 8000;
 export const DEFAULT_RERANK_MAX_CHARS_PER_DOCUMENT = 6000;
 export const DEFAULT_OPENROUTER_RERANK_BASE_URL = 'https://openrouter.ai/api/v1';
 
+const HITMUX_CLIENT_HEADERS = {
+    'X-Hitmux-Client': 'Hitmux Context Engine'
+} as const;
+
+const OPENROUTER_APP_ATTRIBUTION_HEADERS = {
+    ...HITMUX_CLIENT_HEADERS,
+    'HTTP-Referer': 'https://github.com/hitmux/hitmux-context-engine',
+    'X-OpenRouter-Title': 'Hitmux Context Engine'
+} as const;
+
 export interface ExternalRerankConfig {
     enabled: boolean;
     model: string;
@@ -111,7 +121,7 @@ export async function externalRerankSemanticSearchResults<T extends SemanticSear
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json',
-                'X-Hitmux-Client': 'Hitmux Context Engine'
+                ...getRerankClientHeaders(endpoint)
             },
             body: JSON.stringify({
                 model: config.model,
@@ -251,6 +261,12 @@ function isOpenRouterBaseUrl(value: string | undefined): boolean {
     } catch {
         return false;
     }
+}
+
+function getRerankClientHeaders(endpoint: string): Record<string, string> {
+    return isOpenRouterBaseUrl(endpoint)
+        ? OPENROUTER_APP_ATTRIBUTION_HEADERS
+        : HITMUX_CLIENT_HEADERS;
 }
 
 function appendRerankPath(baseUrl: string): string {

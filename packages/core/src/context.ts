@@ -35,7 +35,10 @@ import { configManager } from './utils/config-manager';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { FileSynchronizer } from './sync/synchronizer';
+import {
+    FileSynchronizer,
+    type IncrementalIndexFileChange,
+} from './sync/synchronizer';
 import { CodebaseIdentityOptions, resolveCodebaseIdentity } from './utils/path-identity';
 import { IgnoreMatcher } from './utils/ignore-matcher';
 import {
@@ -84,7 +87,8 @@ export class IncrementalIndexTooLargeError extends Error {
     constructor(
         public readonly effectiveLines: number,
         public readonly threshold: number,
-        public readonly changedFiles: number
+        public readonly changedFiles: number,
+        public readonly fileChanges: readonly IncrementalIndexFileChange[] = []
     ) {
         super(
             `Automatic incremental indexing paused because ${changedFiles} added/modified file(s) contain ${effectiveLines} effective lines, exceeding the automatic sync limit of ${threshold}. Check whether these files should be ignored in .hceignore. If they should be indexed, run an explicit MCP index_codebase call with incremental=true after reviewing the change set.`
@@ -1093,14 +1097,15 @@ export class Context {
 
         const filesToIndex = [...added, ...modified].map(f => path.join(codebasePath, f));
         if (filesToIndex.length > 0) {
-            const { effectiveLines, changedFiles } = currentSynchronizer.getPendingEffectiveLineIncrease(added, modified);
+            const { effectiveLines, changedFiles, fileChanges } = currentSynchronizer.getPendingEffectiveLineIncrease(added, modified);
             const effectiveLineLimit = this.getAutomaticIncrementalEffectiveLineLimit(codebasePath);
             if (!options.skipEffectiveLineLimit && effectiveLines > effectiveLineLimit) {
                 currentSynchronizer.discardPendingChanges();
                 throw new IncrementalIndexTooLargeError(
                     effectiveLines,
                     effectiveLineLimit,
-                    changedFiles
+                    changedFiles,
+                    fileChanges
                 );
             }
         }

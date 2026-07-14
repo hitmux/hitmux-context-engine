@@ -466,7 +466,13 @@ test("large automatic incremental sync keeps the old index and records a warning
 
         const context = {
             reindexByChange: async () => {
-                throw new IncrementalIndexTooLargeError(5_001, 5_000, 1);
+                throw new IncrementalIndexTooLargeError(5_001, 5_000, 1, [
+                    {
+                        path: "generated/large.ts",
+                        changeType: "added",
+                        effectiveLines: 5_001,
+                    },
+                ]);
             }
         } as any;
         const syncManager = new SyncManager(context, snapshotManager);
@@ -479,6 +485,13 @@ test("large automatic incremental sync keeps the old index and records a warning
         assert.match((info as any).syncWarning, /5001 effective lines/);
         assert.match((info as any).syncWarning, /\.hceignore/);
         assert.match((info as any).syncWarning, /index_codebase with incremental=true/);
+        assert.deepEqual((info as any).syncWarningDetails, [
+            {
+                path: "generated/large.ts",
+                changeType: "added",
+                effectiveLines: 5_001,
+            },
+        ]);
     });
 });
 

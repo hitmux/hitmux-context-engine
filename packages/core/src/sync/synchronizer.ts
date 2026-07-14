@@ -43,6 +43,18 @@ export interface InitializeOptions {
     createSnapshotIfMissing?: boolean;
 }
 
+export interface IncrementalIndexFileChange {
+    path: string;
+    changeType: 'added' | 'modified';
+    effectiveLines: number;
+}
+
+export interface PendingEffectiveLineIncrease {
+    effectiveLines: number;
+    changedFiles: number;
+    fileChanges: IncrementalIndexFileChange[];
+}
+
 export class SnapshotTooLargeError extends Error {
     constructor(message: string) {
         super(message);
@@ -428,16 +440,22 @@ export class FileSynchronizer {
         this.pendingSnapshotUpdate = null;
     }
 
-    public getPendingEffectiveLineIncrease(added: string[], modified: string[]): { effectiveLines: number; changedFiles: number } {
+    public getPendingEffectiveLineIncrease(added: string[], modified: string[]): PendingEffectiveLineIncrease {
         const newStates = this.pendingSnapshotUpdate?.fileStates || this.fileStates;
         let effectiveLines = 0;
         let changedFiles = 0;
+        const fileChanges: IncrementalIndexFileChange[] = [];
 
         for (const file of added) {
             const lines = newStates.get(file)?.effectiveLines || 0;
             if (lines > 0) {
                 effectiveLines += lines;
                 changedFiles++;
+                fileChanges.push({
+                    path: file,
+                    changeType: 'added',
+                    effectiveLines: lines,
+                });
             }
         }
 
@@ -452,10 +470,15 @@ export class FileSynchronizer {
             if (increase > 0) {
                 effectiveLines += increase;
                 changedFiles++;
+                fileChanges.push({
+                    path: file,
+                    changeType: 'modified',
+                    effectiveLines: increase,
+                });
             }
         }
 
-        return { effectiveLines, changedFiles };
+        return { effectiveLines, changedFiles, fileChanges };
     }
 
     private fileStatesEqual(a: Map<string, FileSnapshotState>, b: Map<string, FileSnapshotState>): boolean {

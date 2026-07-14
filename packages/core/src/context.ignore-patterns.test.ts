@@ -572,6 +572,13 @@ describe('Context ignore pattern isolation', () => {
                 effectiveLines: 5_001,
                 threshold: 5_000,
                 changedFiles: 1,
+                fileChanges: [
+                    {
+                        path: 'large.ts',
+                        changeType: 'added',
+                        effectiveLines: 5_001,
+                    },
+                ],
             });
             await expect(context.reindexByChange(project)).rejects.toBeInstanceOf(IncrementalIndexTooLargeError);
             expect(vectorDatabase.insert).not.toHaveBeenCalled();

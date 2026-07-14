@@ -15,6 +15,25 @@ test("compareVersions compares semantic version numbers", () => {
     assert.equal(compareVersions("1.0.0", "0.99.99"), 1);
 });
 
+test("compareVersions follows SemVer prerelease precedence", () => {
+    assert.equal(compareVersions("1.0.0", "1.0.0-beta"), 1);
+    assert.equal(compareVersions("1.0.0-beta", "1.0.0-beta.1"), -1);
+    assert.equal(compareVersions("1.0.0-beta.2", "1.0.0-beta.11"), -1);
+    assert.equal(compareVersions("1.0.0-beta.1", "1.0.0-beta.alpha"), -1);
+    assert.equal(compareVersions("v1.0.0+build.42", "1.0.0"), 0);
+});
+
+test("formatUpdateNotice directs users to their installed CLI package", () => {
+    assert.equal(
+        formatUpdateNotice({
+            packageName: "@hitmux/hitmux-context-engine-mcp",
+            currentVersion: "0.1.20",
+            latestVersion: "0.1.21",
+        }),
+        "Update available: @hitmux/hitmux-context-engine-mcp 0.1.20 -> 0.1.21. Update the globally installed package that provides the hce command (for example, npm update -g @hitmux/hce) or use the latest npx package.",
+    );
+});
+
 test("fetchLatestVersion reads npm latest dist tag", async () => {
     const latestVersion = await fetchLatestVersion({
         packageName: "@hitmux/hitmux-context-engine-mcp",

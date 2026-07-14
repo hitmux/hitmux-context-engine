@@ -84,6 +84,49 @@ test("get_indexing_status refresh=true syncs vector database state before readin
     });
 });
 
+test("get_indexing_status details=true lists files from an oversized incremental sync warning", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 3,
+            totalChunks: 5,
+            status: "completed",
+        });
+        snapshotManager.setCodebaseSyncWarning(
+            codebasePath,
+            "Automatic incremental indexing paused.",
+            [
+                {
+                    path: "generated/schema.ts",
+                    changeType: "added",
+                    effectiveLines: 4_800,
+                },
+                {
+                    path: "src/app.ts",
+                    changeType: "modified",
+                    effectiveLines: 350,
+                },
+            ],
+        );
+        snapshotManager.saveCodebaseSnapshot();
+
+        const handlers = new ToolHandlers({} as any, snapshotManager);
+        const compactResult = await handlers.handleGetIndexingStatus({ path: codebasePath });
+        const detailedResult = await handlers.handleGetIndexingStatus({
+            path: codebasePath,
+            details: true,
+        });
+
+        assert.doesNotMatch(compactResult.content[0].text, /generated\/schema\.ts/);
+        assert.match(detailedResult.content[0].text, /Sync warning details:/);
+        assert.match(detailedResult.content[0].text, /generated\/schema\.ts: added, \+4800 effective lines/);
+        assert.match(detailedResult.content[0].text, /src\/app\.ts: modified, \+350 effective lines/);
+    });
+});
+
 test("get_indexing_status reports job state when global snapshot entry is missing", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");

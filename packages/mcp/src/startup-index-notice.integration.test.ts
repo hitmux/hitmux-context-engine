@@ -14,6 +14,11 @@ import {
     UNINDEXED_TOOL_DETAIL_DESCRIPTION,
 } from "./startup-index-notice.js";
 
+const UNINDEXED_TOOL_LIST_NOTICE =
+    "Current working directory is not indexed; create an index only when the user explicitly requests it.";
+const INDEXED_TOOL_LIST_NOTICE =
+    "Current working directory is indexed; use the available tools directly.";
+
 const require = createRequire(import.meta.url);
 const tsxLoaderPath = require.resolve("tsx");
 const serverEntrypoint = fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -144,15 +149,19 @@ async function writeConfig(
 function assertCompactUnindexedToolList(tools: readonly ListedTool[]): void {
     assert.deepEqual(tools.map((tool) => tool.name), ["tool_detail", "index_codebase"]);
     assert.equal(tools[0]?.description, UNINDEXED_TOOL_DETAIL_DESCRIPTION);
+    assert.match(tools[0]?.description ?? "", new RegExp(UNINDEXED_TOOL_LIST_NOTICE));
     assert.deepEqual(Object.keys(tools[0]?.inputSchema?.properties ?? {}), []);
     assert.equal(tools[0]?.inputSchema?.additionalProperties, false);
-    assert.equal(tools[1]?.description, undefined);
+    assert.equal(tools[1]?.description, UNINDEXED_TOOL_LIST_NOTICE);
     assert.deepEqual(Object.keys(tools[1]?.inputSchema?.properties ?? {}), ["path"]);
     assert.deepEqual(tools[1]?.inputSchema?.required, ["path"]);
     assert.equal(tools[1]?.inputSchema?.additionalProperties, false);
 }
 
-function assertFullToolList(tools: readonly ListedTool[]): void {
+function assertFullToolList(
+    tools: readonly ListedTool[],
+    expectedNotice?: string,
+): void {
     assert.deepEqual(
         tools.map((tool) => tool.name),
         [
@@ -163,6 +172,11 @@ function assertFullToolList(tools: readonly ListedTool[]): void {
             "repair_index_manifest",
         ],
     );
+    if (expectedNotice) {
+        for (const tool of tools) {
+            assert.match(tool.description ?? "", new RegExp(expectedNotice));
+        }
+    }
 }
 
 test("tools/list stays compact until the current directory is indexed", { timeout: 30_000 }, async () => {
@@ -184,7 +198,7 @@ test("tools/list stays compact until the current directory is indexed", { timeou
             assert.ok(toolDetail.includes("force"));
             assert.ok(toolDetail.includes("ignoreFiles"));
             await writeIndexedSnapshot(indexedHome, indexedRoot);
-            assertFullToolList(await listMcpTools(client));
+            assertFullToolList(await listMcpTools(client), INDEXED_TOOL_LIST_NOTICE);
             assert.ok((await getToolDetail(client)).includes("Unknown tool: tool_detail"));
             return undefined;
         });

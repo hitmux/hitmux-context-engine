@@ -2,6 +2,7 @@ import * as fs from "fs";
 import { promises as fsp } from "fs";
 import * as path from "path";
 import * as os from "os";
+import type { IncrementalIndexFileChange } from "@hitmux/hitmux-context-engine-core";
 import {
     CodebaseSnapshot,
     CodebaseSnapshotV1,
@@ -509,26 +510,38 @@ export class SnapshotManager {
         this.codebaseInfoMap.set(codebasePath, info);
     }
 
-    public setCodebaseSyncWarning(codebasePath: string, warning: string): void {
+    public setCodebaseSyncWarning(
+        codebasePath: string,
+        warning: string,
+        details?: readonly IncrementalIndexFileChange[],
+    ): void {
         const info = this.codebaseInfoMap.get(codebasePath);
         if (!info || info.status !== 'indexed') {
             return;
         }
 
+        const { syncWarningDetails: _syncWarningDetails, ...cleanInfo } = info;
         this.codebaseInfoMap.set(codebasePath, {
-            ...info,
+            ...cleanInfo,
             syncWarning: warning,
+            ...(details && details.length > 0
+                ? { syncWarningDetails: details.map(detail => ({ ...detail })) }
+                : {}),
             lastUpdated: new Date().toISOString()
         });
     }
 
     public clearCodebaseSyncWarning(codebasePath: string): void {
         const info = this.codebaseInfoMap.get(codebasePath);
-        if (!info || info.status !== 'indexed' || !info.syncWarning) {
+        if (!info || info.status !== 'indexed' || (!info.syncWarning && !info.syncWarningDetails)) {
             return;
         }
 
-        const { syncWarning: _syncWarning, ...cleanInfo } = info;
+        const {
+            syncWarning: _syncWarning,
+            syncWarningDetails: _syncWarningDetails,
+            ...cleanInfo
+        } = info;
         this.codebaseInfoMap.set(codebasePath, {
             ...cleanInfo,
             lastUpdated: new Date().toISOString()
@@ -546,7 +559,12 @@ export class SnapshotManager {
 
         const fileDelta = stats ? stats.added - stats.removed : 0;
         const indexedFiles = Math.max(0, info.indexedFiles + fileDelta);
-        const { syncWarning: _syncWarning, statsSource: _statsSource, ...cleanInfo } = info;
+        const {
+            syncWarning: _syncWarning,
+            syncWarningDetails: _syncWarningDetails,
+            statsSource: _statsSource,
+            ...cleanInfo
+        } = info;
         this.codebaseFileCount.set(codebasePath, indexedFiles);
         this.codebaseInfoMap.set(codebasePath, {
             ...cleanInfo,

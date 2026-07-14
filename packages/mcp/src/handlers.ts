@@ -11,6 +11,7 @@ import {
     configManager,
     normalizeCodebaseIdentityPath,
     REMOTE_INDEX_MANIFEST_VERSION,
+    type IncrementalIndexFileChange,
     type RemoteIndexManifest,
     type SearchTargetRole,
     type SymbolTraceEvidence,
@@ -1336,6 +1337,18 @@ export class ToolHandlers {
         return `Automatic incremental indexing paused: detected ${error.effectiveLines} effective lines across ${error.changedFiles} added/modified file(s), exceeding the ${error.threshold} line limit. Check whether this is a large batch of files that should be added to .hceignore. If the files should be indexed, review the change set and run index_codebase with incremental=true from MCP.`;
     }
 
+    private formatIncrementalSyncWarningDetails(
+        fileChanges: readonly IncrementalIndexFileChange[],
+    ): string {
+        return [
+            "Sync warning details:",
+            ...fileChanges.map(
+                (change) =>
+                    ` - ${change.path}: ${change.changeType}, +${change.effectiveLines} effective lines`,
+            ),
+        ].join("\n");
+    }
+
     private async refreshCodebaseIndexBeforeSearch(
         codebasePath: string,
         consistencyMode: SearchConsistencyMode,
@@ -1404,6 +1417,7 @@ export class ToolHandlers {
                         this.snapshotManager.setCodebaseSyncWarning(
                             codebasePath,
                             warning,
+                            error.fileChanges,
                         );
                         await this.snapshotManager.saveCodebaseSnapshotAsync();
                         if (consistencyMode === "low_latency") {
@@ -4172,8 +4186,18 @@ export class ToolHandlers {
             return refreshValidation.error;
         }
 
+        const detailsValidation = this.normalizeOptionalBooleanArg(
+            "get_indexing_status",
+            "details",
+            args?.details,
+        );
+        if (detailsValidation.error) {
+            return detailsValidation.error;
+        }
+
         const { path: codebasePath } = args;
         const refreshRemote = refreshValidation.value === true;
+        const showDetails = detailsValidation.value === true;
 
         try {
             const absolutePath = requireAbsolutePath(codebasePath);
@@ -4281,6 +4305,9 @@ export class ToolHandlers {
                         statusMessage += `\n Status: ${indexedInfo.indexStatus}`;
                         if (indexedInfo.syncWarning) {
                             statusMessage += `\n Sync warning: ${indexedInfo.syncWarning}`;
+                            if (showDetails && indexedInfo.syncWarningDetails) {
+                                statusMessage += `\n ${this.formatIncrementalSyncWarningDetails(indexedInfo.syncWarningDetails)}`;
+                            }
                         }
                         if (syncStatusMessage.length > 0) {
                             statusMessage += `\n${syncStatusMessage}`;

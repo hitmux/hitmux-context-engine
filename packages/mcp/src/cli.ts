@@ -82,7 +82,7 @@ export function getCliHelpText(): string {
         " hce doctor [--no-connectivity]",
         "",
         "Index and collection management:",
-        " hce status [path] [--refresh]",
+        " hce status [path] [--refresh] [--details]",
         " hce search <query> [path] [--limit n] [--scope all|docs|code]",
         " hce clear <path>",
         " hce repair <path>",
@@ -365,21 +365,23 @@ interface HandlerCommand {
 
 function parseStatusCommand(args: string[]): HandlerCommand {
     const refresh = args.includes("--refresh");
+    const details = args.includes("--details");
     const unknownFlag = args.find(
-        (arg) => arg.startsWith("--") && arg !== "--refresh",
+        (arg) => arg.startsWith("--") && arg !== "--refresh" && arg !== "--details",
     );
     if (unknownFlag) {
-        throw new CliUsageError("Usage: hce status [path] [--refresh]");
+        throw new CliUsageError("Usage: hce status [path] [--refresh] [--details]");
     }
-    const paths = args.filter((arg) => arg !== "--refresh");
+    const paths = args.filter((arg) => arg !== "--refresh" && arg !== "--details");
     if (paths.length > 1) {
-        throw new CliUsageError("Usage: hce status [path] [--refresh]");
+        throw new CliUsageError("Usage: hce status [path] [--refresh] [--details]");
     }
     return {
         tool: "status",
         args: {
             path: resolveCliPath(paths[0] ?? process.cwd()),
             ...(refresh ? { refresh: true } : {}),
+            ...(details ? { details: true } : {}),
         },
     };
 }
