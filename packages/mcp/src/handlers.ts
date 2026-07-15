@@ -2753,9 +2753,17 @@ export class ToolHandlers {
                             );
                         }
 
+                        const resumeProbe = this.context as unknown as {
+                            hasResumableFullIndex?: (codebasePath: string) => Promise<boolean>;
+                        };
+                        const resumingFullIndex = !forceReindex
+                            && typeof resumeProbe.hasResumableFullIndex === "function"
+                            && await resumeProbe.hasResumableFullIndex(absolutePath);
+
                         // Check if already indexed (unless force is true)
                         if (
                             !forceReindex &&
+                            !resumingFullIndex &&
                             this.snapshotManager
                                 .getIndexedCodebases()
                                 .includes(absolutePath)
@@ -2920,7 +2928,7 @@ export class ToolHandlers {
                             content: [
                                 {
                                     type: "text",
-                                    text: `Started background indexing for codebase '${absolutePath}' using ${splitterType.toUpperCase()} splitter.${pathInfo}${extensionInfo}${ignoreInfo}${ignoreFilesInfo}${maxDepthInfo}\n\nIndexing is running in the background. You can search the codebase while indexing is in progress, but results may be incomplete until indexing completes.`,
+                                    text: `${resumingFullIndex ? 'Resuming interrupted indexing' : 'Started background indexing'} for codebase '${absolutePath}' using ${splitterType.toUpperCase()} splitter.${pathInfo}${extensionInfo}${ignoreInfo}${ignoreFilesInfo}${maxDepthInfo}\n\nIndexing is running in the background. You can search the codebase while indexing is in progress, but results may be incomplete until indexing completes.`,
                                 },
                             ],
                         };

@@ -71,6 +71,10 @@ import {
 import { traceSymbolInFiles } from './search/symbol-trace';
 import { countEffectiveLinesInContent } from './utils/effective-lines';
 import { getKnownFileNameLanguage, isSupportedCodeFileName } from './utils/file-support';
+import {
+    FullIndexResumeJournal,
+    FullIndexResumeSourceChangedError,
+} from './indexing-resume';
 
 const FILE_TOKEN_PATTERN = /(?:^|[\s"'`(<{[])([A-Za-z0-9_.@+~-]+(?:[\\/][A-Za-z0-9_.@+~-]+)*\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})(?=$|[\s"'`),}\]>:;!?])/g;
 
@@ -152,11 +156,15 @@ interface ProcessFileListOptions {
     deferVectorFlushLoad?: boolean;
     ensureCollectionBeforeInsert?: (dimension: number) => Promise<void>;
     knownFileSizes?: Map<string, number>;
+    resumeJournal?: FullIndexResumeJournal;
+    resumeMode?: boolean;
 }
 
 interface ChunkBatchInsertOptions extends InsertOptions {
     ensureCollectionBeforeInsert?: (dimension: number) => Promise<void>;
     abortSignal?: AbortSignal;
+    resumeJournal?: FullIndexResumeJournal;
+    resumeMode?: boolean;
 }
 
 interface IndexingRunCache {
@@ -169,6 +177,7 @@ interface PrepareCollectionOptions {
     rejectExistingFullIndex?: boolean;
     createIfMissing?: boolean;
     dimension?: number;
+    allowExistingFullIndex?: boolean;
     abortSignal?: AbortSignal;
 }
 
@@ -830,6 +839,13 @@ export class Context {
             supportedExtensions,
             requestOptions.maxDepth
         );
+        const collectionName = this.getCollectionName(codebasePath);
+        if (forceReindex) {
+            await FullIndexResumeJournal.clear({ codebasePath, collectionName });
+        }
+        const existingResumeJournal = forceReindex
+            ? undefined
+            : await FullIndexResumeJournal.load({ codebasePath, collectionName });
 
         // 2. Check and prepare vector collection
         progressCallback?.({ phase: 'Preparing collection...', current: 0, total: 100, percentage: 0 });
@@ -840,6 +856,7 @@ export class Context {
             () => this.prepareCollection(codebasePath, forceReindex, splitter, {
                 rejectExistingFullIndex: true,
                 createIfMissing: false,
+                allowExistingFullIndex: existingResumeJournal !== undefined,
                 abortSignal: signal
             })
         );
@@ -884,6 +901,22 @@ export class Context {
         timingMetrics.fileWeightStatMs += fileDiscoveryMetrics.fileStatMs;
         console.log(`[Context] 📁 Found ${codeFiles.length} code files`);
 
+        const runSignature = this.createFullIndexRunSignature({
+            codebasePath,
+            collectionName,
+            splitter,
+            additionalIgnorePatterns,
+            additionalSupportedExtensions,
+            additionalIgnoreFiles: requestOptions.additionalIgnoreFiles || [],
+            maxDepth: requestOptions.maxDepth
+        });
+        if (existingResumeJournal) {
+            existingResumeJournal.validate({ runSignature });
+            existingResumeJournal.assertNoCommittedFileWasRemoved(
+                codeFiles.map((filePath) => path.relative(codebasePath, filePath).replace(/\\/g, '/')),
+            );
+        }
+
         if (codeFiles.length === 0) {
             progressCallback?.({ phase: 'No files to index', current: 100, total: 100, percentage: 100 });
             timingMetrics.totalIndexingMs = this.getMonotonicMs() - indexingStartedAt;
@@ -896,7 +929,17 @@ export class Context {
             }, timingMetrics);
             await this.commitFullIndexBaseline(codebasePath, baselineSynchronizer);
             await this.writeRemoteIndexManifest(codebasePath, 'completed', 0, 0);
+            await existingResumeJournal?.complete();
             return { indexedFiles: 0, totalChunks: 0, status: 'completed' };
+        }
+        const resumeJournal = existingResumeJournal
+            ?? await FullIndexResumeJournal.create({
+                codebasePath,
+                collectionName,
+                runSignature
+            });
+        if (existingResumeJournal) {
+            console.log(`[Context] ▶️ Resuming interrupted full index for ${codebasePath}`);
         }
 
         // 3. Process each file with streaming chunk processing.
@@ -915,29 +958,37 @@ export class Context {
             )
         );
 
-        const result = await this.processFileList(
-            codeFiles,
-            codebasePath,
-            (filePath, fileIndex, totalFiles) => {
-                console.log(`[Context] 📊 Processed ${fileIndex}/${totalFiles} files`);
-                progressTracker.completeFile(filePath, `Processing files (${fileIndex}/${totalFiles})...`);
-            },
-            splitter,
-            signal,
-            (progress) => {
-                progressTracker.updateFile(
-                    progress.filePath,
-                    progress.fileProgress,
-                    `Processing ${path.relative(codebasePath, progress.filePath)} (${progress.processedChunks}/${progress.totalChunks} chunks)...`
-                );
-            },
-            timingMetrics,
-            {
-                deferVectorFlushLoad: true,
-                ensureCollectionBeforeInsert,
-                knownFileSizes: fileDiscoveryMetrics.fileSizes
-            }
-        );
+        let result: Awaited<ReturnType<Context['processFileList']>>;
+        try {
+            result = await this.processFileList(
+                codeFiles,
+                codebasePath,
+                (filePath, fileIndex, totalFiles) => {
+                    console.log(`[Context] 📊 Processed ${fileIndex}/${totalFiles} files`);
+                    progressTracker.completeFile(filePath, `Processing files (${fileIndex}/${totalFiles})...`);
+                },
+                splitter,
+                signal,
+                (progress) => {
+                    progressTracker.updateFile(
+                        progress.filePath,
+                        progress.fileProgress,
+                        `Processing ${path.relative(codebasePath, progress.filePath)} (${progress.processedChunks}/${progress.totalChunks} chunks)...`
+                    );
+                },
+                timingMetrics,
+                {
+                    deferVectorFlushLoad: true,
+                    ensureCollectionBeforeInsert,
+                    knownFileSizes: fileDiscoveryMetrics.fileSizes,
+                    resumeJournal,
+                    resumeMode: existingResumeJournal !== undefined
+                }
+            );
+        } catch (error) {
+            await resumeJournal.flush();
+            throw error;
+        }
 
         await this.measureIndexingStage(
             timingMetrics,
@@ -979,6 +1030,7 @@ export class Context {
             result.processedFiles,
             result.totalChunks
         );
+        await resumeJournal.complete();
 
         return {
             indexedFiles: result.processedFiles,
@@ -3484,6 +3536,18 @@ export class Context {
     }
 
     /**
+     * A pending full-index journal means the collection contains a safe,
+     * resumable prefix rather than a completed index. Callers should prefer
+     * indexCodebase(..., false) over an incremental sync in this state.
+     */
+    async hasResumableFullIndex(codebasePath: string): Promise<boolean> {
+        return FullIndexResumeJournal.exists({
+            codebasePath,
+            collectionName: this.getCollectionName(codebasePath),
+        });
+    }
+
+    /**
      * Clear index
      * @param codebasePath Codebase path to clear index for
      * @param progressCallback Optional progress callback function
@@ -3510,6 +3574,11 @@ export class Context {
         if (collectionExists) {
             await this.vectorDatabase.dropCollection(collectionName);
         }
+
+        // A cleared collection has no resumable prefix. Remove its local
+        // acknowledgement journal as part of the same lifecycle operation so
+        // a later full index cannot skip chunks that no longer exist remotely.
+        await FullIndexResumeJournal.clear({ codebasePath, collectionName });
 
         try {
             await this.vectorDatabase.deleteIndexManifest?.(collectionName, codebasePath);
@@ -3608,6 +3677,15 @@ export class Context {
             const rowCount = await this.vectorDatabase.getCollectionRowCount(collectionName);
             this.throwIfIndexAborted(options.abortSignal);
             if (options.rejectExistingFullIndex) {
+                if (options.allowExistingFullIndex) {
+                    console.log(`[Context] ▶️ Reusing existing collection ${collectionName} for interrupted full-index resume`);
+                    return {
+                        collectionName,
+                        collectionExists: true,
+                        created: false,
+                        creationDeferred: false
+                    };
+                }
                 if (rowCount !== 0) {
                     const rowCountDetails = rowCount > 0 ? ` It currently has ${rowCount} searchable row(s).` : '';
                     throw new ExistingCollectionFullIndexError(
@@ -4083,6 +4161,33 @@ export class Context {
         };
     }
 
+    private createFullIndexRunSignature(input: {
+        codebasePath: string;
+        collectionName: string;
+        splitter: Splitter;
+        additionalIgnorePatterns: string[];
+        additionalSupportedExtensions: string[];
+        additionalIgnoreFiles: string[];
+        maxDepth?: number;
+    }): string {
+        const signature = JSON.stringify({
+            codebasePath: input.codebasePath,
+            collectionName: input.collectionName,
+            splitter: input.splitter.constructor?.name || 'unknown',
+            splitterChunkSize: (input.splitter as unknown as { chunkSize?: unknown }).chunkSize,
+            splitterChunkOverlap: (input.splitter as unknown as { chunkOverlap?: unknown }).chunkOverlap,
+            embeddingProvider: this.embedding.getProvider(),
+            embeddingModel: this.embedding.getModel(),
+            schemaVersion: Context.COLLECTION_SCHEMA_VERSION,
+            metadataVersion: Context.COLLECTION_METADATA_VERSION,
+            additionalIgnorePatterns: input.additionalIgnorePatterns,
+            additionalSupportedExtensions: input.additionalSupportedExtensions,
+            additionalIgnoreFiles: input.additionalIgnoreFiles,
+            maxDepth: input.maxDepth
+        });
+        return crypto.createHash('sha256').update(signature).digest('hex');
+    }
+
     private async createWeightedFileProgressTracker(
         filePaths: string[],
         startPercentage: number,
@@ -4241,7 +4346,10 @@ export class Context {
             const task: Promise<BatchResult> = this.processChunkBuffer(batch, timingMetrics, {
                 deferFlushLoad: options.deferVectorFlushLoad === true,
                 ensureCollectionBeforeInsert: options.ensureCollectionBeforeInsert,
-                abortSignal: signal
+                abortSignal: signal,
+                ...(options.resumeMode === true ? { upsert: true } : {}),
+                resumeJournal: options.resumeJournal,
+                resumeMode: options.resumeMode,
             }, runCache)
                 .then(() => ({ ok: true as const }))
                 .catch((error) => ({ ok: false as const, error }))
@@ -4300,6 +4408,11 @@ export class Context {
                     if (extension === '.ipynb') {
                         content = this.extractNotebookSource(content);
                     }
+                    options.resumeJournal?.prepareFile(
+                        path.relative(codebasePath, filePath).replace(/\\/g, '/'),
+                        content,
+                        options.resumeMode === true,
+                    );
                     const language = this.getLanguageFromFilePath(filePath);
                     const chunks = this.deduplicateFileChunks(
                         await splitter.split(content, language, filePath),
@@ -4313,7 +4426,9 @@ export class Context {
                     }
                 }
             } catch (error) {
-                if (error instanceof EmbeddingError || error instanceof IndexAbortError) {
+                if (error instanceof EmbeddingError
+                    || error instanceof IndexAbortError
+                    || error instanceof FullIndexResumeSourceChangedError) {
                     throw error;
                 }
                 console.warn(`[Context] ⚠️  Skipping file ${filePath}: ${error}`);
@@ -4661,17 +4776,33 @@ export class Context {
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid' : 'regular';
         const collectionName = this.getCollectionName(codebasePath);
+        const resumeJournal = insertOptions.resumeJournal;
+        const pendingChunks = resumeJournal
+            ? chunks.filter((chunk) => {
+                const identity = this.getChunkDocumentIdentity(chunk, codebasePath);
+                return !resumeJournal.isDocumentCommitted(
+                    identity.id,
+                    identity.relativePath,
+                    insertOptions.resumeMode === true,
+                );
+            })
+            : chunks;
+
+        if (pendingChunks.length === 0) {
+            console.log(`[Context] ⏩ Skipping ${chunks.length} checkpointed ${searchType} chunk(s) for ${codebasePath}`);
+            return;
+        }
 
         // Generate embedding vectors
-        const chunkContents = chunks.map(chunk => chunk.content);
+        const chunkContents = pendingChunks.map(chunk => chunk.content);
 
         let embeddings: EmbeddingVector[];
         const embeddingStartedAt = this.getMonotonicMs();
         try {
             this.throwIfIndexAborted(insertOptions.abortSignal);
-            console.log(`[Context] 🧠 Embedding ${chunks.length} ${searchType} chunk(s) for ${codebasePath}`);
+            console.log(`[Context] 🧠 Embedding ${pendingChunks.length} ${searchType} chunk(s) for ${codebasePath}`);
             embeddings = await this.embedChunkContents(chunkContents, runCache);
-            console.log(`[Context] ✅ Embedded ${chunks.length} chunk(s) in ${Math.round(this.getMonotonicMs() - embeddingStartedAt)}ms`);
+            console.log(`[Context] ✅ Embedded ${pendingChunks.length} chunk(s) in ${Math.round(this.getMonotonicMs() - embeddingStartedAt)}ms`);
         } catch (error) {
             if (timingMetrics) {
                 this.drainVectorDatabasePerformanceMetrics(timingMetrics);
@@ -4690,20 +4821,27 @@ export class Context {
             }
         }
         this.throwIfIndexAborted(insertOptions.abortSignal);
-        this.validateEmbeddings(embeddings, chunks.length);
-        const { ensureCollectionBeforeInsert, abortSignal: _abortSignal, ...vectorInsertOptions } = insertOptions;
+        this.validateEmbeddings(embeddings, pendingChunks.length);
+        const {
+            ensureCollectionBeforeInsert,
+            abortSignal: _abortSignal,
+            resumeJournal: _resumeJournal,
+            resumeMode: _resumeMode,
+            ...vectorInsertOptions
+        } = insertOptions;
         await ensureCollectionBeforeInsert?.(embeddings[0].vector.length);
         this.throwIfIndexAborted(insertOptions.abortSignal);
 
         if (isHybrid === true) {
             // Create hybrid vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index, timingMetrics, runCache));
+            const documents: VectorDocument[] = pendingChunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index, timingMetrics, runCache));
 
             // Store to vector database
             const insertStartedAt = this.getMonotonicMs();
             try {
                 console.log(`[Context] 📥 Inserting ${documents.length} hybrid document(s) into ${collectionName}`);
                 await this.vectorDatabase.insertHybrid(collectionName, documents, vectorInsertOptions);
+                resumeJournal?.markCommitted(documents);
                 console.log(`[Context] ✅ Inserted ${documents.length} hybrid document(s) in ${Math.round(this.getMonotonicMs() - insertStartedAt)}ms`);
             } finally {
                 if (timingMetrics) {
@@ -4714,13 +4852,14 @@ export class Context {
             }
         } else {
             // Create regular vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index, timingMetrics, runCache));
+            const documents: VectorDocument[] = pendingChunks.map((chunk, index) => this.createVectorDocument(chunk, embeddings[index], codebasePath, index, timingMetrics, runCache));
 
             // Store to vector database
             const insertStartedAt = this.getMonotonicMs();
             try {
                 console.log(`[Context] 📥 Inserting ${documents.length} regular document(s) into ${collectionName}`);
                 await this.vectorDatabase.insert(collectionName, documents, vectorInsertOptions);
+                resumeJournal?.markCommitted(documents);
                 console.log(`[Context] ✅ Inserted ${documents.length} regular document(s) in ${Math.round(this.getMonotonicMs() - insertStartedAt)}ms`);
             } finally {
                 if (timingMetrics) {
@@ -4876,6 +5015,22 @@ export class Context {
                 sourceEndLine,
                 chunkIndex
             }
+        };
+    }
+
+    private getChunkDocumentIdentity(
+        chunk: CodeChunk,
+        codebasePath: string,
+    ): { id: string; relativePath: string } {
+        if (!chunk.metadata.filePath) {
+            throw new Error('Missing filePath in chunk metadata while preparing indexing resume checkpoint');
+        }
+        const relativePath = path.relative(codebasePath, chunk.metadata.filePath).replace(/\\/g, '/');
+        const startLine = chunk.metadata.startLine || 0;
+        const endLine = chunk.metadata.endLine || 0;
+        return {
+            id: this.generateId(relativePath, startLine, endLine, chunk.content),
+            relativePath,
         };
     }
 

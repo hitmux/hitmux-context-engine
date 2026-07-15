@@ -380,6 +380,30 @@ async function syncOrCreatePath(
     const indexOptions = getCliIndexOptions(runtime.snapshotManager, codebasePath);
     const splitterType = getCliSplitterType(codebasePath, indexOptions);
     const splitter = createRequestSplitter(splitterType);
+    const hasResumableFullIndex = await runtime.context.hasResumableFullIndex(codebasePath);
+
+    if (hasResumableFullIndex) {
+        const stats = await runtime.context.indexCodebase(
+            codebasePath,
+            (progress) => writeProgress(options, codebasePath, progress),
+            false,
+            indexOptions.requestIgnorePatterns ?? [],
+            indexOptions.requestCustomExtensions ?? [],
+            splitter,
+            options.signal,
+            {
+                additionalIgnoreFiles: indexOptions.requestIgnoreFiles ?? [],
+                maxDepth: indexOptions.requestMaxDepth,
+            },
+        );
+        runtime.snapshotManager.setCodebaseIndexed(codebasePath, stats, {
+            ...indexOptions,
+            requestSplitter: splitterType,
+        });
+        await runtime.snapshotManager.saveCodebaseSnapshotAsync();
+        return `Resumed '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
+    }
+
     const hasIndex = await runtime.context.hasIndex(codebasePath);
 
     if (hasIndex) {

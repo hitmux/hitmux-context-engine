@@ -33,6 +33,7 @@ import {
 import { ClusterManager } from './zilliz-utils';
 import { formatErrorDetails, milvusOperationError } from '../utils/error-format';
 import { isUnsupportedSparseVectorError, milvusHybridCompatibilityError } from './milvus-compatibility';
+import { withMilvusConnectionRetry } from '../utils/milvus-retry';
 import {
     STRUCTURED_STRING_FIELD_DEFINITIONS,
     createSchemaMismatchError,
@@ -116,6 +117,40 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
     private performanceMetrics = {
         flushLoadMs: 0
     };
+
+    private async insertRowsWithRecovery(
+        collectionName: string,
+        data: Record<string, unknown>[],
+        options: InsertOptions,
+        operation: 'Milvus REST insert' | 'Milvus REST insertHybrid',
+    ): Promise<void> {
+        const restfulConfig = this.config as MilvusRestfulConfig;
+        await withMilvusConnectionRetry(
+            `${operation} for '${collectionName}'`,
+            async (attempt) => {
+                const endpoint = options.upsert || attempt > 1
+                    ? '/entities/upsert'
+                    : '/entities/insert';
+                const response = await this.makeRequest(endpoint, 'POST', {
+                    collectionName,
+                    dbName: restfulConfig.database,
+                    data,
+                });
+                if (response.code !== 0) {
+                    throw new Error(`Insert failed: ${response.message || 'Unknown error'}`);
+                }
+            },
+            {
+                onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
+                    console.warn(
+                        `[MilvusRestfulDB] ${operation} lost its connection; retrying ` +
+                        `(attempt ${attempt + 1}/${maxAttempts}) in ${delayMs}ms: ` +
+                        `${error instanceof Error ? error.message : String(error)}`,
+                    );
+                },
+            },
+        );
+    }
 
     constructor(config: MilvusRestfulConfig) {
         this.config = config;
@@ -608,17 +643,9 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         }
 
         try {
-            const restfulConfig = this.config as MilvusRestfulConfig;
             // Transform VectorDocument array to Milvus entity format
             const data = documents.map(createInsertRow);
-
-            const insertRequest = {
-                collectionName,
-                data,
-                dbName: restfulConfig.database
-            };
-
-            await this.makeRequest('/entities/insert', 'POST', insertRequest);
+            await this.insertRowsWithRecovery(collectionName, data, options, 'Milvus REST insert');
             if (!options.deferFlushLoad) {
                 await this.measureFlushLoad(async () => {
                     await this.flushCollection(collectionName);
@@ -940,21 +967,8 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         }
 
         try {
-            const restfulConfig = this.config as MilvusRestfulConfig;
-
             const data = documents.map(createInsertRow);
-
-            const insertRequest = {
-                collectionName,
-                dbName: restfulConfig.database,
-                data: data
-            };
-
-            const response = await this.makeRequest('/entities/insert', 'POST', insertRequest);
-
-            if (response.code !== 0) {
-                throw new Error(`Insert failed: ${response.message || 'Unknown error'}`);
-            }
+            await this.insertRowsWithRecovery(collectionName, data, options, 'Milvus REST insertHybrid');
             if (!options.deferFlushLoad) {
                 await this.measureFlushLoad(async () => {
                     await this.flushCollection(collectionName);
@@ -970,10 +984,22 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
 
     async finalizeCollectionWrites(collectionName: string): Promise<void> {
         await this.ensureInitialized();
-        await this.measureFlushLoad(async () => {
-            await this.flushCollection(collectionName);
-            await this.ensureLoaded(collectionName);
-        });
+        await withMilvusConnectionRetry(
+            `Milvus REST finalize writes for '${collectionName}'`,
+            async () => this.measureFlushLoad(async () => {
+                await this.flushCollection(collectionName);
+                await this.ensureLoaded(collectionName);
+            }),
+            {
+                onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
+                    console.warn(
+                        `[MilvusRestfulDB] Finalizing '${collectionName}' lost its connection; retrying ` +
+                        `(attempt ${attempt + 1}/${maxAttempts}) in ${delayMs}ms: ` +
+                        `${error instanceof Error ? error.message : String(error)}`,
+                    );
+                },
+            },
+        );
     }
 
     async hybridSearch(collectionName: string, searchRequests: HybridSearchRequest[], options?: HybridSearchOptions): Promise<HybridSearchResult[]> {

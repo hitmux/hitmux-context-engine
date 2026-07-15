@@ -4,6 +4,10 @@ import * as nodeFs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Context, ExistingCollectionFullIndexError } from './context';
+import {
+    FullIndexResumeConfigurationChangedError,
+    FullIndexResumeSourceChangedError,
+} from './indexing-resume';
 import { Embedding, EmbeddingVector } from './embedding';
 import { getNormalizedContentHash } from './search/result-dedupe';
 import { FileSynchronizer } from './sync/synchronizer';
@@ -52,6 +56,8 @@ class NamedTestEmbedding extends TestEmbedding {
 }
 
 class OneChunkSplitter implements Splitter {
+    constructor(private readonly chunkSize?: number) { }
+
     async split(code: string, language: string, filePath?: string): Promise<CodeChunk[]> {
         return [{
             content: code,
@@ -641,6 +647,25 @@ describe('Context indexing lifecycle', () => {
         );
     });
 
+    it('clears an interrupted full-index journal together with its collection', async () => {
+        const project = await createProject();
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.insert.mockRejectedValueOnce(new Error('14 UNAVAILABLE: No connection established'));
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(context.indexCodebase(project)).rejects.toThrow('UNAVAILABLE');
+        await expect(context.hasResumableFullIndex(project)).resolves.toBe(true);
+
+        await context.clearIndex(project);
+
+        await expect(context.hasResumableFullIndex(project)).resolves.toBe(false);
+    });
+
     it('finalizes removed-only incremental deletes before committing the Merkle snapshot', async () => {
         const project = await createProject();
         await createProjectSnapshot(project);
@@ -1168,6 +1193,134 @@ describe('Context indexing lifecycle', () => {
         } finally {
             readFileSpy.mockRestore();
         }
+    });
+
+    it('resumes an interrupted full index without re-embedding acknowledged chunks', async () => {
+        const project = await createProjectWithFiles(tempRoot, 'resume-project', 2);
+        await writeProjectConfig(project, {
+            embeddingBatchSize: 1,
+            embeddingConcurrency: 1,
+            fileProcessingConcurrency: 1,
+        });
+        const vectorDatabase = createVectorDatabase();
+        let collectionExists = false;
+        let failSecondInsert = true;
+        vectorDatabase.hasCollection.mockImplementation(async () => collectionExists);
+        vectorDatabase.createCollection.mockImplementation(async () => {
+            collectionExists = true;
+        });
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        vectorDatabase.insert.mockImplementation(async () => {
+            if (vectorDatabase.insert.mock.calls.length === 2 && failSecondInsert) {
+                throw new Error('14 UNAVAILABLE: No connection established');
+            }
+        });
+        const initialEmbedding = new TrackingEmbedding();
+        const initialContext = new Context({
+            hybridMode: false,
+            embedding: initialEmbedding,
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(initialContext.indexCodebase(project)).rejects.toThrow('UNAVAILABLE');
+        await expect(initialContext.hasResumableFullIndex(project)).resolves.toBe(true);
+        expect(initialEmbedding.batchTexts).toHaveLength(2);
+
+        failSecondInsert = false;
+        const resumedEmbedding = new TrackingEmbedding();
+        const resumedContext = new Context({
+            hybridMode: false,
+            embedding: resumedEmbedding,
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(resumedContext.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 2,
+            totalChunks: 2,
+            status: 'completed',
+        });
+        expect(resumedEmbedding.batchTexts).toHaveLength(1);
+        expect(vectorDatabase.insert.mock.calls[2][2]).toMatchObject({ upsert: true });
+        await expect(resumedContext.hasResumableFullIndex(project)).resolves.toBe(false);
+    });
+
+    it('refuses to resume when an acknowledged source file changed', async () => {
+        const project = await createProjectWithFiles(tempRoot, 'resume-source-change-project', 2);
+        await writeProjectConfig(project, {
+            embeddingBatchSize: 1,
+            embeddingConcurrency: 1,
+            fileProcessingConcurrency: 1,
+        });
+        const vectorDatabase = createVectorDatabase();
+        let collectionExists = false;
+        vectorDatabase.hasCollection.mockImplementation(async () => collectionExists);
+        vectorDatabase.createCollection.mockImplementation(async () => {
+            collectionExists = true;
+        });
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        vectorDatabase.insert.mockImplementation(async () => {
+            if (vectorDatabase.insert.mock.calls.length === 2) {
+                throw new Error('14 UNAVAILABLE: No connection established');
+            }
+        });
+        const initialContext = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(initialContext.indexCodebase(project)).rejects.toThrow('UNAVAILABLE');
+        await fs.writeFile(path.join(project, 'file-0.ts'), 'export const value0 = 100;');
+        const resumedContext = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(),
+        });
+
+        await expect(resumedContext.indexCodebase(project)).rejects.toBeInstanceOf(FullIndexResumeSourceChangedError);
+        expect(vectorDatabase.insert).toHaveBeenCalledTimes(2);
+    });
+
+    it('refuses to resume when splitter chunk configuration changed', async () => {
+        const project = await createProjectWithFiles(tempRoot, 'resume-splitter-change-project', 2);
+        await writeProjectConfig(project, {
+            embeddingBatchSize: 1,
+            embeddingConcurrency: 1,
+            fileProcessingConcurrency: 1,
+        });
+        const vectorDatabase = createVectorDatabase();
+        let collectionExists = false;
+        vectorDatabase.hasCollection.mockImplementation(async () => collectionExists);
+        vectorDatabase.createCollection.mockImplementation(async () => {
+            collectionExists = true;
+        });
+        vectorDatabase.insert.mockImplementation(async () => {
+            if (vectorDatabase.insert.mock.calls.length === 2) {
+                throw new Error('14 UNAVAILABLE: No connection established');
+            }
+        });
+        const initialContext = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(512),
+        });
+
+        await expect(initialContext.indexCodebase(project)).rejects.toThrow('UNAVAILABLE');
+
+        const resumedContext = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            codeSplitter: new OneChunkSplitter(1024),
+        });
+
+        await expect(resumedContext.indexCodebase(project)).rejects.toBeInstanceOf(FullIndexResumeConfigurationChangedError);
+        expect(vectorDatabase.insert).toHaveBeenCalledTimes(2);
     });
 });
 

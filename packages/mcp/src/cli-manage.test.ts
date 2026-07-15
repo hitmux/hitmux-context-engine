@@ -103,6 +103,7 @@ class FakeContext {
         private readonly vectorDatabase?: VectorDatabase,
         private readonly collectionName = "hybrid_code_chunks_app",
         private readonly hasIndexValue = true,
+        private readonly hasResumableFullIndexValue = false,
     ) {}
 
     getCollectionName(): string {
@@ -118,6 +119,10 @@ class FakeContext {
 
     async hasIndex(): Promise<boolean> {
         return this.hasIndexValue;
+    }
+
+    async hasResumableFullIndex(): Promise<boolean> {
+        return this.hasResumableFullIndexValue;
     }
 
     async indexCodebase(
@@ -549,6 +554,35 @@ test("runCliManageCommand index forwards abort signal to full indexing", async (
         assert.equal(exitCode, 0);
         assert.equal(context.indexCalls.length, 1);
         assert.equal(context.indexCalls[0][6], controller.signal);
+    } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+    }
+});
+
+test("runCliManageCommand resumes a partial full index before attempting incremental sync", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "hce-cli-resume-"));
+    const vectorDatabase = createFakeVectorDatabase({
+        hybrid_code_chunks_app: { rowCount: 10 },
+    });
+    const context = new FakeContext(vectorDatabase, "hybrid_code_chunks_app", true, true);
+    const output: string[] = [];
+
+    try {
+        const exitCode = await runCliManageCommand(["index", tempDir], {
+            createConfig: () => fakeConfig,
+            createEmbedding: () => new FakeEmbedding(),
+            createVectorDatabase: () => vectorDatabase,
+            createContext: () => context as unknown as Context,
+            createSnapshotManager: () => new FakeSnapshotManager() as unknown as SnapshotManager,
+            acquireWriterLock: () => createFakeLock(),
+            stdout: (message) => output.push(message),
+        });
+
+        assert.equal(exitCode, 0);
+        assert.equal(context.indexCalls.length, 1);
+        assert.equal(context.indexCalls[0][2], false);
+        assert.equal(context.reindexCalls.length, 0);
+        assert.match(output.join(""), /Resumed/);
     } finally {
         rmSync(tempDir, { recursive: true, force: true });
     }

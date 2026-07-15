@@ -25,6 +25,8 @@ export interface VectorDocument {
 
 export interface InsertOptions {
     deferFlushLoad?: boolean;
+    /** Use primary-key upsert when replaying an interrupted indexing batch. */
+    upsert?: boolean;
 }
 
 export const STRUCTURED_METADATA_FIELDS = [

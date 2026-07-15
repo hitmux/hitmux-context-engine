@@ -24,6 +24,7 @@ import { formatErrorDetails, milvusOperationError } from '../utils/error-format'
 import { isUnsupportedSparseVectorError, milvusHybridCompatibilityError } from './milvus-compatibility';
 import { configManager } from '../utils/config-manager';
 import { withSystemProxyPolicy } from '../utils/proxy-env';
+import { withMilvusConnectionRetry } from '../utils/milvus-retry';
 import {
     STRUCTURED_STRING_FIELD_DEFINITIONS,
     createSchemaMismatchError,
@@ -184,6 +185,46 @@ export class MilvusVectorDatabase implements VectorDatabase {
         } finally {
             this.performanceMetrics.flushLoadMs += Number(process.hrtime.bigint()) / 1_000_000 - startedAt;
         }
+    }
+
+    private async insertRowsWithRecovery(
+        collectionName: string,
+        data: Array<ReturnType<typeof createInsertRow>>,
+        options: InsertOptions,
+        operation: 'Milvus insert' | 'Milvus insertHybrid',
+    ): Promise<void> {
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized after ensureInitialized().');
+        }
+
+        await withMilvusConnectionRetry(
+            `${operation} for '${collectionName}'`,
+            async (attempt) => {
+                if (!this.client) {
+                    throw new Error('MilvusClient is not initialized after ensureInitialized().');
+                }
+                const request = {
+                    collection_name: collectionName,
+                    data,
+                };
+                // A transport failure may arrive after Milvus accepted the
+                // first insert. Replays therefore use primary-key upsert.
+                if (options.upsert || attempt > 1) {
+                    await this.client.upsert(request);
+                } else {
+                    await this.client.insert(request);
+                }
+            },
+            {
+                onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
+                    console.warn(
+                        `[MilvusDB] ${operation} lost its connection; retrying ` +
+                        `(attempt ${attempt + 1}/${maxAttempts}) in ${delayMs}ms: ` +
+                        `${error instanceof Error ? error.message : String(error)}`,
+                    );
+                },
+            },
+        );
     }
 
     /**
@@ -604,10 +645,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
         const data = documents.map(createInsertRow);
 
         try {
-            await this.client.insert({
-                collection_name: collectionName,
-                data: data,
-            });
+            await this.insertRowsWithRecovery(collectionName, data, options, 'Milvus insert');
             if (!options.deferFlushLoad) {
                 await this.measureFlushLoad(async () => {
                     await this.flushCollection(collectionName);
@@ -877,10 +915,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
         const data = documents.map(createInsertRow);
 
         try {
-            await this.client.insert({
-                collection_name: collectionName,
-                data: data,
-            });
+            await this.insertRowsWithRecovery(collectionName, data, options, 'Milvus insertHybrid');
             if (!options.deferFlushLoad) {
                 await this.measureFlushLoad(async () => {
                     await this.flushCollection(collectionName);
@@ -897,10 +932,22 @@ export class MilvusVectorDatabase implements VectorDatabase {
 
     async finalizeCollectionWrites(collectionName: string): Promise<void> {
         await this.ensureInitialized();
-        await this.measureFlushLoad(async () => {
-            await this.flushCollection(collectionName);
-            await this.ensureLoaded(collectionName);
-        });
+        await withMilvusConnectionRetry(
+            `Milvus finalize writes for '${collectionName}'`,
+            async () => this.measureFlushLoad(async () => {
+                await this.flushCollection(collectionName);
+                await this.ensureLoaded(collectionName);
+            }),
+            {
+                onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
+                    console.warn(
+                        `[MilvusDB] Finalizing '${collectionName}' lost its connection; retrying ` +
+                        `(attempt ${attempt + 1}/${maxAttempts}) in ${delayMs}ms: ` +
+                        `${error instanceof Error ? error.message : String(error)}`,
+                    );
+                },
+            },
+        );
     }
 
     private async flushCollection(collectionName: string): Promise<void> {
