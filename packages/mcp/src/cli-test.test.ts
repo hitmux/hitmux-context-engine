@@ -108,6 +108,22 @@ test("runCliTestCommand can run one target", async () => {
     assert.doesNotMatch(output.join(""), /vectordb/);
 });
 
+test("runCliTestCommand closes the vector database after the connectivity check", async () => {
+    let closed = false;
+    const database = createFakeVectorDatabase([]);
+    database.close = async () => {
+        closed = true;
+    };
+
+    const exitCode = await runCliTestCommand(["vectordb"], {
+        createConfig: () => fakeConfig,
+        createVectorDatabase: () => database,
+    });
+
+    assert.equal(exitCode, 0);
+    assert.equal(closed, true);
+});
+
 test("runCliTestCommand returns usage error for invalid targets", async () => {
     const errors: string[] = [];
     const exitCode = await runCliTestCommand(["embedding", "vectordb"], {

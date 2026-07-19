@@ -1,10 +1,15 @@
 import * as crypto from 'crypto';
-import { promises as fs } from 'fs';
+import { createReadStream, promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { createInterface } from 'readline';
 
-const RESUME_JOURNAL_VERSION = 1;
+const RESUME_JOURNAL_VERSION = 2;
+const LEGACY_RESUME_JOURNAL_VERSION = 1;
 const CHECKPOINT_INTERVAL_MS = 2_000;
+
+type CheckpointMode = 'document' | 'file';
+type FileCheckpointState = 'partial' | 'complete';
 
 export interface FullIndexResumeJournalInput {
     codebasePath: string;
@@ -12,17 +17,40 @@ export interface FullIndexResumeJournalInput {
     runSignature: string;
 }
 
-interface FullIndexResumeHeader extends FullIndexResumeJournalInput {
-    version: number;
+interface FullIndexResumeHeaderBase extends FullIndexResumeJournalInput {
     startedAt: string;
 }
 
-interface FullIndexResumeProgressRecord {
-    documents: Array<{
-        id: string;
-        relativePath: string;
-        fileHash: string;
-    }>;
+interface LegacyFullIndexResumeHeader extends FullIndexResumeHeaderBase {
+    version: typeof LEGACY_RESUME_JOURNAL_VERSION;
+}
+
+interface FullIndexResumeHeader extends FullIndexResumeHeaderBase {
+    version: typeof RESUME_JOURNAL_VERSION;
+    checkpointMode: CheckpointMode;
+}
+
+interface FullIndexResumeDocumentCheckpoint {
+    id: string;
+    relativePath: string;
+    fileHash: string;
+}
+
+interface FullIndexResumeDocumentProgressRecord {
+    documents: FullIndexResumeDocumentCheckpoint[];
+}
+
+interface FullIndexResumeFileProgressRecord {
+    relativePath: string;
+    fileHash: string;
+    state: FileCheckpointState;
+}
+
+interface LoadedResumeProgress {
+    committedDocumentIds: Set<string>;
+    committedFileHashes: Map<string, string>;
+    committedFilePaths: Set<string>;
+    fileCheckpointStates: Map<string, FileCheckpointState>;
 }
 
 function getResumeJournalKey(codebasePath: string, collectionName: string): string {
@@ -44,14 +72,25 @@ function getResumeJournalPaths(codebasePath: string, collectionName: string): {
     };
 }
 
-function isValidHeader(value: unknown): value is FullIndexResumeHeader {
+function isValidHeaderBase(value: unknown): value is FullIndexResumeHeaderBase {
     if (!value || typeof value !== 'object') return false;
-    const header = value as Partial<FullIndexResumeHeader>;
-    return header.version === RESUME_JOURNAL_VERSION
-        && typeof header.codebasePath === 'string'
+    const header = value as Partial<FullIndexResumeHeaderBase>;
+    return typeof header.codebasePath === 'string'
         && typeof header.collectionName === 'string'
         && typeof header.runSignature === 'string'
         && typeof header.startedAt === 'string';
+}
+
+function isLegacyHeader(value: unknown): value is LegacyFullIndexResumeHeader {
+    return isValidHeaderBase(value)
+        && (value as Partial<LegacyFullIndexResumeHeader>).version === LEGACY_RESUME_JOURNAL_VERSION;
+}
+
+function isValidHeader(value: unknown): value is FullIndexResumeHeader {
+    if (!isValidHeaderBase(value)) return false;
+    const header = value as Partial<FullIndexResumeHeader>;
+    return header.version === RESUME_JOURNAL_VERSION
+        && (header.checkpointMode === 'document' || header.checkpointMode === 'file');
 }
 
 function getErrorCode(error: unknown): string | undefined {
@@ -87,12 +126,13 @@ export class FullIndexResumeConfigurationChangedError extends Error {
 /**
  * Durable, append-only acknowledgement journal for a full index. It is local
  * by design: the vector database remains the data plane, while this journal
- * only records batches known to have completed. Writes are coalesced and never
- * sit on the embedding or Milvus insertion critical path.
+ * only records recovery fingerprints. New journals checkpoint at file level;
+ * v1 journals are compacted to v2 document checkpoints so their exact resume
+ * semantics remain intact.
  */
 export class FullIndexResumeJournal {
     private readonly committedDocumentIds: Set<string>;
-    private pendingDocumentIds = new Set<string>();
+    private readonly pendingRecords = new Set<string>();
     private writeQueue: Promise<void> = Promise.resolve();
     private writeError: unknown;
     private flushTimer: NodeJS.Timeout | undefined;
@@ -104,6 +144,7 @@ export class FullIndexResumeJournal {
         committedDocumentIds: Iterable<string>,
         private readonly committedFileHashes: Map<string, string>,
         private readonly committedFilePaths: Set<string>,
+        private readonly fileCheckpointStates: Map<string, FileCheckpointState>,
     ) {
         this.committedDocumentIds = new Set(committedDocumentIds);
     }
@@ -112,6 +153,7 @@ export class FullIndexResumeJournal {
         const paths = getResumeJournalPaths(input.codebasePath, input.collectionName);
         const header: FullIndexResumeHeader = {
             version: RESUME_JOURNAL_VERSION,
+            checkpointMode: 'file',
             ...input,
             startedAt: new Date().toISOString(),
         };
@@ -120,77 +162,38 @@ export class FullIndexResumeJournal {
         // header. A crash in this window replays data safely; it can never
         // attach stale acknowledgements to a new full-index run.
         await fs.rm(paths.progressPath, { force: true });
-        const tempPath = `${paths.headerPath}.tmp-${process.pid}-${Date.now()}`;
-        await fs.writeFile(tempPath, JSON.stringify(header), 'utf8');
-        await fs.rename(tempPath, paths.headerPath);
-        return new FullIndexResumeJournal(header, paths, [], new Map(), new Set());
+        await this.writeHeaderAtomically(paths.headerPath, header);
+        return new FullIndexResumeJournal(header, paths, [], new Map(), new Set(), new Map());
     }
 
     public static async load(input: Pick<FullIndexResumeJournalInput, 'codebasePath' | 'collectionName'>): Promise<FullIndexResumeJournal | undefined> {
         const paths = getResumeJournalPaths(input.codebasePath, input.collectionName);
-        let header: FullIndexResumeHeader;
+        let parsedHeader: unknown;
         try {
-            header = JSON.parse(await fs.readFile(paths.headerPath, 'utf8')) as FullIndexResumeHeader;
+            parsedHeader = JSON.parse(await fs.readFile(paths.headerPath, 'utf8')) as unknown;
         } catch (error: unknown) {
             if (getErrorCode(error) === 'ENOENT') return undefined;
             throw new Error(`Failed to read indexing resume journal for '${input.codebasePath}': ${getErrorMessage(error)}`);
         }
 
-        if (!isValidHeader(header)
-            || header.codebasePath !== input.codebasePath
-            || header.collectionName !== input.collectionName) {
+        if ((!isLegacyHeader(parsedHeader) && !isValidHeader(parsedHeader))
+            || parsedHeader.codebasePath !== input.codebasePath
+            || parsedHeader.collectionName !== input.collectionName) {
             return undefined;
         }
 
-        const committedDocumentIds = new Set<string>();
-        const committedFileHashes = new Map<string, string>();
-        const committedFilePaths = new Set<string>();
-        try {
-            const content = await fs.readFile(paths.progressPath, 'utf8');
-            for (const line of content.split('\n')) {
-                if (!line.trim()) continue;
-                try {
-                    const record = JSON.parse(line) as Partial<FullIndexResumeProgressRecord>;
-                    if (Array.isArray(record.documents)) {
-                        for (const document of record.documents) {
-                            if (typeof document?.id !== 'string'
-                                || typeof document.relativePath !== 'string'
-                                || typeof document.fileHash !== 'string') {
-                                continue;
-                            }
-                            const previousHash = committedFileHashes.get(document.relativePath);
-                            if (previousHash && previousHash !== document.fileHash) {
-                                throw new FullIndexResumeSourceChangedError(header.codebasePath);
-                            }
-                            committedDocumentIds.add(document.id);
-                            committedFileHashes.set(document.relativePath, document.fileHash);
-                            committedFilePaths.add(document.relativePath);
-                        }
-                    }
-                } catch (error) {
-                    if (error instanceof FullIndexResumeSourceChangedError) {
-                        throw error;
-                    }
-                    // A process may die during append. Earlier complete JSONL
-                    // records are valid; replaying the final partial record is
-                    // safe because resumed writes use primary-key upsert.
-                }
-            }
-        } catch (error: unknown) {
-            if (getErrorCode(error) !== 'ENOENT') {
-                if (error instanceof FullIndexResumeSourceChangedError) {
-                    throw error;
-                }
-                throw new Error(`Failed to read indexing resume progress for '${input.codebasePath}': ${getErrorMessage(error)}`);
-            }
-        }
+        const header = isLegacyHeader(parsedHeader)
+            ? await this.migrateLegacyJournal(parsedHeader, paths)
+            : parsedHeader;
+        const progress = await this.loadProgress(header, paths);
 
         return new FullIndexResumeJournal(
             header,
             paths,
-            committedDocumentIds,
-            committedFileHashes,
-            committedFilePaths,
+            progress.committedDocumentIds,
+            progress.committedFileHashes,
+            progress.committedFilePaths,
+            progress.fileCheckpointStates,
         );
     }
 
@@ -212,6 +215,10 @@ export class FullIndexResumeJournal {
         }
     }
 
+    public usesFileCheckpoints(): boolean {
+        return this.header.checkpointMode === 'file';
+    }
+
     public assertNoCommittedFileWasRemoved(currentRelativePaths: Iterable<string>): void {
         const currentPaths = new Set(currentRelativePaths);
         for (const relativePath of this.committedFilePaths) {
@@ -221,41 +228,76 @@ export class FullIndexResumeJournal {
         }
     }
 
-    public prepareFile(relativePath: string, content: string, resumeMode: boolean): void {
+    /**
+     * Returns true only for a v2 file checkpoint that is known complete. The
+     * caller has already read the file at this point, so its source hash is
+     * still validated before split/embed work is skipped.
+     */
+    public prepareFile(relativePath: string, content: string, resumeMode: boolean): boolean {
         const fileHash = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
         const committedHash = this.committedFileHashes.get(relativePath);
         if (resumeMode && committedHash !== undefined && committedHash !== fileHash) {
             throw new FullIndexResumeSourceChangedError(this.header.codebasePath);
         }
         this.committedFileHashes.set(relativePath, fileHash);
+        return resumeMode
+            && this.usesFileCheckpoints()
+            && this.fileCheckpointStates.get(relativePath) === 'complete';
     }
 
     public isDocumentCommitted(documentId: string, relativePath: string, resumeMode: boolean): boolean {
         return resumeMode
+            && this.header.checkpointMode === 'document'
             && this.committedFileHashes.has(relativePath)
             && this.committedDocumentIds.has(documentId);
     }
 
+    /**
+     * Records a successful vector write. The method deliberately projects
+     * VectorDocument values into recovery fields; runtime vector/content/
+     * metadata payloads must never enter the local checkpoint.
+     */
     public markCommitted(documents: ReadonlyArray<{ id: string; relativePath: string }>): void {
         this.throwIfWriteFailed();
-        const pendingDocuments: FullIndexResumeProgressRecord['documents'] = [];
-        for (const document of documents) {
-            if (!this.committedDocumentIds.has(document.id)) {
-                const fileHash = this.committedFileHashes.get(document.relativePath);
-                if (!fileHash) {
-                    throw new Error(`Missing resume fingerprint for '${document.relativePath}'`);
+        if (this.header.checkpointMode === 'document') {
+            const pendingDocuments: FullIndexResumeDocumentCheckpoint[] = [];
+            for (const document of documents) {
+                if (!this.committedDocumentIds.has(document.id)) {
+                    const fileHash = this.getPreparedFileHash(document.relativePath);
+                    const checkpoint: FullIndexResumeDocumentCheckpoint = {
+                        id: document.id,
+                        relativePath: document.relativePath,
+                        fileHash,
+                    };
+                    this.committedDocumentIds.add(checkpoint.id);
+                    this.committedFilePaths.add(checkpoint.relativePath);
+                    pendingDocuments.push(checkpoint);
                 }
-                this.committedDocumentIds.add(document.id);
-                this.committedFilePaths.add(document.relativePath);
-                pendingDocuments.push({ ...document, fileHash });
+            }
+            if (pendingDocuments.length > 0) {
+                this.queueRecord({ documents: pendingDocuments });
+            }
+            return;
+        }
+
+        for (const document of documents) {
+            if (this.fileCheckpointStates.get(document.relativePath) === undefined) {
+                this.setFileCheckpointState(document.relativePath, 'partial');
             }
         }
-        if (pendingDocuments.length > 0) {
-            for (const document of pendingDocuments) {
-                this.pendingDocumentIds.add(JSON.stringify(document));
-            }
-            this.scheduleFlush();
+    }
+
+    /**
+     * Marks a file complete only after every batch containing one of its
+     * chunks has acknowledged a successful vector write.
+     */
+    public markFileComplete(relativePath: string): void {
+        this.throwIfWriteFailed();
+        if (!this.usesFileCheckpoints()
+            || this.fileCheckpointStates.get(relativePath) === 'complete') {
+            return;
         }
+        this.setFileCheckpointState(relativePath, 'complete');
     }
 
     public async flush(): Promise<void> {
@@ -264,11 +306,11 @@ export class FullIndexResumeJournal {
             this.flushTimer = undefined;
         }
 
-        while (this.pendingDocumentIds.size > 0) {
-            const documents = [...this.pendingDocumentIds].map((entry) => JSON.parse(entry)) as FullIndexResumeProgressRecord['documents'];
-            this.pendingDocumentIds.clear();
-            const record = `${JSON.stringify({ documents })}\n`;
-            this.writeQueue = this.writeQueue.then(() => fs.appendFile(this.paths.progressPath, record, 'utf8'));
+        while (this.pendingRecords.size > 0) {
+            const records = [...this.pendingRecords];
+            this.pendingRecords.clear();
+            const content = `${records.join('\n')}\n`;
+            this.writeQueue = this.writeQueue.then(() => fs.appendFile(this.paths.progressPath, content, 'utf8'));
             try {
                 await this.writeQueue;
                 this.lastFlushAt = Date.now();
@@ -282,6 +324,27 @@ export class FullIndexResumeJournal {
     public async complete(): Promise<void> {
         await this.flush();
         await FullIndexResumeJournal.clear(this.header);
+    }
+
+    private getPreparedFileHash(relativePath: string): string {
+        const fileHash = this.committedFileHashes.get(relativePath);
+        if (!fileHash) {
+            throw new Error(`Missing resume fingerprint for '${relativePath}'`);
+        }
+        return fileHash;
+    }
+
+    private setFileCheckpointState(relativePath: string, state: FileCheckpointState): void {
+        const fileHash = this.getPreparedFileHash(relativePath);
+        this.committedFilePaths.add(relativePath);
+        this.fileCheckpointStates.set(relativePath, state);
+        const record: FullIndexResumeFileProgressRecord = { relativePath, fileHash, state };
+        this.queueRecord(record);
+    }
+
+    private queueRecord(record: FullIndexResumeDocumentProgressRecord | FullIndexResumeFileProgressRecord): void {
+        this.pendingRecords.add(JSON.stringify(record));
+        this.scheduleFlush();
     }
 
     private scheduleFlush(): void {
@@ -299,6 +362,183 @@ export class FullIndexResumeJournal {
     private throwIfWriteFailed(): void {
         if (this.writeError !== undefined) {
             throw new Error(`Indexing resume checkpoint is unavailable: ${this.writeError instanceof Error ? this.writeError.message : String(this.writeError)}`);
+        }
+    }
+
+    private static async migrateLegacyJournal(
+        legacyHeader: LegacyFullIndexResumeHeader,
+        paths: { headerPath: string; progressPath: string },
+    ): Promise<FullIndexResumeHeader> {
+        const header: FullIndexResumeHeader = {
+            ...legacyHeader,
+            version: RESUME_JOURNAL_VERSION,
+            checkpointMode: 'document',
+        };
+        const tempProgressPath = `${paths.progressPath}.tmp-${process.pid}-${Date.now()}`;
+        let handle: fs.FileHandle | undefined;
+        const committedFileHashes = new Map<string, string>();
+
+        try {
+            await fs.mkdir(path.dirname(paths.progressPath), { recursive: true });
+            handle = await fs.open(tempProgressPath, 'w');
+            try {
+                const input = createReadStream(paths.progressPath, { encoding: 'utf8' });
+                const lines = createInterface({ input, crlfDelay: Infinity });
+                for await (const line of lines) {
+                    try {
+                        const documents = this.parseDocumentProgressLine(line, legacyHeader.codebasePath, committedFileHashes);
+                        if (documents.length > 0) {
+                            const record: FullIndexResumeDocumentProgressRecord = { documents };
+                            await handle.write(`${JSON.stringify(record)}\n`, undefined, 'utf8');
+                        }
+                    } catch (error) {
+                        if (error instanceof FullIndexResumeSourceChangedError) {
+                            throw error;
+                        }
+                        // Keep the v1 append semantics: a process can die in
+                        // the middle of its final JSONL record.
+                    }
+                }
+            } catch (error: unknown) {
+                if (getErrorCode(error) !== 'ENOENT') {
+                    throw error;
+                }
+            }
+            await handle.close();
+            handle = undefined;
+            await fs.rename(tempProgressPath, paths.progressPath);
+            await this.writeHeaderAtomically(paths.headerPath, header);
+            return header;
+        } catch (error) {
+            await handle?.close().catch(() => undefined);
+            await fs.rm(tempProgressPath, { force: true }).catch(() => undefined);
+            throw error;
+        }
+    }
+
+    private static async loadProgress(
+        header: FullIndexResumeHeader,
+        paths: { progressPath: string },
+    ): Promise<LoadedResumeProgress> {
+        const progress: LoadedResumeProgress = {
+            committedDocumentIds: new Set<string>(),
+            committedFileHashes: new Map<string, string>(),
+            committedFilePaths: new Set<string>(),
+            fileCheckpointStates: new Map<string, FileCheckpointState>(),
+        };
+
+        try {
+            const input = createReadStream(paths.progressPath, { encoding: 'utf8' });
+            const lines = createInterface({ input, crlfDelay: Infinity });
+            for await (const line of lines) {
+                try {
+                    if (header.checkpointMode === 'document') {
+                        const documents = this.parseDocumentProgressLine(line, header.codebasePath, progress.committedFileHashes);
+                        for (const document of documents) {
+                            progress.committedDocumentIds.add(document.id);
+                            progress.committedFilePaths.add(document.relativePath);
+                        }
+                    } else {
+                        const record = this.parseFileProgressLine(line);
+                        if (!record) continue;
+                        this.recordFileHash(
+                            progress.committedFileHashes,
+                            record.relativePath,
+                            record.fileHash,
+                            header.codebasePath,
+                        );
+                        progress.committedFilePaths.add(record.relativePath);
+                        const currentState = progress.fileCheckpointStates.get(record.relativePath);
+                        if (record.state === 'complete' || currentState === undefined) {
+                            progress.fileCheckpointStates.set(record.relativePath, record.state);
+                        }
+                    }
+                } catch (error) {
+                    if (error instanceof FullIndexResumeSourceChangedError) {
+                        throw error;
+                    }
+                    // A process may die during append. Earlier complete JSONL
+                    // records are valid; replaying the final partial record is
+                    // safe because resumed writes use primary-key upsert.
+                }
+            }
+        } catch (error: unknown) {
+            if (getErrorCode(error) !== 'ENOENT') {
+                if (error instanceof FullIndexResumeSourceChangedError) {
+                    throw error;
+                }
+                throw new Error(`Failed to read indexing resume progress for '${header.codebasePath}': ${getErrorMessage(error)}`);
+            }
+        }
+
+        return progress;
+    }
+
+    private static parseDocumentProgressLine(
+        line: string,
+        codebasePath: string,
+        committedFileHashes: Map<string, string>,
+    ): FullIndexResumeDocumentCheckpoint[] {
+        if (!line.trim()) return [];
+        const record = JSON.parse(line) as Partial<FullIndexResumeDocumentProgressRecord>;
+        if (!Array.isArray(record.documents)) return [];
+
+        const documents: FullIndexResumeDocumentCheckpoint[] = [];
+        for (const document of record.documents) {
+            if (typeof document?.id !== 'string'
+                || typeof document.relativePath !== 'string'
+                || typeof document.fileHash !== 'string') {
+                continue;
+            }
+            this.recordFileHash(committedFileHashes, document.relativePath, document.fileHash, codebasePath);
+            documents.push({
+                id: document.id,
+                relativePath: document.relativePath,
+                fileHash: document.fileHash,
+            });
+        }
+        return documents;
+    }
+
+    private static parseFileProgressLine(line: string): FullIndexResumeFileProgressRecord | undefined {
+        if (!line.trim()) return undefined;
+        const record = JSON.parse(line) as Partial<FullIndexResumeFileProgressRecord>;
+        if (typeof record.relativePath !== 'string'
+            || typeof record.fileHash !== 'string'
+            || (record.state !== 'partial' && record.state !== 'complete')) {
+            return undefined;
+        }
+        return {
+            relativePath: record.relativePath,
+            fileHash: record.fileHash,
+            state: record.state,
+        };
+    }
+
+    private static recordFileHash(
+        committedFileHashes: Map<string, string>,
+        relativePath: string,
+        fileHash: string,
+        codebasePath: string,
+    ): void {
+        const previousHash = committedFileHashes.get(relativePath);
+        if (previousHash && previousHash !== fileHash) {
+            throw new FullIndexResumeSourceChangedError(codebasePath);
+        }
+        committedFileHashes.set(relativePath, fileHash);
+    }
+
+    private static async writeHeaderAtomically(
+        headerPath: string,
+        header: FullIndexResumeHeader,
+    ): Promise<void> {
+        const tempPath = `${headerPath}.tmp-${process.pid}-${Date.now()}`;
+        try {
+            await fs.writeFile(tempPath, JSON.stringify(header), 'utf8');
+            await fs.rename(tempPath, headerPath);
+        } catch (error) {
+            await fs.rm(tempPath, { force: true }).catch(() => undefined);
+            throw error;
         }
     }
 }

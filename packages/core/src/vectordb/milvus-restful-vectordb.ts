@@ -545,6 +545,7 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
         }
     }
 
+
     async hasCollection(collectionName: string): Promise<boolean> {
         await this.ensureInitialized();
 

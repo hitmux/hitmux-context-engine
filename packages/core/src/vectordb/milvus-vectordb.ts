@@ -1,4 +1,5 @@
 import { MilvusClient, DataType, MetricType, FunctionType, LoadState } from '@zilliz/milvus2-sdk-node';
+import { randomUUID } from 'crypto';
 import {
     VectorDocument,
     SearchOptions,
@@ -36,6 +37,13 @@ import {
     mergeStructuredMetadata,
     requireCurrentStructuredSchema
 } from './milvus-structured-fields';
+import {
+    COLLECTION_LEASE_COLLECTION,
+    type CollectionLeaseRecord,
+    type CollectionLeaseReapResult,
+    resolveCollectionLeaseConfig,
+    type ResolvedCollectionLeaseConfig,
+} from './collection-lease';
 
 export interface MilvusConfig {
     address?: string;
@@ -44,9 +52,15 @@ export interface MilvusConfig {
     password?: string;
     ssl?: boolean;
     useSystemProxy?: boolean;
+    collectionLeaseEnabled?: boolean;
+    collectionLeaseHeartbeatMs?: number;
+    collectionLeaseMissLimit?: number;
 }
 
 const COLLECTION_CREATE_TIMEOUT_MS = 120000;
+const COLLECTION_LEASE_VECTOR_FIELD = 'leaseVector';
+const COLLECTION_LEASE_VECTOR_DIMENSION = 2;
+const COLLECTION_LEASE_VECTOR_INDEX = 'lease_vector_index';
 
 function createStructuredFieldSchemas() {
     return [
@@ -74,18 +88,47 @@ function isCollectionAlreadyExistsError(error: unknown): boolean {
     return /collection.*(already.*exist|exist|duplicate)|already.*exist|duplicate.*collection/i.test(message);
 }
 
+function isCurrentLeaseVectorField(field: unknown): boolean {
+    if (!field || typeof field !== 'object') {
+        return false;
+    }
+    const candidate = field as Record<string, unknown>;
+    const dataType = candidate.dataType ?? candidate.data_type;
+    const typeParams = Array.isArray(candidate.type_params) ? candidate.type_params : [];
+    const dimensionParameter = typeParams.find(param => (
+        param && typeof param === 'object' && (param as Record<string, unknown>).key === 'dim'
+    )) as Record<string, unknown> | undefined;
+    const dimension = candidate.dim ?? dimensionParameter?.value;
+
+    return candidate.name === COLLECTION_LEASE_VECTOR_FIELD &&
+        (dataType === DataType.FloatVector || dataType === 'FloatVector') &&
+        Number(dimension) === COLLECTION_LEASE_VECTOR_DIMENSION;
+}
+
 export class MilvusVectorDatabase implements VectorDatabase {
     protected config: MilvusConfig;
     private client: MilvusClient | null = null;
     protected initializationPromise: Promise<void>;
     private initializationError: unknown;
     private verifiedStructuredSchemaCollections = new Set<string>();
+    private readonly leaseConfig: ResolvedCollectionLeaseConfig;
+    private readonly leaseOwnerId = randomUUID();
+    private readonly leasedCollections = new Set<string>();
+    private leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    private leaseRefreshPromise: Promise<void> | null = null;
+    private leaseControlCollectionPromise: Promise<void> | null = null;
+    private closed = false;
     private performanceMetrics = {
         flushLoadMs: 0
     };
 
     constructor(config: MilvusConfig) {
         this.config = config;
+        this.leaseConfig = resolveCollectionLeaseConfig({
+            enabled: config.collectionLeaseEnabled,
+            heartbeatMs: config.collectionLeaseHeartbeatMs,
+            missLimit: config.collectionLeaseMissLimit,
+        });
 
         // Start initialization asynchronously without waiting
         this.initializationPromise = this.initialize().catch((error: unknown) => {
@@ -146,6 +189,298 @@ export class MilvusVectorDatabase implements VectorDatabase {
         }
     }
 
+    private isLeaseControlCollection(collectionName: string): boolean {
+        return collectionName === COLLECTION_LEASE_COLLECTION;
+    }
+
+    private async assertCurrentLeaseControlCollectionSchema(): Promise<void> {
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized after ensureInitialized().');
+        }
+        const result = await this.client.describeCollection({
+            collection_name: COLLECTION_LEASE_COLLECTION,
+        });
+        if (!result.schema?.fields?.some(isCurrentLeaseVectorField)) {
+            throw new Error(
+                `Collection lease control collection '${COLLECTION_LEASE_COLLECTION}' has an incompatible legacy scalar-only schema. ` +
+                `Expected FloatVector field '${COLLECTION_LEASE_VECTOR_FIELD}' with dim ${COLLECTION_LEASE_VECTOR_DIMENSION}. ` +
+                'Delete this control collection during a maintenance window and retry; it is not removed automatically.'
+            );
+        }
+    }
+
+    private async ensureLeaseControlCollection(): Promise<void> {
+        if (this.leaseControlCollectionPromise) {
+            return this.leaseControlCollectionPromise;
+        }
+
+        this.leaseControlCollectionPromise = (async () => {
+            await this.ensureInitialized();
+            if (!this.client) {
+                throw new Error('MilvusClient is not initialized after ensureInitialized().');
+            }
+
+            const exists = await this.client.hasCollection({
+                collection_name: COLLECTION_LEASE_COLLECTION,
+            });
+            if (!exists.value) {
+                try {
+                    await this.client.createCollection({
+                        collection_name: COLLECTION_LEASE_COLLECTION,
+                        description: 'Hitmux Context Engine collection load leases',
+                        fields: [
+                            {
+                                name: 'leaseId',
+                                data_type: DataType.VarChar,
+                                max_length: 512,
+                                is_primary_key: true,
+                            },
+                            {
+                                name: 'collectionName',
+                                data_type: DataType.VarChar,
+                                max_length: 255,
+                            },
+                            {
+                                name: 'ownerId',
+                                data_type: DataType.VarChar,
+                                max_length: 128,
+                            },
+                            { name: 'expiresAt', data_type: DataType.Int64 },
+                            { name: 'updatedAt', data_type: DataType.Int64 },
+                            {
+                                name: COLLECTION_LEASE_VECTOR_FIELD,
+                                data_type: DataType.FloatVector,
+                                dim: COLLECTION_LEASE_VECTOR_DIMENSION,
+                            },
+                        ],
+                    });
+                } catch (error) {
+                    if (!isCollectionAlreadyExistsError(error)) {
+                        throw error;
+                    }
+                }
+            }
+            await this.assertCurrentLeaseControlCollectionSchema();
+            await this.createIndexIfMissing(
+                COLLECTION_LEASE_COLLECTION,
+                COLLECTION_LEASE_VECTOR_FIELD,
+                {
+                    collection_name: COLLECTION_LEASE_COLLECTION,
+                    field_name: COLLECTION_LEASE_VECTOR_FIELD,
+                    index_name: COLLECTION_LEASE_VECTOR_INDEX,
+                    index_type: 'AUTOINDEX',
+                    metric_type: MetricType.L2,
+                },
+            );
+            await this.ensureRawCollectionLoaded(COLLECTION_LEASE_COLLECTION);
+        })().finally(() => {
+            this.leaseControlCollectionPromise = null;
+        });
+
+        return this.leaseControlCollectionPromise;
+    }
+
+    private async ensureRawCollectionLoaded(collectionName: string): Promise<void> {
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized. Call ensureInitialized() first.');
+        }
+        const result = await this.client.getLoadState({ collection_name: collectionName });
+        if (result.state !== LoadState.LoadStateLoaded) {
+            await this.client.loadCollection({ collection_name: collectionName });
+        }
+    }
+
+    private getLeaseId(collectionName: string): string {
+        return `${this.leaseOwnerId}:${collectionName}`;
+    }
+
+    private startLeaseHeartbeat(): void {
+        if (this.leaseHeartbeatTimer || this.closed || this.leasedCollections.size === 0) {
+            return;
+        }
+        this.leaseHeartbeatTimer = setInterval(() => {
+            void this.refreshCollectionLeases().catch((error: unknown) => {
+                console.warn(`[MilvusDB] Failed to refresh collection leases: ${formatErrorDetails(error)}`);
+            });
+        }, this.leaseConfig.heartbeatMs);
+        this.leaseHeartbeatTimer.unref?.();
+    }
+
+    private stopLeaseHeartbeat(): void {
+        if (this.leaseHeartbeatTimer) {
+            clearInterval(this.leaseHeartbeatTimer);
+            this.leaseHeartbeatTimer = undefined;
+        }
+    }
+
+    private async upsertCollectionLease(collectionName: string): Promise<void> {
+        if (!this.leaseConfig?.enabled || this.isLeaseControlCollection(collectionName)) {
+            return;
+        }
+        await this.ensureLeaseControlCollection();
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized after ensureInitialized().');
+        }
+
+        const updatedAt = Date.now();
+        await this.client.upsert({
+            collection_name: COLLECTION_LEASE_COLLECTION,
+            data: [{
+                leaseId: this.getLeaseId(collectionName),
+                collectionName,
+                ownerId: this.leaseOwnerId,
+                expiresAt: updatedAt + this.leaseConfig.ttlMs,
+                updatedAt,
+                [COLLECTION_LEASE_VECTOR_FIELD]: [0, 0],
+            }],
+        });
+        this.leasedCollections.add(collectionName);
+        this.startLeaseHeartbeat();
+    }
+
+    private async refreshCollectionLeases(): Promise<void> {
+        if (this.leaseRefreshPromise) {
+            return this.leaseRefreshPromise;
+        }
+        this.leaseRefreshPromise = (async () => {
+            for (const collectionName of this.leasedCollections) {
+                await this.upsertCollectionLease(collectionName);
+            }
+        })().finally(() => {
+            this.leaseRefreshPromise = null;
+        });
+        return this.leaseRefreshPromise;
+    }
+
+    private async releaseCollectionLease(collectionName: string): Promise<void> {
+        this.leasedCollections.delete(collectionName);
+        if (this.leasedCollections.size === 0) {
+            this.stopLeaseHeartbeat();
+        }
+        if (!this.leaseConfig?.enabled || this.isLeaseControlCollection(collectionName)) {
+            return;
+        }
+        await this.ensureLeaseControlCollection();
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized after ensureInitialized().');
+        }
+        await this.client.delete({
+            collection_name: COLLECTION_LEASE_COLLECTION,
+            filter: `leaseId == ${JSON.stringify(this.getLeaseId(collectionName))}`,
+        });
+    }
+
+    async close(): Promise<void> {
+        if (this.closed) {
+            return;
+        }
+        this.closed = true;
+        this.stopLeaseHeartbeat();
+        const collections = [...this.leasedCollections];
+        await Promise.allSettled(collections.map(collectionName => this.releaseCollectionLease(collectionName)));
+    }
+
+    private parseLeaseRecord(row: Record<string, any>): CollectionLeaseRecord | null {
+        const expiresAt = Number(row.expiresAt);
+        const updatedAt = Number(row.updatedAt);
+        if (
+            typeof row.leaseId !== 'string' ||
+            typeof row.collectionName !== 'string' ||
+            typeof row.ownerId !== 'string' ||
+            !Number.isFinite(expiresAt) ||
+            !Number.isFinite(updatedAt)
+        ) {
+            return null;
+        }
+        return {
+            leaseId: row.leaseId,
+            collectionName: row.collectionName,
+            ownerId: row.ownerId,
+            expiresAt,
+            updatedAt,
+        };
+    }
+
+    private async readCollectionLeaseRecords(): Promise<CollectionLeaseRecord[]> {
+        await this.ensureInitialized();
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized after ensureInitialized().');
+        }
+        const exists = await this.client.hasCollection({
+            collection_name: COLLECTION_LEASE_COLLECTION,
+        });
+        if (!exists.value) {
+            return [];
+        }
+        await this.ensureRawCollectionLoaded(COLLECTION_LEASE_COLLECTION);
+        const result = await this.client.query({
+            collection_name: COLLECTION_LEASE_COLLECTION,
+            output_fields: ['leaseId', 'collectionName', 'ownerId', 'expiresAt', 'updatedAt'],
+            limit: 16_384,
+        });
+        if (result.status?.error_code && result.status.error_code !== 'Success') {
+            throw new Error(`Failed to read collection leases: ${result.status.reason || result.status.error_code}`);
+        }
+        return (result.data || [])
+            .map((row: Record<string, any>) => this.parseLeaseRecord(row))
+            .filter((record: CollectionLeaseRecord | null): record is CollectionLeaseRecord => record !== null);
+    }
+
+    private async deleteExpiredLeaseRecords(records: CollectionLeaseRecord[], expiresAt: number): Promise<void> {
+        if (records.length === 0 || !this.client) {
+            return;
+        }
+        const ids = records.map(record => JSON.stringify(record.leaseId)).join(', ');
+        await this.client.delete({
+            collection_name: COLLECTION_LEASE_COLLECTION,
+            filter: `leaseId in [${ids}] && expiresAt <= ${expiresAt}`,
+        });
+    }
+
+    async reapExpiredCollectionLeases(now: number = Date.now()): Promise<CollectionLeaseReapResult> {
+        const records = await this.readCollectionLeaseRecords();
+        const byCollection = new Map<string, CollectionLeaseRecord[]>();
+        for (const record of records) {
+            if (record.collectionName === COLLECTION_LEASE_COLLECTION) {
+                continue;
+            }
+            const grouped = byCollection.get(record.collectionName) || [];
+            grouped.push(record);
+            byCollection.set(record.collectionName, grouped);
+        }
+
+        const result: CollectionLeaseReapResult = {
+            releasedCollections: [],
+            deletedLeaseRecords: 0,
+        };
+        for (const [collectionName, collectionRecords] of byCollection) {
+            if (collectionRecords.some(record => record.expiresAt > now)) {
+                continue;
+            }
+
+            const refreshed = await this.readCollectionLeaseRecords();
+            const currentRecords = refreshed.filter(record => record.collectionName === collectionName);
+            if (currentRecords.some(record => record.expiresAt > now)) {
+                continue;
+            }
+
+            if (!this.client) {
+                throw new Error('MilvusClient is not initialized after ensureInitialized().');
+            }
+            const exists = await this.client.hasCollection({ collection_name: collectionName });
+            if (!exists.value) {
+                await this.deleteExpiredLeaseRecords(currentRecords, now);
+                result.deletedLeaseRecords += currentRecords.filter(record => record.expiresAt <= now).length;
+                continue;
+            }
+            await this.client.releaseCollection({ collection_name: collectionName });
+            await this.deleteExpiredLeaseRecords(currentRecords, now);
+            result.releasedCollections.push(collectionName);
+            result.deletedLeaseRecords += currentRecords.filter(record => record.expiresAt <= now).length;
+        }
+        return result;
+    }
+
     /**
      * Ensure collection is loaded before search/query operations
      */
@@ -155,6 +490,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
         }
 
         try {
+            await this.upsertCollectionLease(collectionName);
             // Check if collection is loaded
             const result = await this.client.getLoadState({
                 collection_name: collectionName
@@ -169,6 +505,28 @@ export class MilvusVectorDatabase implements VectorDatabase {
         } catch (error) {
             console.error(`[MilvusDB] ❌ Failed to ensure collection '${collectionName}' is loaded:`, error);
             throw error;
+        }
+    }
+
+    private isCollectionReleasedError(error: unknown): boolean {
+        const message = formatErrorDetails(error);
+        return /collection.*(not loaded|not load)|collection.*(released|release)|load state.*not.*loaded/i.test(message);
+    }
+
+    private async runWithCollectionLoadRetry<T>(
+        collectionName: string,
+        operation: () => Promise<T>,
+    ): Promise<T> {
+        await this.ensureLoaded(collectionName);
+        try {
+            return await operation();
+        } catch (error) {
+            if (!this.isCollectionReleasedError(error)) {
+                throw error;
+            }
+            console.warn(`[MilvusDB] Collection '${collectionName}' was released while handling a request; loading it once more.`);
+            await this.ensureLoaded(collectionName);
+            return operation();
         }
     }
 
@@ -304,6 +662,8 @@ export class MilvusVectorDatabase implements VectorDatabase {
         if (!this.client) {
             throw new Error('MilvusClient is not initialized. Call ensureInitialized() first.');
         }
+
+        await this.upsertCollectionLease(collectionName);
 
         let attempt = 1;
         let interval = initialInterval;
@@ -542,10 +902,10 @@ export class MilvusVectorDatabase implements VectorDatabase {
             throw new Error('MilvusClient is not initialized after ensureInitialized().');
         }
 
-        await this.client.dropCollection({
-            collection_name: collectionName,
-        });
+        await this.releaseCollectionLease(collectionName);
+        await this.client.dropCollection({ collection_name: collectionName });
     }
+
 
     async hasCollection(collectionName: string): Promise<boolean> {
         await this.ensureInitialized();
@@ -633,6 +993,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
 
     async insert(collectionName: string, documents: VectorDocument[], options: InsertOptions = {}): Promise<void> {
         await this.ensureInitialized();
+        await this.upsertCollectionLease(collectionName);
         if (!options.deferFlushLoad) {
             await this.measureFlushLoad(() => this.ensureLoaded(collectionName));
         }
@@ -662,14 +1023,13 @@ export class MilvusVectorDatabase implements VectorDatabase {
 
     async search(collectionName: string, queryVector: number[], options?: SearchOptions): Promise<VectorSearchResult[]> {
         await this.ensureInitialized();
-        await this.ensureLoaded(collectionName);
+        return this.runWithCollectionLoadRetry(collectionName, async () => {
+            if (!this.client) {
+                throw new Error('MilvusClient is not initialized after ensureInitialized().');
+            }
 
-        if (!this.client) {
-            throw new Error('MilvusClient is not initialized after ensureInitialized().');
-        }
-
-        await this.ensureCurrentStructuredSchema(collectionName);
-        const searchParams: any = {
+            await this.ensureCurrentStructuredSchema(collectionName);
+            const searchParams: any = {
             collection_name: collectionName,
             data: [queryVector],
             limit: options?.topK || 10,
@@ -681,20 +1041,20 @@ export class MilvusVectorDatabase implements VectorDatabase {
             searchParams.expr = options.filterExpr;
         }
 
-        let searchResult: any;
-        try {
-            searchResult = await this.client.search(searchParams);
-        } catch (error) {
-            throw isMissingStructuredFieldError(error)
-                ? createSchemaMismatchError(collectionName, 'Milvus rejected one or more structured output fields.')
-                : error;
-        }
+            let searchResult: any;
+            try {
+                searchResult = await this.client.search(searchParams);
+            } catch (error) {
+                throw isMissingStructuredFieldError(error)
+                    ? createSchemaMismatchError(collectionName, 'Milvus rejected one or more structured output fields.')
+                    : error;
+            }
 
-        if (!searchResult.results || searchResult.results.length === 0) {
-            return [];
-        }
+            if (!searchResult.results || searchResult.results.length === 0) {
+                return [];
+            }
 
-        return searchResult.results.map((result: any) => {
+            return searchResult.results.map((result: any) => {
             let metadata = {};
             try {
                 metadata = mergeStructuredMetadata(result, JSON.parse(result.metadata || '{}'), {
@@ -718,32 +1078,30 @@ export class MilvusVectorDatabase implements VectorDatabase {
                 },
                 score: result.score,
             };
+            });
         });
     }
 
     async delete(collectionName: string, ids: string[]): Promise<void> {
         await this.ensureInitialized();
-        await this.ensureLoaded(collectionName);
-
-        if (!this.client) {
-            throw new Error('MilvusClient is not initialized after ensureInitialized().');
-        }
-
-        await this.client.delete({
-            collection_name: collectionName,
-            filter: `id in [${ids.map(id => `"${id}"`).join(', ')}]`,
+        await this.runWithCollectionLoadRetry(collectionName, async () => {
+            if (!this.client) {
+                throw new Error('MilvusClient is not initialized after ensureInitialized().');
+            }
+            await this.client.delete({
+                collection_name: collectionName,
+                filter: `id in [${ids.map(id => `"${id}"`).join(', ')}]`,
+            });
         });
     }
 
     async query(collectionName: string, filter: string, outputFields: string[], limit?: number): Promise<Record<string, any>[]> {
         await this.ensureInitialized();
-        await this.ensureLoaded(collectionName);
-
-        if (!this.client) {
-            throw new Error('MilvusClient is not initialized after ensureInitialized().');
-        }
-
-        try {
+        return this.runWithCollectionLoadRetry(collectionName, async () => {
+            if (!this.client) {
+                throw new Error('MilvusClient is not initialized after ensureInitialized().');
+            }
+            try {
             const requestedOutputFields = outputFields;
             const hydrationOutputFields = getMetadataHydrationOutputFields(requestedOutputFields);
             const queryParams: any = {
@@ -784,10 +1142,11 @@ export class MilvusVectorDatabase implements VectorDatabase {
             }
 
             return hydrateSlimMetadataRows(result.data || [], outputFields);
-        } catch (error) {
-            console.error(`[MilvusDB] ❌ Failed to query collection '${collectionName}':`, error);
-            throw error;
-        }
+            } catch (error) {
+                console.error(`[MilvusDB] ❌ Failed to query collection '${collectionName}':`, error);
+                throw error;
+            }
+        });
     }
 
     async createHybridCollection(collectionName: string, dimension: number, description?: string): Promise<void> {
@@ -904,6 +1263,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
 
     async insertHybrid(collectionName: string, documents: VectorDocument[], options: InsertOptions = {}): Promise<void> {
         await this.ensureInitialized();
+        await this.upsertCollectionLease(collectionName);
         if (!options.deferFlushLoad) {
             await this.measureFlushLoad(() => this.ensureLoaded(collectionName));
         }
@@ -932,6 +1292,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
 
     async finalizeCollectionWrites(collectionName: string): Promise<void> {
         await this.ensureInitialized();
+        await this.upsertCollectionLease(collectionName);
         await withMilvusConnectionRetry(
             `Milvus finalize writes for '${collectionName}'`,
             async () => this.measureFlushLoad(async () => {
@@ -966,13 +1327,12 @@ export class MilvusVectorDatabase implements VectorDatabase {
 
     async hybridSearch(collectionName: string, searchRequests: HybridSearchRequest[], options?: HybridSearchOptions): Promise<HybridSearchResult[]> {
         await this.ensureInitialized();
-        await this.ensureLoaded(collectionName);
+        return this.runWithCollectionLoadRetry(collectionName, async () => {
+            if (!this.client) {
+                throw new Error('MilvusClient is not initialized after ensureInitialized().');
+            }
 
-        if (!this.client) {
-            throw new Error('MilvusClient is not initialized after ensureInitialized().');
-        }
-
-        try {
+            try {
             // Generate OpenAI embedding for the first search request (dense)
             console.log(`[MilvusDB] 🔍 Preparing hybrid search for collection: ${collectionName}`);
 
@@ -1082,10 +1442,11 @@ export class MilvusVectorDatabase implements VectorDatabase {
                 };
             });
 
-        } catch (error) {
-            console.error(`[MilvusDB] ❌ Failed to perform hybrid search on collection '${collectionName}':`, error);
-            throw error;
-        }
+            } catch (error) {
+                console.error(`[MilvusDB] ❌ Failed to perform hybrid search on collection '${collectionName}':`, error);
+                throw error;
+            }
+        });
     }
 
     async getCollectionDescription(collectionName: string): Promise<string> {
@@ -1258,4 +1619,5 @@ export class MilvusVectorDatabase implements VectorDatabase {
             return -1;
         }
     }
+
 }

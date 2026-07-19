@@ -1,4 +1,8 @@
-import { configManager } from "@hitmux/hitmux-context-engine-core";
+import {
+    configManager,
+    DEFAULT_COLLECTION_LEASE_HEARTBEAT_MS,
+    DEFAULT_COLLECTION_LEASE_MISS_LIMIT,
+} from "@hitmux/hitmux-context-engine-core";
 import type {
     CodebaseIdentityMode,
     IncrementalIndexFileChange,
@@ -40,6 +44,9 @@ export interface ContextMcpConfig {
     milvusAddress?: string; // Optional, can be auto-resolved from token
     milvusToken?: string;
     databaseUseSystemProxy: boolean;
+    collectionLeaseEnabled?: boolean;
+    collectionLeaseHeartbeatMs?: number;
+    collectionLeaseMissLimit?: number;
     collectionNameOverride?: string;
     codebaseIdentityMode?: CodebaseIdentityMode;
     codebaseIdentity?: string;
@@ -223,6 +230,34 @@ function normalizePositiveInteger(value: number | undefined, fallback: number): 
         : fallback;
 }
 
+function getCollectionLeaseHeartbeatMs(): number {
+    const value = configManager.getNumber("collectionLeaseHeartbeatMs");
+    if (value === undefined) {
+        return DEFAULT_COLLECTION_LEASE_HEARTBEAT_MS;
+    }
+    if (Number.isInteger(value) && value > 0) {
+        return value;
+    }
+    console.warn(
+        `[DEBUG] Ignoring invalid config.collectionLeaseHeartbeatMs: ${value}. Expected a positive integer.`,
+    );
+    return DEFAULT_COLLECTION_LEASE_HEARTBEAT_MS;
+}
+
+function getCollectionLeaseMissLimit(): number {
+    const value = configManager.getNumber("collectionLeaseMissLimit");
+    if (value === undefined) {
+        return DEFAULT_COLLECTION_LEASE_MISS_LIMIT;
+    }
+    if (Number.isInteger(value) && value >= 2) {
+        return value;
+    }
+    console.warn(
+        `[DEBUG] Ignoring invalid config.collectionLeaseMissLimit: ${value}. Expected an integer of at least 2.`,
+    );
+    return DEFAULT_COLLECTION_LEASE_MISS_LIMIT;
+}
+
 export function getEmbeddingBaseUrlForRerank(
     config: Pick<ContextMcpConfig, "embeddingProvider" | "openaiBaseUrl" | "geminiBaseUrl">,
 ): string | undefined {
@@ -295,6 +330,9 @@ export function createMcpConfig(defaultServerVersion = "0.0.0"): ContextMcpConfi
     console.log(
         `[DEBUG] collectionNameOverride: ${configManager.getString("collectionNameOverride") || "NOT SET"}`,
     );
+    console.log(
+        `[DEBUG] collectionLeaseEnabled: ${getBooleanFromConfig("collectionLeaseEnabled", true)}`,
+    );
 
     const embeddingProvider = configManager.getString("embeddingProvider") as
         | "OpenAI"
@@ -357,6 +395,9 @@ export function createMcpConfig(defaultServerVersion = "0.0.0"): ContextMcpConfi
             "databaseUseSystemProxy",
             false,
         ),
+        collectionLeaseEnabled: getBooleanFromConfig("collectionLeaseEnabled", true),
+        collectionLeaseHeartbeatMs: getCollectionLeaseHeartbeatMs(),
+        collectionLeaseMissLimit: getCollectionLeaseMissLimit(),
         collectionNameOverride: configManager.getString(
             "collectionNameOverride",
         ),
@@ -395,6 +436,9 @@ export function logConfigurationSummary(config: ContextMcpConfig): void {
     );
     console.log(
         `[MCP] Database System Proxy: ${config.databaseUseSystemProxy ? "enabled" : "disabled"}`,
+    );
+    console.log(
+        `[MCP] Collection lease: ${config.collectionLeaseEnabled ? `enabled (${config.collectionLeaseHeartbeatMs}ms x ${config.collectionLeaseMissLimit})` : "disabled"}`,
     );
     if (config.collectionNameOverride) {
         console.log(`[MCP] Collection Name Override: Configured`);

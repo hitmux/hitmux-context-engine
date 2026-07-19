@@ -15,6 +15,7 @@ export {
     StructuredMetadataField
 } from './types';
 export * from './remote-index-manifest';
+export * from './collection-lease';
 
 // Implementation class exports
 export { MilvusRestfulVectorDatabase, MilvusRestfulConfig } from './milvus-restful-vectordb';

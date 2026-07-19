@@ -567,6 +567,10 @@ export class Context {
         }
     }
 
+    async close(): Promise<void> {
+        await this.vectorDatabase.close?.();
+    }
+
     /**
      * Get embedding instance
      */
@@ -996,16 +1000,27 @@ export class Context {
             () => this.verifyIndexedCollection(codebasePath, result.totalChunks)
         );
         this.drainVectorDatabasePerformanceMetrics(timingMetrics);
+        // File checkpoints intentionally skip split/embed work for completed
+        // files, so the current run's chunk counter excludes their existing
+        // vectors. The collection row count preserves the public full-index
+        // total when finishing such a resumed run.
+        const resumedRowCount = existingResumeJournal?.usesFileCheckpoints() === true
+            && result.status === 'completed'
+            ? await this.vectorDatabase.getCollectionRowCount(collectionName)
+            : undefined;
+        const reportedTotalChunks = resumedRowCount !== undefined && resumedRowCount >= result.totalChunks
+            ? resumedRowCount
+            : result.totalChunks;
 
         if (result.status === 'completed') {
-            console.log(`[Context] ✅ Codebase indexing completed! Processed ${result.processedFiles} files in total, generated ${result.totalChunks} code chunks`);
+            console.log(`[Context] ✅ Codebase indexing completed! Processed ${result.processedFiles} files in total, generated ${reportedTotalChunks} code chunks`);
         } else {
             console.warn(`[Context] ⚠️ Codebase indexing stopped at the chunk limit. Processed ${result.processedFiles}/${codeFiles.length} files, generated ${result.totalChunks} code chunks`);
         }
         timingMetrics.totalIndexingMs = this.getMonotonicMs() - indexingStartedAt;
         this.logIndexingTimingSummary(codebasePath, {
             indexedFiles: result.processedFiles,
-            totalChunks: result.totalChunks,
+            totalChunks: reportedTotalChunks,
             embeddingBatchSize: result.embeddingBatchSize,
             embeddingConcurrency: result.embeddingConcurrency,
             fileProcessingConcurrency: result.fileProcessingConcurrency
@@ -1028,13 +1043,21 @@ export class Context {
             codebasePath,
             result.status,
             result.processedFiles,
-            result.totalChunks
+            reportedTotalChunks
         );
-        await resumeJournal.complete();
+        if (result.status === 'completed') {
+            await resumeJournal.complete();
+        } else {
+            // Keep the acknowledged prefix after a hard chunk cap. A normal
+            // later index call reuses this collection before considering an
+            // incremental sync, so deleting the journal here would strand the
+            // partial index with no safe recovery state.
+            await resumeJournal.flush();
+        }
 
         return {
             indexedFiles: result.processedFiles,
-            totalChunks: result.totalChunks,
+            totalChunks: reportedTotalChunks,
             status: result.status
         };
     }
@@ -1913,7 +1936,7 @@ export class Context {
         });
 
         if (options.targetRole === 'all') {
-            return decoratedResults
+            const orderedResults = decoratedResults
                 .sort((a, b) => {
                     const anchorDelta = this.getAllTargetAnchorPriority(a, query) - this.getAllTargetAnchorPriority(b, query);
                     if (anchorDelta !== 0) return anchorDelta;
@@ -1928,8 +1951,9 @@ export class Context {
                     if (scoreDelta !== 0) return scoreDelta;
 
                     return a.originalOrder - b.originalOrder;
-                })
-                .slice(0, outputLimit)
+                });
+
+            return diversifySemanticSearchResultsByFile(orderedResults, outputLimit)
                 .map(result => this.stripGroupedSearchResultSortFields(result));
         }
 
@@ -4284,6 +4308,38 @@ export class Context {
             inFlightEmbeddings: new Map(),
             definitionIdentifiers: new Map()
         };
+        const fileCheckpointTrackingEnabled = options.resumeJournal?.usesFileCheckpoints() === true;
+        const fileCheckpointBatches = new Map<string, {
+            bufferedChunks: number;
+            inputComplete: boolean;
+            failed: boolean;
+            pendingBatches: number;
+        }>();
+
+        const getRelativePath = (filePath: string): string => path.relative(codebasePath, filePath).replace(/\\/g, '/');
+        const getFileCheckpointBatch = (relativePath: string) => {
+            let tracking = fileCheckpointBatches.get(relativePath);
+            if (!tracking) {
+                tracking = { bufferedChunks: 0, inputComplete: false, failed: false, pendingBatches: 0 };
+                fileCheckpointBatches.set(relativePath, tracking);
+            }
+            return tracking;
+        };
+        const completeFileCheckpointIfReady = (relativePath: string): void => {
+            const tracking = fileCheckpointBatches.get(relativePath);
+            if (tracking?.inputComplete === true
+                && tracking.bufferedChunks === 0
+                && tracking.pendingBatches === 0
+                && tracking.failed === false) {
+                options.resumeJournal?.markFileComplete(relativePath);
+            }
+        };
+        const finishFileCheckpoint = (relativePath: string): void => {
+            if (!fileCheckpointTrackingEnabled) return;
+            const tracking = getFileCheckpointBatch(relativePath);
+            tracking.inputComplete = true;
+            completeFileCheckpointIfReady(relativePath);
+        };
 
         const throwBatchError = (error: unknown, context: string): never => {
             if (error instanceof EmbeddingError) {
@@ -4343,7 +4399,20 @@ export class Context {
         const enqueueChunkBuffer = async (buffer: Array<{ chunk: CodeChunk; codebasePath: string }>): Promise<void> => {
             const batch = buffer;
             const releaseSlot = await this.acquireIndexingBatchSlot(EMBEDDING_CONCURRENCY);
-            const task: Promise<BatchResult> = this.processChunkBuffer(batch, timingMetrics, {
+            const batchRelativePathCounts = new Map<string, number>();
+            if (fileCheckpointTrackingEnabled) {
+                for (const { chunk } of batch) {
+                    const relativePath = this.getChunkDocumentIdentity(chunk, codebasePath).relativePath;
+                    batchRelativePathCounts.set(relativePath, (batchRelativePathCounts.get(relativePath) || 0) + 1);
+                }
+            }
+            for (const [relativePath, chunkCount] of batchRelativePathCounts) {
+                const tracking = getFileCheckpointBatch(relativePath);
+                tracking.bufferedChunks -= chunkCount;
+                tracking.pendingBatches++;
+            }
+            let task!: Promise<BatchResult>;
+            task = this.processChunkBuffer(batch, timingMetrics, {
                 deferFlushLoad: options.deferVectorFlushLoad === true,
                 ensureCollectionBeforeInsert: options.ensureCollectionBeforeInsert,
                 abortSignal: signal,
@@ -4353,6 +4422,17 @@ export class Context {
             }, runCache)
                 .then(() => ({ ok: true as const }))
                 .catch((error) => ({ ok: false as const, error }))
+                .then((result) => {
+                    for (const relativePath of batchRelativePathCounts.keys()) {
+                        const tracking = getFileCheckpointBatch(relativePath);
+                        tracking.pendingBatches--;
+                        if (!result.ok) {
+                            tracking.failed = true;
+                        }
+                        completeFileCheckpointIfReady(relativePath);
+                    }
+                    return result;
+                })
                 .finally(() => {
                     releaseSlot();
                     activeBatches.delete(task);
@@ -4408,11 +4488,15 @@ export class Context {
                     if (extension === '.ipynb') {
                         content = this.extractNotebookSource(content);
                     }
-                    options.resumeJournal?.prepareFile(
-                        path.relative(codebasePath, filePath).replace(/\\/g, '/'),
+                    const relativePath = getRelativePath(filePath);
+                    const skipCompleteFile = options.resumeJournal?.prepareFile(
+                        relativePath,
                         content,
                         options.resumeMode === true,
-                    );
+                    ) === true;
+                    if (skipCompleteFile) {
+                        return { content: '', chunks: [] };
+                    }
                     const language = this.getLanguageFromFilePath(filePath);
                     const chunks = this.deduplicateFileChunks(
                         await splitter.split(content, language, filePath),
@@ -4463,6 +4547,9 @@ export class Context {
 
                     const chunk = chunks[chunkIndex];
                     chunkBuffer.push({ chunk, codebasePath });
+                    if (fileCheckpointTrackingEnabled) {
+                        getFileCheckpointBatch(getRelativePath(filePath)).bufferedChunks++;
+                    }
                     totalChunks++;
 
                     if (chunkBuffer.length >= EMBEDDING_BATCH_SIZE) {
@@ -4492,6 +4579,8 @@ export class Context {
                 if (!completedWholeFile) {
                     return;
                 }
+
+                finishFileCheckpoint(getRelativePath(filePath));
 
                 processedFiles++;
                 if (chunks.length === 0) {

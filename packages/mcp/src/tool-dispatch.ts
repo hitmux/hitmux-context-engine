@@ -36,6 +36,15 @@ export function startBackgroundSyncOnce(runtime: ToolDispatchRuntime): void {
     runtime.backgroundSyncStarted = true;
 }
 
+function removeSearchContextLimit(args: unknown): unknown {
+    if (typeof args !== "object" || args === null || Array.isArray(args)) {
+        return args;
+    }
+
+    const { limit: _limit, ...searchContextArgs } = args as Record<string, unknown>;
+    return searchContextArgs;
+}
+
 export async function dispatchMcpTool(
     runtime: ToolDispatchRuntime,
     name: string,
@@ -52,7 +61,9 @@ export async function dispatchMcpTool(
             case "index_codebase":
                 return await runtime.toolHandlers.handleIndexCodebase(args);
             case "search_context":
-                return await runtime.toolHandlers.handleSearchContext(args);
+                return await runtime.toolHandlers.handleSearchContext(
+                    removeSearchContextLimit(args),
+                );
             case "clear_index":
                 return await runtime.toolHandlers.handleClearIndex(args);
             case "get_indexing_status":

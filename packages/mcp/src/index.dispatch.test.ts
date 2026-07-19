@@ -5,6 +5,7 @@ import { dispatchMcpTool } from "./tool-dispatch.js";
 
 function createRuntime() {
     const calls: string[] = [];
+    const searchContextArgs: unknown[] = [];
     const runtime = {
         backgroundSyncStarted: false,
         syncManager: {
@@ -17,8 +18,9 @@ function createRuntime() {
                 calls.push("handleIndexCodebase");
                 return { content: [{ type: "text", text: "indexed" }] };
             },
-            handleSearchContext: async () => {
+            handleSearchContext: async (args: unknown) => {
                 calls.push("handleSearchContext");
+                searchContextArgs.push(args);
                 return { content: [{ type: "text", text: "searched" }] };
             },
             handleClearIndex: async () => {
@@ -35,7 +37,7 @@ function createRuntime() {
             },
         },
     };
-    return { calls, runtime };
+    return { calls, runtime, searchContextArgs };
 }
 
 test("first index_codebase dispatch starts background sync after the handler", async () => {
@@ -95,6 +97,19 @@ test("first search_context dispatch starts background sync before the handler", 
 
     assert.deepEqual(calls, ["startBackgroundSync", "handleSearchContext"]);
     assert.equal(runtime.backgroundSyncStarted, true);
+});
+
+test("search_context dispatch removes manual limit so MCP always uses automatic TopK", async () => {
+    const { runtime, searchContextArgs } = createRuntime();
+
+    await dispatchMcpTool(
+        runtime,
+        "search_context",
+        { path: "/repo", query: "search terms", limit: 3 },
+        (name) => ({ isError: true, content: [{ type: "text", text: name }] }),
+    );
+
+    assert.deepEqual(searchContextArgs, [{ path: "/repo", query: "search terms" }]);
 });
 
 test("first get_indexing_status dispatch starts background sync before the handler", async () => {

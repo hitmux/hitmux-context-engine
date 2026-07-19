@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import {
     Context,
+    COLLECTION_LEASE_COLLECTION,
     Embedding,
     FileSynchronizer,
     MilvusVectorDatabase,
@@ -148,8 +149,9 @@ export async function runCliManageCommand(
         return 1;
     }
 
+    let runtime: ReturnType<typeof createCliRuntime> | undefined;
     try {
-        const runtime = createCliRuntime(options);
+        runtime = createCliRuntime(options);
         if (command.action === "list") {
             await listCollections(command.target, runtime, options);
             return 0;
@@ -165,6 +167,14 @@ export async function runCliManageCommand(
     } catch (error) {
         writeStderr(options, `${formatErrorMessage(error)}\n`);
         return 1;
+    } finally {
+        if (runtime) {
+            try {
+                await runtime.context.close?.();
+            } catch (error) {
+                writeStderr(options, `Failed to release collection leases: ${formatErrorMessage(error)}\n`);
+            }
+        }
     }
 }
 
@@ -191,6 +201,9 @@ function createCliRuntime(options: CliManageOptions) {
                     token: currentConfig.milvusToken,
                 }),
                 useSystemProxy: currentConfig.databaseUseSystemProxy,
+                collectionLeaseEnabled: currentConfig.collectionLeaseEnabled,
+                collectionLeaseHeartbeatMs: currentConfig.collectionLeaseHeartbeatMs,
+                collectionLeaseMissLimit: currentConfig.collectionLeaseMissLimit,
             }));
     const vectorDatabase = createVectorDatabase(config);
     const createEmbedding = options.createEmbedding ?? createEmbeddingInstance;
@@ -600,7 +613,10 @@ async function getCollectionOverviews(
     const overviews: CollectionOverview[] = [];
 
     for (const collectionName of collectionNames.sort()) {
-        if (collectionName === REMOTE_INDEX_MANIFEST_COLLECTION) {
+        if (
+            collectionName === REMOTE_INDEX_MANIFEST_COLLECTION ||
+            collectionName === COLLECTION_LEASE_COLLECTION
+        ) {
             continue;
         }
 

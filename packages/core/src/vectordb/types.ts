@@ -93,6 +93,9 @@ export interface HybridSearchResult {
 }
 
 export interface VectorDatabase {
+    /** Release resources held by this runtime, if the adapter owns any. */
+    close?(): Promise<void>;
+
     /**
      * Create collection
      * @param collectionName Collection name

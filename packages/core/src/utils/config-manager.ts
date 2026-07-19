@@ -35,6 +35,9 @@ export interface HitmuxConfig {
     milvusUseRestful?: boolean;
     milvusCollectionLimitCheckTimeoutMs?: number;
     zillizBaseUrl?: string;
+    collectionLeaseEnabled?: boolean;
+    collectionLeaseHeartbeatMs?: number;
+    collectionLeaseMissLimit?: number;
     collectionNameOverride?: string;
     codebaseIdentityMode?: 'path' | 'gitRemote' | 'global' | 'custom';
     codebaseIdentity?: string;
@@ -358,6 +361,11 @@ projectWatcher = true
 projectWatcherDebounceMs = 1000
 projectWatcherUsePolling = false
 projectWatcherFallbackScanIntervalMs = 600000
+
+# Loaded collections are leased by each runtime and released by the user service after expiry.
+collectionLeaseEnabled = true
+collectionLeaseHeartbeatMs = 30000
+collectionLeaseMissLimit = 3
 `;
 
 const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
@@ -510,6 +518,21 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
         key: 'zillizBaseUrl',
         description: 'Zilliz management API base URL.',
         example: 'https://api.cloud.zilliz.com'
+    },
+    {
+        key: 'collectionLeaseEnabled',
+        description: 'Keep loaded gRPC collections leased until this runtime exits.',
+        example: 'true'
+    },
+    {
+        key: 'collectionLeaseHeartbeatMs',
+        description: 'Collection lease heartbeat interval in milliseconds; must be a positive integer.',
+        example: '30000'
+    },
+    {
+        key: 'collectionLeaseMissLimit',
+        description: 'Expired heartbeat periods before a collection may be released; must be at least 2.',
+        example: '3'
     },
     {
         key: 'collectionNameOverride',

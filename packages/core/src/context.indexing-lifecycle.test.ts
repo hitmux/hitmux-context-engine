@@ -74,6 +74,23 @@ class OneChunkSplitter implements Splitter {
     setChunkOverlap(): void { }
 }
 
+class TwoChunkSplitter implements Splitter {
+    async split(code: string, language: string, filePath?: string): Promise<CodeChunk[]> {
+        return code.split('\n').map((content, index) => ({
+            content,
+            metadata: {
+                startLine: index + 1,
+                endLine: index + 1,
+                language,
+                filePath,
+            },
+        }));
+    }
+
+    setChunkSize(): void { }
+    setChunkOverlap(): void { }
+}
+
 class SlowTrackingEmbedding extends TestEmbedding {
     public activeRequests = 0;
     public maxActiveRequests = 0;
@@ -167,6 +184,18 @@ const createVectorDatabase = (): jest.Mocked<VectorDatabase> => ({
     checkCollectionLimit: jest.fn().mockResolvedValue(true),
     getCollectionRowCount: jest.fn().mockResolvedValue(999),
 });
+
+function getResumeJournalPaths(codebasePath: string, collectionName: string): { headerPath: string; progressPath: string } {
+    const key = crypto
+        .createHash('sha256')
+        .update(`${codebasePath}\0${collectionName}`)
+        .digest('hex');
+    const directory = path.join(os.homedir(), '.hitmux-context-engine', 'index-resume');
+    return {
+        headerPath: path.join(directory, `${key}.json`),
+        progressPath: path.join(directory, `${key}.jsonl`),
+    };
+}
 
 describe('Context indexing lifecycle', () => {
     let tempRoot: string;
@@ -402,6 +431,15 @@ describe('Context indexing lifecycle', () => {
         await expect(synchronizer.checkForChanges({ deferSnapshotUpdate: true })).resolves.toMatchObject({
             added: expect.arrayContaining(['index.ts', 'skipped.ts']),
         });
+        await expect(context.hasResumableFullIndex(project)).resolves.toBe(true);
+
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        await expect(context.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 2,
+            totalChunks: 2,
+            status: 'completed',
+        });
+        await expect(context.hasResumableFullIndex(project)).resolves.toBe(false);
     });
 
     it('refreshes the remote manifest when incremental sync has no changes', async () => {
@@ -1244,6 +1282,145 @@ describe('Context indexing lifecycle', () => {
         expect(resumedEmbedding.batchTexts).toHaveLength(1);
         expect(vectorDatabase.insert.mock.calls[2][2]).toMatchObject({ upsert: true });
         await expect(resumedContext.hasResumableFullIndex(project)).resolves.toBe(false);
+    });
+
+    it('re-embeds every chunk from a partially acknowledged file with upsert', async () => {
+        const project = path.join(tempRoot, 'partial-file-resume-project');
+        await fs.mkdir(project, { recursive: true });
+        await fs.writeFile(path.join(project, 'index.ts'), 'export const first = 1;\nexport const second = 2;');
+        await writeProjectConfig(project, {
+            embeddingBatchSize: 1,
+            embeddingConcurrency: 1,
+            fileProcessingConcurrency: 1,
+        });
+        const vectorDatabase = createVectorDatabase();
+        let collectionExists = false;
+        let failSecondInsert = true;
+        vectorDatabase.hasCollection.mockImplementation(async () => collectionExists);
+        vectorDatabase.createCollection.mockImplementation(async () => {
+            collectionExists = true;
+        });
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        vectorDatabase.insert.mockImplementation(async () => {
+            if (vectorDatabase.insert.mock.calls.length === 2 && failSecondInsert) {
+                throw new Error('14 UNAVAILABLE: No connection established');
+            }
+        });
+        const initialContext = new Context({
+            hybridMode: false,
+            embedding: new TrackingEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TwoChunkSplitter(),
+        });
+
+        await expect(initialContext.indexCodebase(project)).rejects.toThrow('UNAVAILABLE');
+        await expect(initialContext.hasResumableFullIndex(project)).resolves.toBe(true);
+
+        failSecondInsert = false;
+        const resumedEmbedding = new TrackingEmbedding();
+        const resumedContext = new Context({
+            hybridMode: false,
+            embedding: resumedEmbedding,
+            vectorDatabase,
+            codeSplitter: new TwoChunkSplitter(),
+        });
+
+        await expect(resumedContext.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 1,
+            totalChunks: 2,
+            status: 'completed',
+        });
+        expect(resumedEmbedding.batchTexts).toEqual([
+            ['export const first = 1;'],
+            ['export const second = 2;'],
+        ]);
+        expect(vectorDatabase.insert.mock.calls[2][2]).toMatchObject({ upsert: true });
+        await expect(resumedContext.hasResumableFullIndex(project)).resolves.toBe(false);
+    });
+
+    it('migrates a legacy document journal and embeds only its unacknowledged chunks', async () => {
+        const project = path.join(tempRoot, 'legacy-document-resume-project');
+        await fs.mkdir(project, { recursive: true });
+        const firstChunk = 'export const first = 1;';
+        const secondChunk = 'export const second = 2;';
+        const source = `${firstChunk}\n${secondChunk}`;
+        await fs.writeFile(path.join(project, 'index.ts'), source);
+        await writeProjectConfig(project, {
+            embeddingBatchSize: 1,
+            embeddingConcurrency: 1,
+            fileProcessingConcurrency: 1,
+        });
+        const vectorDatabase = createVectorDatabase();
+        let collectionExists = false;
+        let failSecondInsert = true;
+        vectorDatabase.hasCollection.mockImplementation(async () => collectionExists);
+        vectorDatabase.createCollection.mockImplementation(async () => {
+            collectionExists = true;
+        });
+        vectorDatabase.getCollectionRowCount.mockResolvedValue(2);
+        vectorDatabase.insert.mockImplementation(async () => {
+            if (vectorDatabase.insert.mock.calls.length === 2 && failSecondInsert) {
+                throw new Error('14 UNAVAILABLE: No connection established');
+            }
+        });
+        const initialContext = new Context({
+            hybridMode: false,
+            embedding: new TrackingEmbedding(),
+            vectorDatabase,
+            codeSplitter: new TwoChunkSplitter(),
+        });
+
+        await expect(initialContext.indexCodebase(project)).rejects.toThrow('UNAVAILABLE');
+        const collectionName = initialContext.getCollectionName(project);
+        const journalPaths = getResumeJournalPaths(project, collectionName);
+        const currentHeader = JSON.parse(await fs.readFile(journalPaths.headerPath, 'utf8')) as Record<string, unknown>;
+        const firstDocumentId = `chunk_${crypto
+            .createHash('sha256')
+            .update(`index.ts:1:1:${firstChunk}`, 'utf8')
+            .digest('hex')
+            .substring(0, 16)}`;
+        const fileHash = crypto.createHash('sha256').update(source, 'utf8').digest('hex');
+        await fs.writeFile(journalPaths.headerPath, JSON.stringify({
+            ...currentHeader,
+            version: 1,
+        }), 'utf8');
+        await fs.writeFile(journalPaths.progressPath, `${JSON.stringify({
+            documents: [{
+                id: firstDocumentId,
+                relativePath: 'index.ts',
+                fileHash,
+                vector: [1, 0, 0],
+                content: firstChunk,
+                metadata: { legacy: true },
+            }],
+        })}\n`, 'utf8');
+
+        await expect(initialContext.hasResumableFullIndex(project)).resolves.toBe(true);
+        expect(JSON.parse(await fs.readFile(journalPaths.headerPath, 'utf8'))).toMatchObject({
+            version: 2,
+            checkpointMode: 'document',
+        });
+        const compactedProgress = await fs.readFile(journalPaths.progressPath, 'utf8');
+        expect(compactedProgress).not.toContain('"vector"');
+        expect(compactedProgress).not.toContain('"content"');
+        expect(compactedProgress).not.toContain('"metadata"');
+
+        failSecondInsert = false;
+        const resumedEmbedding = new TrackingEmbedding();
+        const resumedContext = new Context({
+            hybridMode: false,
+            embedding: resumedEmbedding,
+            vectorDatabase,
+            codeSplitter: new TwoChunkSplitter(),
+        });
+
+        await expect(resumedContext.indexCodebase(project)).resolves.toMatchObject({
+            indexedFiles: 1,
+            totalChunks: 2,
+            status: 'completed',
+        });
+        expect(resumedEmbedding.batchTexts).toEqual([[secondChunk]]);
+        expect(vectorDatabase.insert.mock.calls[2][2]).toMatchObject({ upsert: true });
     });
 
     it('refuses to resume when an acknowledged source file changed', async () => {

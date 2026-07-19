@@ -70,7 +70,7 @@ Searches indexed context with a focused query. What gets indexed is controlled b
 
 - `path`: absolute indexed path.
 - `query`: focused query using relevant filenames, headings, identifiers, path words, or domain terms.
-- `limit`: optional exact result count. When omitted, automatic TopK returns `3-12` results from the current score distribution; pass a value to force that count.
+- Automatic TopK selects `3-12` results from the current score distribution. MCP does not expose a manual result limit.
 - `scope`: optional search scope: `all`, `docs`, or `code`. Defaults to `all`.
 
 `clear_index`

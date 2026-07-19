@@ -53,7 +53,7 @@ product options は `~/.hitmux-context-engine/config.conf` または `./.hitmux-
 
 `index_codebase`: directory/context root を hybrid search 用に index します。主な arguments: `path`、`incremental`、`force`、`dryRun`、`customExtensions`、`customIgnorePatterns`。
 
-`search_context`: index 済み context を検索します。`query` には identifiers、filenames、headings、path words、domain terms を含めると有効です。`scope` は `all`、`docs`、`code` で、default は `all`。`limit` を省略すると Automatic TopK が現在の score 分布から `3-12` 件を選び、明示した `limit` はその件数を強制します。
+`search_context`: index 済み context を検索します。`query` には identifiers、filenames、headings、path words、domain terms を含めると有効です。`scope` は `all`、`docs`、`code` で、default は `all`。Automatic TopK が現在の score 分布から `3-12` 件を選び、MCP には結果件数を手動指定するパラメータはありません。
 
 `clear_index`: context root の index data を削除します。
 

@@ -178,11 +178,11 @@ function assertFullToolList(
         }
     }
     const searchContext = tools.find((tool) => tool.name === "search_context");
-    const limitSchema = searchContext?.inputSchema?.properties?.limit as
-        | { default?: unknown; description?: unknown }
-        | undefined;
-    assert.equal(limitSchema?.default, undefined);
-    assert.match(String(limitSchema?.description), /automatic TopK.*3-12/i);
+    assert.deepEqual(
+        Object.keys(searchContext?.inputSchema?.properties ?? {}),
+        ["path", "query", "scope"],
+    );
+    assert.equal(searchContext?.inputSchema?.properties?.limit, undefined);
 }
 
 test("tools/list stays compact until the current directory is indexed", { timeout: 30_000 }, async () => {

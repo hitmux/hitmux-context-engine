@@ -44,9 +44,10 @@ function postTerminalMessage(message: Record<string, unknown>): void {
 }
 
 async function runWorker(): Promise<void> {
+    let context: ReturnType<typeof createRuntimeContext> | undefined;
     try {
         const config = createMcpConfig(request.serverVersion);
-        const context = createRuntimeContext(config);
+        context = createRuntimeContext(config);
         const requestSplitter = createRequestSplitter(request.splitterType);
 
         const stats = await context.indexCodebase(
@@ -77,6 +78,12 @@ async function runWorker(): Promise<void> {
                 type: "failed",
                 errorMessage: error?.message || String(error),
             });
+        }
+    } finally {
+        try {
+            await context?.close();
+        } catch (closeError) {
+            console.warn("Failed to release collection leases:", closeError);
         }
     }
 }

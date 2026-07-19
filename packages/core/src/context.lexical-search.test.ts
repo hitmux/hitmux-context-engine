@@ -2456,7 +2456,7 @@ describe('Context lexical search supplement', () => {
         expect(results.map(result => result.isPrimary)).toEqual([true, false, false]);
     });
 
-    it('keeps targetRole=all ungrouped and in vector order when no strong anchors are present', async () => {
+    it('prioritizes different files for targetRole=all before returning another chunk from a file', async () => {
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.search.mockResolvedValueOnce([
             createVectorResult({
@@ -2508,8 +2508,8 @@ describe('Context lexical search supplement', () => {
 
         expect(results.map(result => `${result.relativePath}:${result.startLine}`)).toEqual([
             'src/a.ts:10',
-            'src/a.ts:40',
             'src/a.test.ts:1',
+            'src/a.ts:40',
         ]);
         expect(results.map(result => result.isPrimary)).toEqual([true, true, true]);
     });
@@ -2579,7 +2579,7 @@ describe('Context lexical search supplement', () => {
         ]);
     });
 
-    it('keeps targetRole=all ungrouped while allowing lexical evidence across roles', async () => {
+    it('keeps lexical evidence across roles while prioritizing different files for targetRole=all', async () => {
         const vectorDatabase = createVectorDatabase();
         vectorDatabase.search.mockResolvedValueOnce([
             createVectorResult({
@@ -2631,8 +2631,8 @@ describe('Context lexical search supplement', () => {
 
         expect(results.map(result => `${result.relativePath}:${result.startLine}`)).toEqual([
             'src/a.ts:10',
-            'src/a.ts:40',
             'src/a.test.ts:1',
+            'src/a.ts:40',
         ]);
         expect(results.map(result => result.isPrimary)).toEqual([true, true, true]);
     });

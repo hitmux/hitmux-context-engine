@@ -140,14 +140,21 @@ async function testVectorDatabase(
                     token: currentConfig.milvusToken,
                 }),
                 useSystemProxy: currentConfig.databaseUseSystemProxy,
+                collectionLeaseEnabled: currentConfig.collectionLeaseEnabled,
+                collectionLeaseHeartbeatMs: currentConfig.collectionLeaseHeartbeatMs,
+                collectionLeaseMissLimit: currentConfig.collectionLeaseMissLimit,
             }));
     const vectorDatabase = createVectorDatabase(config);
-    const collections = await vectorDatabase.listCollections();
+    try {
+        const collections = await vectorDatabase.listCollections();
 
-    writeStdout(
-        options,
-        `[PASS] vectordb: collections=${collections.length}, elapsed=${formatElapsed(startedAt)}\n`,
-    );
+        writeStdout(
+            options,
+            `[PASS] vectordb: collections=${collections.length}, elapsed=${formatElapsed(startedAt)}\n`,
+        );
+    } finally {
+        await vectorDatabase.close?.();
+    }
 }
 
 function formatElapsed(startedAt: number): string {

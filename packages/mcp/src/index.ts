@@ -50,6 +50,8 @@ process.on("unhandledRejection", (reason) => {
 
 let activeCommandAbortController: AbortController | null = null;
 let activeCommandExitTimer: ReturnType<typeof setTimeout> | undefined;
+let activeMcpServer: ContextMcpServer | null = null;
+let shutdownInProgress = false;
 
 function clearActiveCommandExitTimer(): void {
     if (activeCommandExitTimer) {
@@ -58,7 +60,7 @@ function clearActiveCommandExitTimer(): void {
     }
 }
 
-function handleShutdownSignal(signalName: "SIGINT" | "SIGTERM"): void {
+async function handleShutdownSignal(signalName: "SIGINT" | "SIGTERM"): Promise<void> {
     if (activeCommandAbortController && !activeCommandAbortController.signal.aborted) {
         console.error(`Received ${signalName}, cancelling active command...`);
         activeCommandAbortController.abort();
@@ -71,7 +73,16 @@ function handleShutdownSignal(signalName: "SIGINT" | "SIGTERM"): void {
         return;
     }
 
+    if (shutdownInProgress) {
+        return;
+    }
+    shutdownInProgress = true;
     console.error(`Received ${signalName}, shutting down gracefully...`);
+    try {
+        await activeMcpServer?.shutdown();
+    } catch (error) {
+        console.error("Failed to release collection leases during shutdown:", error);
+    }
     process.exit(signalName === "SIGINT" ? 130 : 143);
 }
 
@@ -92,6 +103,7 @@ class ContextMcpServer {
     private runtimePromise: Promise<
         NonNullable<ContextMcpServer["runtime"]>
     > | null = null;
+    private shuttingDown = false;
 
     constructor() {
         this.currentPackageVersion = readCurrentPackageVersion();
@@ -417,11 +429,6 @@ Search indexed context in an absolute path. If the root is unindexed, the tool r
                                     description:
                                         "Focused query; include filenames, headings, identifiers, path words, or domain terms when useful.",
                                 },
-                                limit: {
-                                    type: "number",
-                                    description:
-                                        "Optional exact result count. When omitted, automatic TopK selects 3-12 results from the current score distribution.",
-                                },
                                 scope: {
                                     type: "string",
                                     enum: [
@@ -509,6 +516,9 @@ Search indexed context in an absolute path. If the root is unindexed, the tool r
         this.server.setRequestHandler(
             CallToolRequestSchema,
             async (request) => {
+                if (this.shuttingDown) {
+                    return this.formatToolError("Hitmux Context Engine is shutting down", "request rejected");
+                }
                 const { name, arguments: args } = request.params;
                 if (name === "tool_detail") {
                     const startupIndexNotice = getCurrentDirectoryIndexNotice(
@@ -585,6 +595,19 @@ Search indexed context in an absolute path. If the root is unindexed, the tool r
             "[SYNC-DEBUG] MCP protocol ready. Runtime config will be loaded on first tool call.",
         );
     }
+
+    async shutdown(): Promise<void> {
+        if (this.shuttingDown) {
+            return;
+        }
+        this.shuttingDown = true;
+        if (!this.runtime) {
+            return;
+        }
+        this.runtime.syncManager.stopBackgroundSync();
+        await this.runtime.syncManager.stopProjectWatcher();
+        await this.runtime.context.close();
+    }
 }
 
 // Main execution
@@ -617,6 +640,7 @@ async function main() {
     }
 
     const server = new ContextMcpServer();
+    activeMcpServer = server;
     await server.start();
 }
 
@@ -651,11 +675,11 @@ function isDirectExecution(): boolean {
 export function runHitmuxContextEngineCli(): void {
     // Handle graceful shutdown
     process.on("SIGINT", () => {
-        handleShutdownSignal("SIGINT");
+        void handleShutdownSignal("SIGINT");
     });
 
     process.on("SIGTERM", () => {
-        handleShutdownSignal("SIGTERM");
+        void handleShutdownSignal("SIGTERM");
     });
 
     // Always start the server - this is designed to be the main entry point

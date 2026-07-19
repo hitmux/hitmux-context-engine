@@ -21,6 +21,9 @@ export function createRuntimeContext(config: ContextMcpConfig): Context {
         address: config.milvusAddress,
         ...(config.milvusToken && { token: config.milvusToken }),
         useSystemProxy: config.databaseUseSystemProxy,
+        collectionLeaseEnabled: config.collectionLeaseEnabled,
+        collectionLeaseHeartbeatMs: config.collectionLeaseHeartbeatMs,
+        collectionLeaseMissLimit: config.collectionLeaseMissLimit,
     });
 
     return new Context({

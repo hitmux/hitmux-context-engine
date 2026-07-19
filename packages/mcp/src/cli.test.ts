@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -89,6 +91,42 @@ test("unknown command returns usage error without starting runtime", async () =>
     assert.equal(runtimeStarted, false);
     assert.match(errors.join(""), /Unknown command: unknown-command/);
     assert.match(errors.join(""), /Usage:/);
+});
+
+test("init enables the collection reaper user service after creating config", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "hce-cli-init-test-"));
+    const homeDir = join(tempRoot, "home");
+    const originalHome = process.env.HOME;
+    const originalUserProfile = process.env.USERPROFILE;
+    const output: string[] = [];
+    try {
+        mkdirSync(homeDir, { recursive: true });
+        process.env.HOME = homeDir;
+        process.env.USERPROFILE = homeDir;
+        const exitCode = await runCliCommand(["init"], {
+            stdout: (message) => output.push(message),
+            installCollectionReaperService: () => ({
+                path: "/home/test/.config/systemd/user/hce-collection-reaper.service",
+                changed: true,
+            }),
+        });
+        assert.equal(exitCode, 0);
+        assert.match(output.join(""), /Created global config file/);
+        assert.match(output.join(""), /Collection lease reaper service installed/);
+        assert.match(output.join(""), /Enabled hce-collection-reaper\.service/);
+    } finally {
+        if (originalHome === undefined) {
+            delete process.env.HOME;
+        } else {
+            process.env.HOME = originalHome;
+        }
+        if (originalUserProfile === undefined) {
+            delete process.env.USERPROFILE;
+        } else {
+            process.env.USERPROFILE = originalUserProfile;
+        }
+        rmSync(tempRoot, { recursive: true, force: true });
+    }
 });
 
 test("known manage command is delegated without starting handler runtime", async () => {

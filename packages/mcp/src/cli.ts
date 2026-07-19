@@ -19,6 +19,11 @@ import { isHceDebugEnabled } from "./logger.js";
 import { createRuntimeContext } from "./runtime-context.js";
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
+import {
+    installCollectionReaperUserService,
+    type InstallCollectionReaperServiceResult,
+} from "./systemd-user-service.js";
+import { runCollectionReaperCommand } from "./collection-reaper.js";
 
 const MCP_PACKAGE_VERSION_FALLBACK = "0.0.0";
 
@@ -46,6 +51,8 @@ export interface CliDispatcherOptions {
         },
     ) => Promise<number>;
     runManageCommand?: typeof runCliManageCommand;
+    installCollectionReaperService?: () => InstallCollectionReaperServiceResult;
+    runCollectionReaper?: typeof runCollectionReaperCommand;
 }
 
 export function readCurrentPackageVersion(): string {
@@ -78,6 +85,7 @@ export function getCliHelpText(): string {
         "",
         "Setup and diagnostics:",
         " hce init                    Create or complete global config.conf",
+        " hce collection-reaper       Run the collection lease reaper service",
         " hce config path             Show config paths",
         " hce doctor [--no-connectivity]",
         "",
@@ -128,6 +136,16 @@ export async function runCliCommand(
 
     if (command === "init") {
         return runInitCommand(rest, options);
+    }
+
+    if (command === "collection-reaper") {
+        const runReaper = options.runCollectionReaper ?? runCollectionReaperCommand;
+        return runReaper(rest, {
+            createConfig: options.createConfig ?? createMcpConfig,
+            signal: options.signal,
+            stdout: options.stdout,
+            stderr: options.stderr,
+        });
     }
 
     if (command === "config") {
@@ -184,10 +202,10 @@ export async function runCliCommand(
     return 2;
 }
 
-function runInitCommand(
+async function runInitCommand(
     args: string[],
     options: CliDispatcherOptions,
-): number {
+): Promise<number> {
     if (args.length !== 0) {
         writeStderr(options, "Usage: hce init\n");
         return 2;
@@ -211,6 +229,12 @@ function runInitCommand(
                 `Global config file already exists: ${result.path}\nNo changes made.\n`,
             );
         }
+        const installReaper = options.installCollectionReaperService ?? installCollectionReaperUserService;
+        const service = installReaper();
+        writeStdout(
+            options,
+            `Collection lease reaper service ${service.changed ? "installed" : "already current"}: ${service.path}\nEnabled ${service.path.split(/[\\/]/).pop()} for this user.\n`,
+        );
         return 0;
     } catch (error) {
         writeStderr(options, `Failed to initialize config: ${formatErrorMessage(error)}\n`);
@@ -475,28 +499,33 @@ async function runHandlerCommand(
 ): Promise<number> {
     try {
         return await withCliDiagnosticsOnStderr(options, async () => {
-            const runtime = getCliRuntime(options);
-            let result: any;
-            switch (command.tool) {
-                case "status":
-                    result = await runtime.toolHandlers.handleGetIndexingStatus(
-                        command.args,
-                    );
-                    break;
-                case "clear":
-                    result = await runtime.toolHandlers.handleClearIndex(command.args);
-                    break;
-                case "repair":
-                    result =
-                        await runtime.toolHandlers.handleRepairIndexManifest(
+            let runtime: CliRuntime | undefined;
+            try {
+                runtime = getCliRuntime(options);
+                let result: any;
+                switch (command.tool) {
+                    case "status":
+                        result = await runtime.toolHandlers.handleGetIndexingStatus(
                             command.args,
                         );
-                    break;
-                case "search":
-                    result = await runtime.toolHandlers.handleSearchContext(command.args);
-                    break;
+                        break;
+                    case "clear":
+                        result = await runtime.toolHandlers.handleClearIndex(command.args);
+                        break;
+                    case "repair":
+                        result =
+                            await runtime.toolHandlers.handleRepairIndexManifest(
+                                command.args,
+                            );
+                        break;
+                    case "search":
+                        result = await runtime.toolHandlers.handleSearchContext(command.args);
+                        break;
+                }
+                return writeHandlerResult(result, options);
+            } finally {
+                await runtime?.context.close?.();
             }
-            return writeHandlerResult(result, options);
         });
     } catch (error) {
         if (error instanceof CliUsageError) {

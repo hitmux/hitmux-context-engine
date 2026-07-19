@@ -70,7 +70,7 @@ hce
 
 - `path`: absolute indexed path。
 - `query`: 聚焦查询，使用相关 filenames、headings、identifiers、path words 或 domain terms。
-- `limit`: 可选的精确返回数量。省略时 Automatic TopK 按当前分数分布返回 `3-12` 条；传值后强制使用该数量。
+- Automatic TopK 按当前分数分布返回 `3-12` 条。MCP 不提供手动指定返回数量的参数。
 - `scope`: 可选搜索范围：`all`、`docs` 或 `code`。默认 `all`。
 
 `clear_index`

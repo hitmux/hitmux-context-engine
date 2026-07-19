@@ -53,7 +53,7 @@ Las opciones del producto se configuran en `~/.hitmux-context-engine/config.conf
 
 `index_codebase`: indexa una carpeta/context root para hybrid search. Argumentos útiles: `path`, `incremental`, `force`, `dryRun`, `customExtensions`, `customIgnorePatterns`.
 
-`search_context`: busca en contexto indexado. Usa un `query` enfocado con identifiers, filenames, headings, path words o domain terms. `scope` puede ser `all`, `docs` o `code`; default `all`. Sin `limit`, Automatic TopK elige `3-12` resultados según los scores actuales; un `limit` explícito fuerza esa cantidad.
+`search_context`: busca en contexto indexado. Usa un `query` enfocado con identifiers, filenames, headings, path words o domain terms. `scope` puede ser `all`, `docs` o `code`; default `all`. Automatic TopK elige `3-12` resultados según los scores actuales; MCP no expone un parámetro manual para la cantidad de resultados.
 
 `clear_index`: borra index data de un context root.
 

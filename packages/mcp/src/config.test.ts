@@ -82,6 +82,9 @@ test("createMcpConfig defaults to OpenRouter qwen embeddings", async () => {
         assert.equal(config.rerankTimeoutMs, 8000);
         assert.equal(config.rerankMaxCharsPerDocument, 6000);
         assert.equal(config.rerankUseSystemProxy, false);
+        assert.equal(config.collectionLeaseEnabled, true);
+        assert.equal(config.collectionLeaseHeartbeatMs, 30000);
+        assert.equal(config.collectionLeaseMissLimit, 3);
     });
 });
 
@@ -131,6 +134,9 @@ test("ensureGlobalConfigFile creates a commented default global config", async (
         assert.match(content, /projectWatcherDebounceMs = 1000/);
         assert.match(content, /projectWatcherUsePolling = false/);
         assert.match(content, /projectWatcherFallbackScanIntervalMs = 600000/);
+        assert.match(content, /collectionLeaseEnabled = true/);
+        assert.match(content, /collectionLeaseHeartbeatMs = 30000/);
+        assert.match(content, /collectionLeaseMissLimit = 3/);
 
         const secondResult = configManager.ensureGlobalConfigFile();
         assert.deepEqual(secondResult, {
@@ -206,6 +212,32 @@ test("createMcpConfig reads independent proxy toggles", async () => {
 
         assert.equal(config.embeddingUseSystemProxy, true);
         assert.equal(config.databaseUseSystemProxy, true);
+    });
+});
+
+test("createMcpConfig validates collection lease timing", async () => {
+    await withTempConfig({
+        project: {
+            collectionLeaseEnabled: false,
+            collectionLeaseHeartbeatMs: 15000,
+            collectionLeaseMissLimit: 2,
+        },
+    }, () => {
+        const config = createMcpConfig();
+        assert.equal(config.collectionLeaseEnabled, false);
+        assert.equal(config.collectionLeaseHeartbeatMs, 15000);
+        assert.equal(config.collectionLeaseMissLimit, 2);
+    });
+
+    await withTempConfig({
+        project: {
+            collectionLeaseHeartbeatMs: 0,
+            collectionLeaseMissLimit: 1,
+        },
+    }, () => {
+        const config = createMcpConfig();
+        assert.equal(config.collectionLeaseHeartbeatMs, 30000);
+        assert.equal(config.collectionLeaseMissLimit, 3);
     });
 });
 
