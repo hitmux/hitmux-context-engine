@@ -1664,6 +1664,74 @@ test("search_context defaults to all and supports docs/code scopes", async () =>
     });
 });
 
+test("search_context omits redundant result metadata", async () => {
+    await withTempDir(async (tempRoot) => {
+        const project = path.join(tempRoot, "repo");
+        await mkdir(path.join(project, "src"), { recursive: true });
+        await writeFile(
+            path.join(project, "src", "search.ts"),
+            "export function runSearch() {}\n",
+            "utf-8",
+        );
+
+        const context = {
+            getVectorDatabase: () => ({
+                listCollections: async () => [],
+            }),
+            getEmbedding: () => ({
+                getProvider: () => "test",
+            }),
+            semanticSearch: async (
+                _codebasePath: string,
+                _query: string,
+                _topK: number,
+                _threshold: number,
+                _filterExpr: string | undefined,
+                options: any,
+            ) => {
+                options.autoTopK?.onDecision({
+                    selectedResults: 1,
+                    minResults: 3,
+                    maxResults: 12,
+                    availableResults: 1,
+                    signal: "rerank",
+                    reason: "significant_score_gap",
+                });
+                return [{
+                    content: "stale indexed content",
+                    relativePath: "src/search.ts",
+                    startLine: 1,
+                    endLine: 1,
+                    language: "typescript",
+                    score: 1,
+                    resultGroup: "implementation",
+                    scoreReasons: ["semantic_match"],
+                }];
+            },
+        } as any;
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(project, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed",
+        });
+        snapshotManager.saveCodebaseSnapshot();
+        const handlers = new ToolHandlers(context, snapshotManager);
+
+        const result = await handlers.handleSearchContext({
+            path: project,
+            query: "runSearch",
+        });
+        const text = result.content[0].text;
+
+        assert.equal(result.isError, undefined);
+        assert.match(text, /Found 1 results/);
+        assert.match(text, /1\. Source context\n Location: src\/search\.ts:1-1/);
+        assert.match(text, /export function runSearch\(\) \{\}/);
+        assert.doesNotMatch(text, /for query:|context root|Context source:|Match signals:|Rank:|Auto TopK:/);
+    });
+});
+
 test("search_code validates explicit target role and optional boolean arguments", async () => {
     const handlers = createHandlers();
 

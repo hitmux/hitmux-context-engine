@@ -183,6 +183,13 @@ function assertFullToolList(
         ["path", "query", "scope"],
     );
     assert.equal(searchContext?.inputSchema?.properties?.limit, undefined);
+    assert.match(searchContext?.description ?? "", /candidates, not proof/);
+    assert.match(searchContext?.description ?? "", /use rg for exact scope/);
+    assert.match(
+        (searchContext?.inputSchema?.properties?.query as { description?: string } | undefined)
+            ?.description ?? "",
+        /Goal \+ 1-3 concept anchors/,
+    );
 }
 
 test("tools/list stays compact until the current directory is indexed", { timeout: 30_000 }, async () => {

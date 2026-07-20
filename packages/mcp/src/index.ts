@@ -368,7 +368,7 @@ Index an absolute directory/context root for semantic search. Before first index
         });
 
         const search_description = `
-Search indexed context in an absolute path. If the root is unindexed, the tool reports that indexing is required and recommends .hceignore; then use index_codebase before searching again. Indexed files follow .hceignore, .gitignore, and other discovered .*ignore files. It searches all context by default; use scope='docs' or scope='code' to filter. Use focused filenames, headings, identifiers, path words, or domain terms.
+Search an indexed absolute path to map semantically related implementations, concepts, architecture/docs, tests, and likely call paths. Results are candidates, not proof of exact, complete, current, runtime, or correct facts. Do not use them to claim all occurrences/call sites/configs, exact file/line/character data, current generated content, or command/CI/service/database state. Read hits and use rg for exact scope before edits or exhaustive claims; run commands, tests, or endpoint checks to verify behavior. If the root is unindexed, the tool reports that indexing is required and recommends .hceignore; then use index_codebase before searching again. Indexed files follow .hceignore, .gitignore, and other discovered .*ignore files. It searches all context by default; use scope='docs' or scope='code' to filter.
 `;
 
         // Define available tools
@@ -427,7 +427,7 @@ Search indexed context in an absolute path. If the root is unindexed, the tool r
                                 query: {
                                     type: "string",
                                     description:
-                                        "Focused query; include filenames, headings, identifiers, path words, or domain terms when useful.",
+                                        "Goal + 1-3 concept anchors + known file/module + desired discovery. Prefer focused concepts over keyword lists (e.g. 'auth middleware policy call chain').",
                                 },
                                 scope: {
                                     type: "string",

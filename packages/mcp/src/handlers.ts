@@ -114,6 +114,7 @@ interface SearchToolOptions {
     toolName: "search_code" | "search_context";
     defaultTargetRole: SearchTargetRole;
     useScope: boolean;
+    includeResultMetadata: boolean;
 }
 
 interface ResolvedSearchResultLimit {
@@ -3375,6 +3376,7 @@ export class ToolHandlers {
             toolName: "search_context",
             defaultTargetRole: "all",
             useScope: true,
+            includeResultMetadata: false,
         });
     }
 
@@ -3383,6 +3385,7 @@ export class ToolHandlers {
             toolName: "search_code",
             defaultTargetRole: "implementation",
             useScope: false,
+            includeResultMetadata: true,
         });
     }
 
@@ -3754,13 +3757,11 @@ export class ToolHandlers {
                 const result: any = searchResults[index];
                 const { location, warning } =
                     this.formatSearchResultLocation(result);
-                const scoreReason = this.formatSearchScoreReason(result);
                 const sourceContext = this.formatSearchResultContext(
                     result,
                     searchCodebasePath,
                     sourceFileCache,
                 );
-                const codebaseInfo = path.basename(searchCodebasePath);
                 const resultLabel = useFallbackMatchLabel
                     ? "Fallback match"
                     : "Source context";
@@ -3781,14 +3782,23 @@ export class ToolHandlers {
                           )
                         : "";
 
+                const scoreReason = searchToolOptions.includeResultMetadata
+                    ? this.formatSearchScoreReason(result)
+                    : undefined;
+                const resultHeading = searchToolOptions.includeResultMetadata
+                    ? `${index + 1}. ${resultLabel} (${result.language}) [${path.basename(searchCodebasePath)}]\n`
+                    : `${index + 1}. ${resultLabel}\n`;
+                const resultMetadata = searchToolOptions.includeResultMetadata
+                    ? ` Context source: ${sourceContext.source}\n` +
+                      (scoreReason ? ` Match signals: ${scoreReason}\n` : "") +
+                      ` Rank: ${index + 1}\n`
+                    : "";
                 const formattedResult =
-                    `${index + 1}. ${resultLabel} (${result.language}) [${codebaseInfo}]\n` +
+                    resultHeading +
                     ` Location: ${location}\n` +
                     warnings.map((value) => ` Warning: ${value}\n`).join("") +
-                    ` Context source: ${sourceContext.source}\n` +
-                    (scoreReason ? ` Match signals: ${scoreReason}\n` : "") +
+                    resultMetadata +
                     traceEvidence +
-                    ` Rank: ${index + 1}\n` +
                     ` Context: \n\`\`\`${result.language}\n${sourceContext.context}\n\`\`\`\n`;
                 const groupResults =
                     formattedResultsByGroup.get(groupLabel) ?? [];
@@ -3806,9 +3816,13 @@ export class ToolHandlers {
                 filenameQueryStatus,
                 searchResults.length > 0,
             );
-            let resultMessage = useFallbackMatchLabel
-                ? `Found ${searchResults.length} fallback matches for query: "${query}" in ${searchRootLabel} '${searchCodebasePath}'${indexingStatusMessage}`
-                : `Found ${searchResults.length} results for query: "${query}" in ${searchRootLabel} '${searchCodebasePath}'${indexingStatusMessage}`;
+            let resultMessage = searchToolOptions.includeResultMetadata
+                ? useFallbackMatchLabel
+                    ? `Found ${searchResults.length} fallback matches for query: "${query}" in ${searchRootLabel} '${searchCodebasePath}'${indexingStatusMessage}`
+                    : `Found ${searchResults.length} results for query: "${query}" in ${searchRootLabel} '${searchCodebasePath}'${indexingStatusMessage}`
+                : useFallbackMatchLabel
+                  ? `Found ${searchResults.length} fallback matches${indexingStatusMessage}`
+                  : `Found ${searchResults.length} results${indexingStatusMessage}`;
             if (filenameNotice.length > 0) {
                 resultMessage += `\n${filenameNotice}`;
             }
@@ -3818,7 +3832,9 @@ export class ToolHandlers {
             if (autoTopKDecision) {
                 const autoTopKMessage = `Auto TopK: ${autoTopKDecision.selectedResults}/${autoTopKDecision.maxResults}, signal=${autoTopKDecision.signal}, reason=${autoTopKDecision.reason}`;
                 console.log(`[SEARCH] ${autoTopKMessage}`);
-                resultMessage += `\n${autoTopKMessage}`;
+                if (searchToolOptions.includeResultMetadata) {
+                    resultMessage += `\n${autoTopKMessage}`;
+                }
             }
             if (syncSearchPrefixBlock.length > 0) {
                 resultMessage = `${syncSearchPrefixBlock}${resultMessage}`;
