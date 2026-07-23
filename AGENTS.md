@@ -14,7 +14,7 @@
 
 * `packages/core`: 核心 TypeScript 包，负责项目索引、文件收集、ignore 规则、splitter、embedding、向量库、搜索和 `Context` API。
 * `packages/mcp`: MCP server 包，负责工具参数校验、配置解析、embedding provider 适配、handler、snapshot、sync 和 server 入口。
-* `packages/hce` 和 `packages/hitmux-context-engine`: 发布到 npm 的薄 alias 包，只提供命令入口并依赖 MCP 包。
+* `packages/hce` 和 `packages/hce-unscoped`: 发布到 npm 的薄 alias 包，只提供命令入口并依赖 MCP 包。
 * `examples/basic-usage`: 本地示例，依赖 workspace 内的 core 包。
 * `docs`: 用户文档，包括 quick start、configuration、package reference 和 troubleshooting。
 * `evaluation`: Python/uv 评测代码、MCP/grep/read/edit server 对比、case study 日志和结果。
@@ -31,7 +31,7 @@
 * `pnpm build`: 清理 core/MCP 构建产物，用一次 TypeScript project build 顺序构建 core 和 MCP，然后并行检查 alias 包。
 * `pnpm build:core`: 构建 `@hitmux/hitmux-context-engine-core`。
 * `pnpm build:mcp`: 清理并顺序构建 core 和 MCP。
-* `pnpm build:aliases`: 并行检查 `@hitmux/hce` 和 `@hitmux/hitmux-context-engine` 的 bin wrapper。
+* `pnpm build:aliases`: 并行检查 `@hitmux/hce` 和 `hce-mcp` 的 bin wrapper。
 * `pnpm build:examples`: 并行构建 `examples/*`。
 * `pnpm dev`: 启动 `packages/*` 的 watch。
 * `pnpm dev:core`: 启动 core 的 `tsc --watch`。

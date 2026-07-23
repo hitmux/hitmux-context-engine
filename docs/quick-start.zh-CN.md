@@ -19,7 +19,7 @@ hce init
 
 Hitmux Context Engine 默认不继承系统代理环境变量。只有 embedding provider 或 vector database 必须走代理时，才配置 `embeddingUseSystemProxy` 和 `databaseUseSystemProxy`；见 [Configuration](configuration.zh-CN.md#system-proxy)。
 
-`@hitmux/hce`、`@hitmux/hitmux-context-engine` 和 `@hitmux/hitmux-context-engine-mcp` 都启动同一个 MCP server。不带参数的 `hce` 是客户端使用的 MCP stdio server mode：
+`@hitmux/hce` 和 `@hitmux/hitmux-context-engine-mcp` 都启动同一个 MCP server。不带参数的 `hce` 是客户端使用的 MCP stdio server mode：
 
 ```bash
 hce

@@ -34,7 +34,7 @@ claude mcp add hitmux-context-engine -- hce
 codex mcp add hitmux-context-engine -- hce
 ```
 
-`@hitmux/hce`, `@hitmux/hitmux-context-engine`, and `@hitmux/hitmux-context-engine-mcp` start the same MCP server.
+`@hitmux/hce` and `@hitmux/hitmux-context-engine-mcp` start the same MCP server.
 
 For a local source checkout, `./scripts/install-local-global.sh` builds the MCP package and installs a user-level `hitmux-context-engine-mcp` command. Run it with `sudo` for a global install. Published-package Claude Code and Codex CLI setup uses the global `hce` command shown above.
 

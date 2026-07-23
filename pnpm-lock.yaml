@@ -131,12 +131,6 @@ importers:
         specifier: workspace:*
         version: link:../mcp
 
-  packages/hitmux-context-engine:
-    dependencies:
-      '@hitmux/hitmux-context-engine-mcp':
-        specifier: workspace:*
-        version: link:../mcp
-
   packages/mcp:
     dependencies:
       '@hitmux/hitmux-context-engine-core':

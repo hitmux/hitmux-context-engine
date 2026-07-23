@@ -30,7 +30,7 @@ claude mcp add hitmux-context-engine -- hce
 codex mcp add hitmux-context-engine -- hce
 ```
 
-`@hitmux/hce`, `@hitmux/hitmux-context-engine`, `@hitmux/hitmux-context-engine-mcp`는 같은 MCP server를 시작합니다.
+`@hitmux/hce`와 `@hitmux/hitmux-context-engine-mcp`는 같은 MCP server를 시작합니다.
 
 ## Embedding Providers
 

@@ -7,7 +7,6 @@ Language: [English](package-reference.md) | [中文](package-reference.zh-CN.md)
 Packages:
 
 - `@hitmux/hce`: MCP server의 짧은 alias.
-- `@hitmux/hitmux-context-engine`: MCP server의 full-name alias.
 - `@hitmux/hitmux-context-engine-mcp`: original MCP server package.
 - `hce-mcp`: scoped package names를 사용할 수 없는 환경용 unscoped alias. 같은 `hce` command를 설치합니다.
 

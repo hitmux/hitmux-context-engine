@@ -52,7 +52,7 @@ Für OpenAI Codex CLI den MCP server hinzufügen:
 codex mcp add hitmux-context-engine -- hce
 ```
 
-Der vollständige Package-Alias `@hitmux/hitmux-context-engine` und das ursprüngliche MCP-Package `@hitmux/hitmux-context-engine-mcp` starten denselben server.
+Das CLI-Package `@hitmux/hce` und das ursprüngliche MCP-Package `@hitmux/hitmux-context-engine-mcp` starten denselben server.
 
 Datenbankhinweis: Verwende Local Milvus mit `milvusAddress = localhost:19530`. Für self-hosted remote Milvus ersetze den Wert durch erreichbaren host und port und füge `milvusToken` nur hinzu, wenn Authentifizierung erforderlich ist. Für eine kostenlose Zilliz Cloud database registriere dich unter https://cloud.zilliz.com/signup, nutze den cloud public endpoint und füge deine Personal Key als `milvusToken` hinzu. Andere database backends können nicht über `config.conf` ausgewählt werden.
 
@@ -109,7 +109,7 @@ Siehe [docs/configuration.de.md](docs/configuration.de.md) für provider-, Milvu
 ## Packages
 
 - `@hitmux/hitmux-context-engine-mcp`: MCP stdio server für Claude Code und andere MCP-Clients.
-- `@hitmux/hce` und `@hitmux/hitmux-context-engine`: npm package aliases für den MCP server.
+- `@hitmux/hce`: npm package alias für den MCP server.
 - `@hitmux/hitmux-context-engine-core`: TypeScript-Package für indexing, splitting, embedding, synchronization und vector database.
 
 Siehe [docs/package-reference.de.md](docs/package-reference.de.md) für tools, Package-Nutzung und core API examples.

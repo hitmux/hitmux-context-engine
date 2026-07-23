@@ -30,7 +30,7 @@ claude mcp add hitmux-context-engine -- hce
 codex mcp add hitmux-context-engine -- hce
 ```
 
-`@hitmux/hce`, `@hitmux/hitmux-context-engine` y `@hitmux/hitmux-context-engine-mcp` arrancan el mismo MCP server.
+`@hitmux/hce` y `@hitmux/hitmux-context-engine-mcp` arrancan el mismo MCP server.
 
 ## Embedding Providers
 

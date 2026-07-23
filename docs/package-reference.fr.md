@@ -7,7 +7,6 @@ Langue : [English](package-reference.md) | [中文](package-reference.zh-CN.md) 
 Packages :
 
 - `@hitmux/hce` : alias court du MCP server.
-- `@hitmux/hitmux-context-engine` : alias nom complet du MCP server.
 - `@hitmux/hitmux-context-engine-mcp` : package MCP server original.
 - `hce-mcp` : alias non scoped pour les environnements qui ne peuvent pas utiliser les scoped package names ; il installe le même commande `hce`.
 

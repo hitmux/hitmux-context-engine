@@ -7,7 +7,6 @@ Language: English | [中文](package-reference.zh-CN.md) | [Español](package-re
 Packages:
 
 - `@hitmux/hce`: short alias for the MCP server.
-- `@hitmux/hitmux-context-engine`: full-name alias for the MCP server.
 - `@hitmux/hitmux-context-engine-mcp`: original MCP server package.
 - `hce-mcp`: unscoped install alias for environments that cannot use scoped package names; it installs the same `hce` command.
 
@@ -25,7 +24,7 @@ npm install -g hce-mcp@latest
 hce
 ```
 
-The full-name alias `@hitmux/hitmux-context-engine`, the original MCP package `@hitmux/hitmux-context-engine-mcp`, and the unscoped alias `hce-mcp` are equivalent server packages. All setup examples use the global `hce` command; installing `hce-mcp` does not add a separate `hce-mcp` command.
+The short alias `@hitmux/hce`, the original MCP package `@hitmux/hitmux-context-engine-mcp`, and the unscoped alias `hce-mcp` are equivalent server packages. All setup examples use the global `hce` command; installing `hce-mcp` does not add a separate `hce-mcp` command.
 
 Configure product options in `~/.hitmux-context-engine/config.conf` or `./.hitmux-context-engine/config.conf`. See [configuration.md](configuration.md).
 

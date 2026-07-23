@@ -495,7 +495,6 @@ Hitmux Context Engine MCP Server
 
 Usage:
  npx @hitmux/hce@latest [options]
- npx @hitmux/hitmux-context-engine@latest [options]
  npx @hitmux/hitmux-context-engine-mcp@latest [options]
 
 Options:
@@ -636,7 +635,6 @@ Example config.conf:
 
 Start:
  npx @hitmux/hce@latest
- npx @hitmux/hitmux-context-engine@latest
  npx @hitmux/hitmux-context-engine-mcp@latest
  `);
 }

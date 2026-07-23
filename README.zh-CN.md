@@ -52,7 +52,7 @@ OpenAI Codex CLI 添加 MCP server：
 codex mcp add hitmux-context-engine -- hce
 ```
 
-完整 package alias `@hitmux/hitmux-context-engine` 和原始 MCP package `@hitmux/hitmux-context-engine-mcp` 启动的是同一个 server。
+`@hitmux/hce` CLI package 和原始 MCP package `@hitmux/hitmux-context-engine-mcp` 启动的是同一个 server。
 
 数据库说明：Local Milvus 使用 `milvusAddress = localhost:19530`。self-hosted remote Milvus 把它替换为可访问的 host 和 port；只有服务端要求认证时才添加 `milvusToken`。免费 Zilliz Cloud 数据库可在 https://cloud.zilliz.com/signup 注册，然后使用 cloud public endpoint，并把 Personal Key 写入 `milvusToken`。不能通过 `config.conf` 选择其他数据库 backend。
 
@@ -109,7 +109,7 @@ provider、Milvus/Zilliz、indexing、sync 和 file filtering 选项见 [docs/co
 ## Packages
 
 - `@hitmux/hitmux-context-engine-mcp`: 面向 Claude Code 和其他 MCP 客户端的 MCP stdio server。
-- `@hitmux/hce` 和 `@hitmux/hitmux-context-engine`: MCP server 的 npm package aliases。
+- `@hitmux/hce`: MCP server 的 npm package alias。
 - `@hitmux/hitmux-context-engine-core`: TypeScript indexing、splitting、embedding、synchronization 和 vector database package。
 
 工具、package 使用方式和 core API 示例见 [docs/package-reference.zh-CN.md](docs/package-reference.zh-CN.md)。

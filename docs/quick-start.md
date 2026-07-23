@@ -19,7 +19,7 @@ Database notes: Local Milvus uses `milvusAddress = localhost:19530`. For a self-
 
 Hitmux Context Engine does not inherit system proxy environment variables by default. Configure `embeddingUseSystemProxy` and `databaseUseSystemProxy` only when the embedding provider or vector database must use a proxy; see [Configuration](configuration.md#system-proxy).
 
-`@hitmux/hce`, `@hitmux/hitmux-context-engine`, and `@hitmux/hitmux-context-engine-mcp` all start the same MCP server. Plain `hce` with no arguments is the MCP stdio server mode used by clients:
+`@hitmux/hce` and `@hitmux/hitmux-context-engine-mcp` both start the same MCP server. Plain `hce` with no arguments is the MCP stdio server mode used by clients:
 
 ```bash
 hce

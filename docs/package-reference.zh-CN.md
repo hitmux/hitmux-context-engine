@@ -7,7 +7,6 @@ Language: [English](package-reference.md) | 中文 | [Español](package-referenc
 Packages:
 
 - `@hitmux/hce`: MCP server 的短 alias。
-- `@hitmux/hitmux-context-engine`: MCP server 的完整名称 alias。
 - `@hitmux/hitmux-context-engine-mcp`: 原始 MCP server package。
 - `hce-mcp`: 面向不能使用 scoped package names 的环境的 unscoped install alias；它安装同一个 `hce` 命令。
 
@@ -25,7 +24,7 @@ npm install -g hce-mcp@latest
 hce
 ```
 
-完整名称 alias `@hitmux/hitmux-context-engine`、原始 MCP package `@hitmux/hitmux-context-engine-mcp` 和 unscoped alias `hce-mcp` 是等价的 server packages。所有 setup 示例都使用全局 `hce` 命令；安装 `hce-mcp` 不会添加单独的 `hce-mcp` 命令。
+短 alias `@hitmux/hce`、原始 MCP package `@hitmux/hitmux-context-engine-mcp` 和 unscoped alias `hce-mcp` 是等价的 server packages。所有 setup 示例都使用全局 `hce` 命令；安装 `hce-mcp` 不会添加单独的 `hce-mcp` 命令。
 
 产品选项在 `~/.hitmux-context-engine/config.conf` 或 `./.hitmux-context-engine/config.conf` 中配置。见 [configuration.zh-CN.md](configuration.zh-CN.md)。
 
