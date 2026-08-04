@@ -1791,6 +1791,39 @@ test("search_context omits redundant result metadata", async () => {
     });
 });
 
+test("search_context does not misreport an embedding connection failure as an indexing problem", async () => {
+    await withTempDir(async (tempRoot) => {
+        const project = path.join(tempRoot, "repo");
+        await mkdir(project, { recursive: true });
+
+        const context = {
+            getEmbedding: () => ({
+                getProvider: () => "OpenAI",
+            }),
+            semanticSearch: async () => {
+                throw new Error("Failed to generate OpenAI embedding: Connection error.");
+            },
+        } as any;
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(project, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed",
+        });
+        snapshotManager.saveCodebaseSnapshot();
+        const handlers = new ToolHandlers(context, snapshotManager);
+
+        const result = await handlers.handleSearchContext({
+            path: project,
+            query: "manual import scan",
+        });
+
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /Connection error/);
+        assert.doesNotMatch(result.content[0].text, /check if the path has been indexed/i);
+    });
+});
+
 test("search_code validates explicit target role and optional boolean arguments", async () => {
     const handlers = createHandlers();
 

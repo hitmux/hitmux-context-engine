@@ -226,8 +226,33 @@ export class OpenAIEmbedding extends Embedding {
     }
 
     private isRetryableEmbeddingError(error: unknown): boolean {
-        const errorRecord = error as { status?: unknown; code?: unknown };
-        if (errorRecord.status === 429 || errorRecord.code === 429 || errorRecord.code === '429') {
+        const errorRecord = error as {
+            status?: unknown;
+            code?: unknown;
+            cause?: { code?: unknown };
+        };
+        const status = errorRecord.status;
+        if (
+            status === 408 ||
+            status === 409 ||
+            status === 429 ||
+            (typeof status === 'number' && status >= 500 && status <= 599)
+        ) {
+            return true;
+        }
+
+        const errorCodes = [errorRecord.code, errorRecord.cause?.code]
+            .filter((code): code is string => typeof code === 'string')
+            .map((code) => code.toUpperCase());
+        if (errorCodes.some((code) => [
+            'ECONNABORTED',
+            'ECONNRESET',
+            'EAI_AGAIN',
+            'ETIMEDOUT',
+            'UND_ERR_CONNECT_TIMEOUT',
+            'UND_ERR_HEADERS_TIMEOUT',
+            'UND_ERR_SOCKET',
+        ].includes(code))) {
             return true;
         }
 
@@ -235,7 +260,17 @@ export class OpenAIEmbedding extends Embedding {
         return message.includes('http 429') ||
             message.includes('rate limit') ||
             message.includes('engine_overloaded') ||
-            message.includes('model busy');
+            message.includes('model busy') ||
+            message.includes('connection error') ||
+            message.includes('network error') ||
+            message.includes('fetch failed') ||
+            message.includes('socket hang up') ||
+            message.includes('timed out') ||
+            message.includes('timeout') ||
+            message.includes('temporarily unavailable') ||
+            message.includes('service unavailable') ||
+            message.includes('bad gateway') ||
+            message.includes('gateway timeout');
     }
 
     private getErrorMessage(error: unknown): string {

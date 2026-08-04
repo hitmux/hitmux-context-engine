@@ -3980,11 +3980,14 @@ export class ToolHandlers {
                 };
             }
 
+            const indexHint = /\bnot indexed\b/i.test(errorMessage)
+                ? " Please check if the path has been indexed first."
+                : "";
             return {
                 content: [
                     {
                         type: "text",
-                        text: `Error running ${searchToolOptions.toolName}: ${errorMessage} Please check if the path has been indexed first.`,
+                        text: `Error running ${searchToolOptions.toolName}: ${errorMessage}${indexHint}`,
                     },
                 ],
                 isError: true,

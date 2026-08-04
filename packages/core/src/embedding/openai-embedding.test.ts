@@ -160,4 +160,32 @@ describe('OpenAIEmbedding', () => {
         ]);
         expect(mockCreate).toHaveBeenCalledTimes(2);
     });
+
+    it('retries a transient connection error after a delay', async () => {
+        jest.useFakeTimers();
+        mockCreate
+            .mockRejectedValueOnce(new Error('Connection error.'))
+            .mockResolvedValueOnce({
+                data: [{ embedding: [1, 2, 3] }],
+            });
+
+        const embedding = new OpenAIEmbedding({
+            apiKey: 'test-api-key',
+            model: 'text-embedding-3-small',
+            baseURL: 'https://provider.example/v1',
+        });
+
+        const resultPromise = embedding.embed('query text');
+
+        await Promise.resolve();
+        expect(mockCreate).toHaveBeenCalledTimes(1);
+
+        await jest.advanceTimersByTimeAsync(3000);
+
+        await expect(resultPromise).resolves.toEqual({
+            vector: [1, 2, 3],
+            dimension: 3,
+        });
+        expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
 });
