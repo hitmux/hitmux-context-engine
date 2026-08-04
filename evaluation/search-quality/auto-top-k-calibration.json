@@ -1,0 +1,24 @@
+{
+  "version": "2026-08-04.dataset.v1",
+  "description": "Offline-only aggregate calibration examples. Runtime code must not load this file or contain its query fixtures.",
+  "splits": {
+    "train": [
+      { "intent": "symbol_lookup", "signal": "rerank", "label": true, "normalizedScore": 0.96, "rank": 0, "margin": 0.18, "lexicalEvidence": true },
+      { "intent": "concept_discovery", "signal": "hybrid_rrf", "label": true, "normalizedScore": 0.82, "rank": 2, "margin": 0.07, "lexicalEvidence": false },
+      { "intent": "negative", "signal": "vector", "label": false, "normalizedScore": 0.18, "rank": 8, "margin": 0.01, "lexicalEvidence": false },
+      { "intent": "negative", "signal": "rerank", "label": false, "normalizedScore": 0.21, "rank": 12, "margin": 0.01, "lexicalEvidence": false }
+    ],
+    "validation": [
+      { "intent": "symbol_lookup", "signal": "rerank", "label": true, "normalizedScore": 0.91, "rank": 1, "margin": 0.11, "lexicalEvidence": true },
+      { "intent": "negative", "signal": "hybrid_rrf", "label": false, "normalizedScore": 0.24, "rank": 5, "margin": 0.02, "lexicalEvidence": false }
+    ],
+    "test": [
+      { "intent": "concept_discovery", "signal": "vector", "label": true, "normalizedScore": 0.85, "rank": 1, "margin": 0.08, "lexicalEvidence": false },
+      { "intent": "negative", "signal": "vector", "label": false, "normalizedScore": 0.2, "rank": 9, "margin": 0.01, "lexicalEvidence": false }
+    ]
+  },
+  "selection": {
+    "objective": "maximize validation macro-F1 subject to negative-query false-positive rate <= 0.05",
+    "calibration": "regularized logistic scorer followed by isotonic calibration"
+  }
+}

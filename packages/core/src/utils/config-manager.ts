@@ -64,6 +64,8 @@ export interface HitmuxConfig {
     projectWatcherIgnoredDirs?: string[];
     splitterType?: string;
     searchAutoTopK?: boolean;
+    searchAutoTopKStrategy?: 'calibrated' | 'legacy-gap';
+    searchAutoTopKCandidateWindow?: number;
     searchAutoTopKMin?: number;
     searchAutoTopKMax?: number;
     searchTopK?: number;
@@ -666,17 +668,27 @@ const CONFIG_COMPLETION_ENTRIES: ConfigCompletionEntry[] = [
     },
     {
         key: 'searchAutoTopK',
-        description: 'Automatically select the result count from the current query score distribution.',
+        description: 'Automatically select relevant results using calibrated relevance thresholds.',
         example: 'true'
     },
     {
+        key: 'searchAutoTopKStrategy',
+        description: 'Automatic TopK strategy: calibrated (default) or legacy-gap (temporary rollback).',
+        example: 'calibrated'
+    },
+    {
+        key: 'searchAutoTopKCandidateWindow',
+        description: 'Candidates analyzed by calibrated automatic TopK (default: 100, maximum: 200).',
+        example: '100'
+    },
+    {
         key: 'searchAutoTopKMin',
-        description: 'Minimum results returned by automatic TopK selection.',
+        description: 'Deprecated minimum for legacy-gap automatic TopK; ignored with calibrated strategy.',
         example: '3'
     },
     {
         key: 'searchAutoTopKMax',
-        description: 'Maximum results returned by automatic TopK selection, capped at 50.',
+        description: 'Maximum first-page results for automatic TopK, capped at 12.',
         example: '12'
     },
     {

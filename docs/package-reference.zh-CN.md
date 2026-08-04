@@ -128,7 +128,7 @@ const results = await context.semanticSearch(
 - `semanticSearch(path, query, topK?, threshold?, filterExpr?, options?)`
 - `traceSymbol(path, symbol, options?)`
 
-`semanticSearch` 保留 `topK` 作为 core API 中的返回结果数量名称。内部搜索会先使用更大的有界 candidate pool，再进行 dedupe/rerank，所以可见结果数量不会限制初始 dense/sparse recall。Search results 会带有 `resultGroup`、`isPrimary`、`fileRole` 和 `chunkRole` 标注。
+`semanticSearch` 保留 `topK` 作为 core API 中的返回结果数量名称。自动搜索内部先在有界候选窗口（默认 `100`，最多 `200`）上做相关性门控，再进行 dedupe 和分组；自动首屏最多 `12` 条，`semanticSearchPage` 可取得分页元数据。显式 `topK` 仍精确控制可见数量。Search results 会带有 `resultGroup`、`isPrimary`、`fileRole` 和 `chunkRole` 标注。
 - `hasIndex(path)`
 - `clearIndex(path, progressCallback?)`
 - `addCustomIgnorePatterns(patterns)`

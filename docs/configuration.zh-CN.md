@@ -120,15 +120,17 @@ rerankApiKey = your-cohere-api-key
 
 ## Automatic TopK
 
-调用方省略 `limit` 时，搜索会按本次查询的分数分布返回 `3-12` 条。完整外部 rerank 优先使用 `rerankScore`；rerank 不可用时使用 dense vector score 或 hybrid RRF score。显式传入 `limit` 始终强制使用该数量。
+调用方省略 `limit` 时，搜索会在候选窗口上使用校准相关性门控。首屏最多返回 `12` 条；仍有已接受候选时会返回 continuation token。显式传入 `limit` 始终精确返回指定数量。
 
 ```conf
 searchAutoTopK = true
+searchAutoTopKStrategy = calibrated
+searchAutoTopKCandidateWindow = 100
 searchAutoTopKMin = 3
 searchAutoTopKMax = 12
 ```
 
-`searchAutoTopKMax` 运行时上限为 `50`。设置 `searchAutoTopK = false` 后，固定返回数量由 `searchTopK` 控制。
+候选窗口默认 `100`，运行时最多 `200`；首屏上限为 `12`。校准模式下 `searchAutoTopKMin` 已弃用。只有临时回滚时才设置 `searchAutoTopKStrategy = legacy-gap`。设置 `searchAutoTopK = false` 后，固定返回数量由 `searchTopK` 控制。
 
 <a id="vector-database"></a>
 
@@ -408,6 +410,8 @@ projectWatcherFallbackScanIntervalMs = 600000
 
 splitterType = ast
 searchAutoTopK = true
+searchAutoTopKStrategy = calibrated
+searchAutoTopKCandidateWindow = 100
 searchAutoTopKMin = 3
 searchAutoTopKMax = 12
 # searchTopK = 10

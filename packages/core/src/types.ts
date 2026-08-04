@@ -31,30 +31,89 @@ export interface SemanticSearchOptions {
     autoTopK?: SearchAutoTopKOptions;
 }
 
-export type SearchAutoTopKSignal = 'rerank' | 'vector' | 'hybrid_rrf' | 'none';
+export type SearchAutoTopKSignal = 'rerank' | 'vector' | 'hybrid_rrf' | 'mixed' | 'none';
+
+export type SearchAutoTopKStrategy = 'calibrated' | 'legacy-gap';
 
 export type SearchAutoTopKReason =
     | 'significant_score_gap'
     | 'no_reliable_score_gap'
     | 'insufficient_finite_scores'
-    | 'no_score_signal';
+    | 'no_score_signal'
+    | 'calibrated_threshold'
+    | 'strong_lexical_evidence'
+    | 'calibration_profile_missing'
+    | 'no_finite_scores';
 
 export interface SearchAutoTopKDecision {
     selectedResults: number;
+    acceptedResults: number;
     minResults: number;
     maxResults: number;
     availableResults: number;
+    candidateWindow: number;
+    returnCap: number;
+    truncated: boolean;
     signal: SearchAutoTopKSignal;
     reason: SearchAutoTopKReason;
+    /** Internal ordering used to retain accepted candidates for continuation pages. */
+    acceptedCandidateIndexes?: number[];
 }
 
 export interface SearchAutoTopKOptions {
-    minResults: number;
+    /** Deprecated in calibrated mode. Retained for legacy-gap rollback compatibility. */
+    minResults?: number;
     useVectorFallback: boolean;
+    strategy?: SearchAutoTopKStrategy;
+    candidateWindow?: number;
+    returnCap?: number;
+    provider?: string;
+    model?: string;
+    intent?: string;
     onDecision?: (decision: SearchAutoTopKDecision) => void;
+    onCandidateManifest?: (manifest: SearchCandidateManifest) => void;
+}
+
+export interface SearchCandidateManifestEntry {
+    id: string;
+    relativePath: string;
+    startLine: number;
+    endLine: number;
+    contentFingerprint: string;
+    rank: number;
+    score: number;
+    retrievalScore?: number;
+    rerankScore?: number;
+    scoreReasons?: SearchScoreReason[];
+    fileRole?: string;
+    chunkRole?: string;
+    resultGroup?: SearchResultGroup;
+    isPrimary?: boolean;
+}
+
+export interface SearchCandidateManifest {
+    candidates: SearchCandidateManifestEntry[];
+    acceptedCount: number;
+    returnedCount: number;
+    candidateWindow: number;
+    returnCap: number;
+    truncated: boolean;
+}
+
+export interface SemanticSearchPage {
+    results: SemanticSearchResult[];
+    acceptedResults: number;
+    returnedResults: number;
+    candidateWindow: number;
+    returnCap: number;
+    truncated: boolean;
+    candidates: SearchCandidateManifestEntry[];
+    decision?: SearchAutoTopKDecision;
 }
 
 export interface SemanticSearchResult {
+    /** Internal chunk id. Kept on results so continuation pages can re-fetch by id. */
+    id?: string;
     content: string;
     relativePath: string;
     startLine: number;

@@ -82,6 +82,10 @@ test("createMcpConfig defaults to OpenRouter qwen embeddings", async () => {
         assert.equal(config.rerankTimeoutMs, 8000);
         assert.equal(config.rerankMaxCharsPerDocument, 6000);
         assert.equal(config.rerankUseSystemProxy, false);
+        assert.equal(config.searchAutoTopK, true);
+        assert.equal(config.searchAutoTopKStrategy, "calibrated");
+        assert.equal(config.searchAutoTopKCandidateWindow, 100);
+        assert.equal(config.searchAutoTopKMax, 12);
         assert.equal(config.collectionLeaseEnabled, true);
         assert.equal(config.collectionLeaseHeartbeatMs, 30000);
         assert.equal(config.collectionLeaseMissLimit, 3);
@@ -275,6 +279,21 @@ test("createMcpConfig reads rerank fields without exposing API key values", asyn
         } finally {
             console.log = originalLog;
         }
+    });
+});
+
+test("createMcpConfig bounds calibrated automatic TopK configuration", async () => {
+    await withTempConfig({
+        project: {
+            searchAutoTopKStrategy: "legacy-gap",
+            searchAutoTopKCandidateWindow: 500,
+            searchAutoTopKMax: 50,
+        },
+    }, () => {
+        const config = createMcpConfig();
+        assert.equal(config.searchAutoTopKStrategy, "legacy-gap");
+        assert.equal(config.searchAutoTopKCandidateWindow, 200);
+        assert.equal(config.searchAutoTopKMax, 12);
     });
 });
 
