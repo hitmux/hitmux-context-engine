@@ -16,6 +16,9 @@ import {
     type SearchTargetRole,
     type SearchAutoTopKDecision,
     type SearchAutoTopKOptions,
+    type SearchCandidateManifest,
+    type SearchCandidateManifestEntry,
+    DEFAULT_SEARCH_OUTPUT_FIELDS,
     type SymbolTraceEvidence,
     type SymbolTraceResult,
 } from "@hitmux/hitmux-context-engine-core";
@@ -66,11 +69,19 @@ import {
     IndexingWorkerCancelledError,
     startIndexingWorkerJob,
 } from "./indexing-worker-runner.js";
+import {
+    createSearchContinuationToken,
+    hashSearchOptions,
+    verifySearchContinuationToken,
+    type SearchContinuationPayload,
+} from "./search-continuation.js";
 
 const DEFAULT_SEARCH_RESULT_LIMIT = 10;
 const DEFAULT_SEARCH_AUTO_TOP_K_MIN = 3;
 const DEFAULT_SEARCH_AUTO_TOP_K_MAX = 12;
-const MAX_SEARCH_AUTO_TOP_K = 50;
+const MAX_SEARCH_AUTO_TOP_K = 12;
+const DEFAULT_SEARCH_AUTO_TOP_K_CANDIDATE_WINDOW = 100;
+const MAX_SEARCH_AUTO_TOP_K_CANDIDATE_WINDOW = 200;
 const SOURCE_CONTEXT_WINDOW_LINES = 4;
 const SEARCH_CONTEXT_MAX_CHARS = 5000;
 const SEARCH_TRACE_EVIDENCE_RESULT_LIMIT = 3;
@@ -1143,8 +1154,13 @@ export class ToolHandlers {
             return {
                 limit: autoTopK.maxResults,
                 autoTopK: {
+                    // Retained in the option object for caller compatibility; calibrated
+                    // selection ignores this deprecated field.
                     minResults: autoTopK.minResults,
                     useVectorFallback: true,
+                    strategy: autoTopK.strategy,
+                    candidateWindow: autoTopK.candidateWindow,
+                    returnCap: autoTopK.maxResults,
                 },
             };
         }
@@ -1169,6 +1185,8 @@ export class ToolHandlers {
     private resolveSearchAutoTopK(codebasePath: string): {
         minResults: number;
         maxResults: number;
+        strategy: "calibrated" | "legacy-gap";
+        candidateWindow: number;
     } | undefined {
         const rawEnabled = configManager.get("searchAutoTopK", codebasePath);
         const enabled = configManager.getBoolean("searchAutoTopK", codebasePath);
@@ -1179,6 +1197,8 @@ export class ToolHandlers {
             return {
                 minResults: DEFAULT_SEARCH_AUTO_TOP_K_MIN,
                 maxResults: DEFAULT_SEARCH_AUTO_TOP_K_MAX,
+                strategy: "calibrated",
+                candidateWindow: DEFAULT_SEARCH_AUTO_TOP_K_CANDIDATE_WINDOW,
             };
         }
         if (enabled === false) {
@@ -1187,8 +1207,26 @@ export class ToolHandlers {
 
         const rawMin = configManager.get("searchAutoTopKMin", codebasePath);
         const rawMax = configManager.get("searchAutoTopKMax", codebasePath);
+        const rawStrategy = configManager.get("searchAutoTopKStrategy", codebasePath);
+        const configuredStrategy = configManager.getString("searchAutoTopKStrategy", codebasePath);
+        const strategy = configuredStrategy === "legacy-gap" ? "legacy-gap" : "calibrated";
+        if (rawStrategy !== undefined && configuredStrategy !== "legacy-gap" && configuredStrategy !== "calibrated") {
+            console.warn(`[SEARCH] Ignoring invalid config.searchAutoTopKStrategy value '${rawStrategy}'. Falling back to calibrated.`);
+        }
+        const configuredCandidateWindow = configManager.getNumber("searchAutoTopKCandidateWindow", codebasePath);
+        const candidateWindow = configuredCandidateWindow === undefined
+            ? DEFAULT_SEARCH_AUTO_TOP_K_CANDIDATE_WINDOW
+            : Number.isInteger(configuredCandidateWindow) && configuredCandidateWindow > 0
+                ? Math.min(configuredCandidateWindow, MAX_SEARCH_AUTO_TOP_K_CANDIDATE_WINDOW)
+                : DEFAULT_SEARCH_AUTO_TOP_K_CANDIDATE_WINDOW;
+        if (configuredCandidateWindow !== undefined && (!Number.isInteger(configuredCandidateWindow) || configuredCandidateWindow <= 0)) {
+            console.warn(`[SEARCH] Ignoring invalid config.searchAutoTopKCandidateWindow value '${configuredCandidateWindow}'. Falling back to ${DEFAULT_SEARCH_AUTO_TOP_K_CANDIDATE_WINDOW}.`);
+        }
         const configuredMin = configManager.getNumber("searchAutoTopKMin", codebasePath);
         const configuredMax = configManager.getNumber("searchAutoTopKMax", codebasePath);
+        if (strategy === "calibrated" && rawMin !== undefined) {
+            console.warn("[SEARCH] config.searchAutoTopKMin is deprecated and ignored with calibrated automatic TopK.");
+        }
         const hasInvalidBounds = (
             rawMin !== undefined
             && !this.isPositiveInteger(configuredMin)
@@ -1203,6 +1241,8 @@ export class ToolHandlers {
             return {
                 minResults: DEFAULT_SEARCH_AUTO_TOP_K_MIN,
                 maxResults: DEFAULT_SEARCH_AUTO_TOP_K_MAX,
+                strategy,
+                candidateWindow,
             };
         }
 
@@ -1222,6 +1262,8 @@ export class ToolHandlers {
         return {
             minResults: Math.min(requestedMin, maxResults),
             maxResults,
+            strategy,
+            candidateWindow,
         };
     }
 
@@ -3265,7 +3307,8 @@ export class ToolHandlers {
     ): Promise<void> {
         const absolutePath = codebasePath;
         const jobId = this.indexingJobStates.createJobId(absolutePath);
-        const collectionName = this.context.getCollectionName(absolutePath);
+        const indexedCodebasePath = this.snapshotManager.findIndexedCodebasePath(absolutePath) ?? absolutePath;
+        const collectionName = this.context.getCollectionName(indexedCodebasePath);
         let lastProgress: IndexingJobProgress | undefined;
 
         try {
@@ -3413,7 +3456,13 @@ export class ToolHandlers {
             includeTraceEvidence,
             skipConsistencyCheck,
             consistency,
+            continuationToken,
         } = args;
+        if (continuationToken !== undefined && (
+            typeof continuationToken !== "string" || continuationToken.trim().length === 0
+        )) {
+            return this.errorResponse(`Error: ${searchToolOptions.toolName} argument 'continuationToken' must be a non-empty string when provided.`);
+        }
         const normalizedLimit = this.normalizeOptionalSearchLimit(
             searchToolOptions.toolName,
             limit,
@@ -3502,6 +3551,21 @@ export class ToolHandlers {
             (normalizedSkipConsistencyCheck.skipConsistencyCheck === true
                 ? "low_latency"
                 : normalizedConsistency.consistencyMode ?? "low_latency");
+
+        if (continuationToken) {
+            return this.handleSearchContinuation({
+                token: continuationToken,
+                codebasePath,
+                query,
+                searchToolOptions,
+                searchScope: normalizedScope.scope ?? "all",
+                searchTargetRole,
+                includeRelated: normalizedIncludeRelated.includeRelated !== false,
+                includeTraceEvidence: normalizedIncludeTraceEvidence.includeTraceEvidence === true,
+                extensionFilter: normalizedExtensionFilter.extensions ?? [],
+                consistencyMode,
+            });
+        }
 
         try {
             this.snapshotManager.refreshFromDiskForRead();
@@ -3662,6 +3726,7 @@ export class ToolHandlers {
                 searchCodebasePath,
             );
             let autoTopKDecision: SearchAutoTopKDecision | undefined;
+            let autoTopKManifest: SearchCandidateManifest | undefined;
             const searchThreshold =
                 this.resolveSearchThreshold(searchCodebasePath);
             const filenameQueryStatus = await analyzeFilenameLikeQuery({
@@ -3688,6 +3753,9 @@ export class ToolHandlers {
                             onDecision: (decision) => {
                                 autoTopKDecision = decision;
                             },
+                            onCandidateManifest: (manifest) => {
+                                autoTopKManifest = manifest;
+                            },
                         },
                     } : {}),
                     ...(filenameQueryStatus
@@ -3698,6 +3766,22 @@ export class ToolHandlers {
 
             console.log(
                 `[SEARCH] Search completed! Found ${searchResults.length} results using ${embeddingProvider.getProvider()} embeddings`,
+            );
+
+            const pagination = this.createSearchPagination(
+                autoTopKManifest,
+                absolutePath,
+                query,
+                searchCodebasePath,
+                {
+                    toolName: searchToolOptions.toolName,
+                    scope: searchScope,
+                    targetRole: searchTargetRole,
+                    includeRelated: normalizedIncludeRelated.includeRelated !== false,
+                    includeTraceEvidence: normalizedIncludeTraceEvidence.includeTraceEvidence === true,
+                    extensionFilter: normalizedExtensionFilter.extensions ?? [],
+                    consistency: consistencyMode,
+                },
             );
 
             if (searchResults.length === 0) {
@@ -3745,6 +3829,7 @@ export class ToolHandlers {
                             text: noResultsMessage,
                         },
                     ],
+                    ...(pagination ? { structuredContent: { pagination } } : {}),
                 };
             }
 
@@ -3830,7 +3915,10 @@ export class ToolHandlers {
                 resultMessage += `\nRequested path '${absolutePath}' is covered by indexed ${searchRootLabel} '${searchCodebasePath}'.`;
             }
             if (autoTopKDecision) {
-                const autoTopKMessage = `Auto TopK: ${autoTopKDecision.selectedResults}/${autoTopKDecision.maxResults}, signal=${autoTopKDecision.signal}, reason=${autoTopKDecision.reason}`;
+                const returnCap = autoTopKDecision.returnCap ?? autoTopKDecision.maxResults;
+                const acceptedResults = autoTopKDecision.acceptedResults ?? autoTopKDecision.selectedResults;
+                const candidateWindow = autoTopKDecision.candidateWindow ?? autoTopKDecision.availableResults;
+                const autoTopKMessage = `Auto TopK: ${autoTopKDecision.selectedResults}/${returnCap}, signal=${autoTopKDecision.signal}, reason=${autoTopKDecision.reason}, accepted=${acceptedResults}, candidateWindow=${candidateWindow}`;
                 console.log(`[SEARCH] ${autoTopKMessage}`);
                 if (searchToolOptions.includeResultMetadata) {
                     resultMessage += `\n${autoTopKMessage}`;
@@ -3840,6 +3928,13 @@ export class ToolHandlers {
                 resultMessage = `${syncSearchPrefixBlock}${resultMessage}`;
             }
             resultMessage += `\n\n${formattedResults}`;
+
+            if (pagination) {
+                resultMessage += `\n\nPagination: accepted=${pagination.acceptedCount}, returned=${pagination.returnedCount}, truncated=${pagination.truncated}`;
+                if (pagination.continuationToken) {
+                    resultMessage += `, continuationToken=${pagination.continuationToken}`;
+                }
+            }
 
             if (isIndexing) {
                 resultMessage += `\n\n **Tip**: This ${searchRootLabel} is still being indexed. More results may become available as indexing progresses.`;
@@ -3852,6 +3947,7 @@ export class ToolHandlers {
                         text: resultMessage,
                     },
                 ],
+                ...(pagination ? { structuredContent: { pagination } } : {}),
             };
         } catch (error) {
             // Check if this is the collection limit error
@@ -3889,6 +3985,212 @@ export class ToolHandlers {
                 isError: true,
             };
         }
+    }
+
+    private createSearchPagination(
+        manifest: SearchCandidateManifest | undefined,
+        requestedPath: string,
+        query: string,
+        searchCodebasePath: string,
+        options: Record<string, unknown>,
+    ): {
+        acceptedCount: number;
+        returnedCount: number;
+        truncated: boolean;
+        continuationToken?: string;
+    } | undefined {
+        if (!manifest) {
+            return undefined;
+        }
+        const candidates = manifest.candidates;
+        const indexFingerprint = crypto.createHash("sha256")
+            .update(`${this.context.getCollectionName(searchCodebasePath)}\n${candidates.map(candidate => `${candidate.id}:${candidate.contentFingerprint}`).join("\n")}`)
+            .digest("hex");
+        const pagination = {
+            acceptedCount: manifest.acceptedCount,
+            returnedCount: manifest.returnedCount,
+            truncated: manifest.truncated,
+        };
+        if (!manifest.truncated || candidates.length <= manifest.returnCap) {
+            return pagination;
+        }
+        const optionsHash = hashSearchOptions(options);
+        return {
+            ...pagination,
+            continuationToken: createSearchContinuationToken({
+                codebasePath: requestedPath,
+                query,
+                optionsHash,
+                collectionName: this.context.getCollectionName(searchCodebasePath),
+                indexFingerprint,
+                offset: manifest.returnCap,
+                pageSize: manifest.returnCap,
+                candidates,
+            }),
+        };
+    }
+
+    private async handleSearchContinuation(input: {
+        token: string;
+        codebasePath: string;
+        query: string;
+        searchToolOptions: SearchToolOptions;
+        searchScope: SearchContextScope;
+        searchTargetRole: SearchTargetRole;
+        includeRelated: boolean;
+        includeTraceEvidence: boolean;
+        extensionFilter: string[];
+        consistencyMode: SearchConsistencyMode;
+    }): Promise<any> {
+        let payload: SearchContinuationPayload;
+        try {
+            payload = verifySearchContinuationToken(input.token);
+        } catch (error) {
+            return this.errorResponse(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        let absolutePath: string;
+        try {
+            absolutePath = requireAbsolutePath(input.codebasePath);
+        } catch (error) {
+            return this.errorResponse(error instanceof Error ? error.message : String(error));
+        }
+        if (payload.codebasePath !== absolutePath || payload.query !== input.query) {
+            return this.errorResponse("Error: continuationToken does not match the requested path or query.");
+        }
+        const optionsHash = hashSearchOptions({
+            toolName: input.searchToolOptions.toolName,
+            scope: input.searchScope,
+            targetRole: input.searchTargetRole,
+            includeRelated: input.includeRelated,
+            includeTraceEvidence: input.includeTraceEvidence,
+            extensionFilter: input.extensionFilter,
+            consistency: input.consistencyMode,
+        });
+        if (payload.optionsHash !== optionsHash) {
+            return this.errorResponse("Error: continuationToken does not match the search options.");
+        }
+
+        const indexedCodebasePath = this.snapshotManager.findIndexedCodebasePath(absolutePath) ?? absolutePath;
+        const collectionName = this.context.getCollectionName(indexedCodebasePath);
+        if (payload.collectionName !== collectionName) {
+            return this.errorResponse("Error: continuationToken belongs to a different index; please run the search again.");
+        }
+        const pageCandidates = payload.candidates.slice(payload.offset, payload.offset + payload.pageSize);
+        if (pageCandidates.length === 0) {
+            return this.errorResponse("Error: continuationToken has no remaining results.");
+        }
+        const escapedIds = pageCandidates.map(candidate => `"${candidate.id.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(", ");
+        let rows: Record<string, any>[];
+        try {
+            rows = await this.context.getVectorDatabase().query(
+                collectionName,
+                `id in [${escapedIds}]`,
+                [...DEFAULT_SEARCH_OUTPUT_FIELDS],
+                pageCandidates.length,
+            );
+        } catch (error) {
+            return this.errorResponse(`Error loading continuation results: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const rowsById = new Map(rows
+            .filter(row => typeof row.id === "string")
+            .map(row => [row.id as string, row]));
+        const results: any[] = [];
+        for (const candidate of pageCandidates) {
+            const row = rowsById.get(candidate.id);
+            if (!row) {
+                return this.errorResponse("Error: 索引已变化，请重新搜索 (index changed; please run the search again).");
+            }
+            const result = this.rowToContinuationResult(row, candidate);
+            if (result.contentFingerprint !== candidate.contentFingerprint) {
+                return this.errorResponse("Error: 索引已变化，请重新搜索 (index changed; please run the search again).");
+            }
+            results.push(result.result);
+        }
+
+        const nextOffset = payload.offset + pageCandidates.length;
+        const hasMore = nextOffset < payload.candidates.length;
+        const nextToken = hasMore
+            ? createSearchContinuationToken({ ...payload, offset: nextOffset })
+            : undefined;
+        const resultMessage = this.formatContinuationResults(
+            results,
+            input.searchToolOptions,
+            absolutePath,
+        );
+        const pagination = {
+            acceptedCount: payload.candidates.length,
+            returnedCount: results.length,
+            truncated: hasMore,
+            ...(nextToken ? { continuationToken: nextToken } : {}),
+        };
+        return {
+            content: [{
+                type: "text",
+                text: `${resultMessage}\n\nPagination: accepted=${pagination.acceptedCount}, returned=${pagination.returnedCount}, truncated=${pagination.truncated}${nextToken ? `, continuationToken=${nextToken}` : ""}`,
+            }],
+            structuredContent: { pagination },
+        };
+    }
+
+    private rowToContinuationResult(row: Record<string, any>, candidate: SearchCandidateManifestEntry): {
+        result: any;
+        contentFingerprint: string;
+    } {
+        const metadata = typeof row.metadata === "string"
+            ? this.parseContinuationMetadata(row.metadata)
+            : row.metadata && typeof row.metadata === "object" ? row.metadata : {};
+        const content = typeof row.content === "string" ? row.content : "";
+        const startLine = typeof row.startLine === "number" ? row.startLine : candidate.startLine;
+        const endLine = typeof row.endLine === "number" ? row.endLine : candidate.endLine;
+        const contentFingerprint = crypto.createHash("sha1")
+            .update(`${row.relativePath}\n${startLine}\n${endLine}\n${content}`)
+            .digest("hex");
+        return {
+            contentFingerprint,
+            result: {
+                id: candidate.id,
+                content,
+                relativePath: typeof row.relativePath === "string" ? row.relativePath : candidate.relativePath,
+                startLine,
+                endLine,
+                language: typeof metadata.language === "string" ? metadata.language : "unknown",
+                score: candidate.score,
+                scoreReasons: candidate.scoreReasons,
+                fileRole: candidate.fileRole,
+                chunkRole: candidate.chunkRole,
+                resultGroup: candidate.resultGroup,
+                isPrimary: candidate.isPrimary,
+            },
+        };
+    }
+
+    private parseContinuationMetadata(value: string): Record<string, any> {
+        try {
+            const parsed = JSON.parse(value) as unknown;
+            return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                ? parsed as Record<string, any>
+                : {};
+        } catch {
+            return {};
+        }
+    }
+
+    private formatContinuationResults(results: any[], searchToolOptions: SearchToolOptions, codebasePath: string): string {
+        const sourceFileCache: SourceFileCache = new Map();
+        const formatted = results.map((result, index) => {
+            const { location, warning } = this.formatSearchResultLocation(result);
+            const sourceContext = this.formatSearchResultContext(result, codebasePath, sourceFileCache);
+            const metadata = searchToolOptions.includeResultMetadata
+                ? ` Context source: ${sourceContext.source}\n Rank: ${index + 1}\n`
+                : "";
+            const warnings = [warning, sourceContext.warning]
+                .filter((value): value is string => typeof value === "string" && value.length > 0)
+                .map(value => ` Warning: ${value}\n`)
+                .join("");
+            return `${index + 1}. Source context\n Location: ${location}\n${warnings}${metadata} Context: \n\`\`\`${result.language}\n${sourceContext.context}\n\`\`\``;
+        });
+        return formatted.length > 0 ? formatted.join("\n\n") : "No continuation results found.";
     }
 
     public async handleClearIndex(args: any): Promise<any> {

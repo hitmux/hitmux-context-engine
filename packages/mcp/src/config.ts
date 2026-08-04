@@ -37,6 +37,12 @@ export interface ContextMcpConfig {
     rerankTimeoutMs?: number;
     rerankMaxCharsPerDocument?: number;
     rerankUseSystemProxy?: boolean;
+    // Automatic TopK configuration
+    searchAutoTopK?: boolean;
+    searchAutoTopKStrategy?: "calibrated" | "legacy-gap";
+    searchAutoTopKCandidateWindow?: number;
+    searchAutoTopKMin?: number;
+    searchAutoTopKMax?: number;
     // Ollama configuration
     ollamaModel?: string;
     ollamaHost?: string;
@@ -230,6 +236,29 @@ function normalizePositiveInteger(value: number | undefined, fallback: number): 
         : fallback;
 }
 
+function resolveSearchAutoTopKStrategy(): "calibrated" | "legacy-gap" {
+    const value = configManager.getString("searchAutoTopKStrategy");
+    if (value === "legacy-gap") {
+        return value;
+    }
+    if (value !== undefined && value !== "calibrated") {
+        console.warn(`[DEBUG] Ignoring invalid config.searchAutoTopKStrategy value '${value}'. Falling back to calibrated.`);
+    }
+    return "calibrated";
+}
+
+function resolveSearchAutoTopKCandidateWindow(): number {
+    const value = configManager.getNumber("searchAutoTopKCandidateWindow");
+    if (value === undefined) {
+        return 100;
+    }
+    if (Number.isInteger(value) && value >= 1) {
+        return Math.min(value, 200);
+    }
+    console.warn(`[DEBUG] Ignoring invalid config.searchAutoTopKCandidateWindow value '${value}'. Falling back to 100.`);
+    return 100;
+}
+
 function getCollectionLeaseHeartbeatMs(): number {
     const value = configManager.getNumber("collectionLeaseHeartbeatMs");
     if (value === undefined) {
@@ -385,6 +414,12 @@ export function createMcpConfig(defaultServerVersion = "0.0.0"): ContextMcpConfi
             "rerankUseSystemProxy",
             getBooleanFromConfig("embeddingUseSystemProxy", false),
         ),
+        // Automatic TopK configuration
+        searchAutoTopK: getBooleanFromConfig("searchAutoTopK", true),
+        searchAutoTopKStrategy: resolveSearchAutoTopKStrategy(),
+        searchAutoTopKCandidateWindow: resolveSearchAutoTopKCandidateWindow(),
+        searchAutoTopKMin: normalizePositiveInteger(configManager.getNumber("searchAutoTopKMin"), 3),
+        searchAutoTopKMax: Math.min(normalizePositiveInteger(configManager.getNumber("searchAutoTopKMax"), 12), 12),
         // Ollama configuration
         ollamaModel: configManager.getString("ollamaModel"),
         ollamaHost: configManager.getString("ollamaHost"),
@@ -422,6 +457,7 @@ export function logConfigurationSummary(config: ContextMcpConfig): void {
     );
     const rerankEnabled = config.rerankEnabled !== false;
     console.log(`[MCP] Rerank: ${rerankEnabled ? "enabled" : "disabled"}`);
+    console.log(`[MCP] Auto TopK: ${config.searchAutoTopK === false ? "disabled" : (config.searchAutoTopKStrategy || "calibrated")}, candidateWindow=${config.searchAutoTopKCandidateWindow || 100}, returnCap=${Math.min(config.searchAutoTopKMax || 12, 12)}`);
     if (rerankEnabled) {
         console.log(`[MCP] Rerank Model: ${config.rerankModel || "cohere/rerank-4-fast"}`);
         console.log(

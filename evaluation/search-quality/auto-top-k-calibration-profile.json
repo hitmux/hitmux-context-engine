@@ -1,0 +1,23 @@
+{
+  "version": "2026-08-04.generic.v1",
+  "profiles": {
+    "generic": {
+      "thresholds": {
+        "rerank": 0.68,
+        "vector": 0.76,
+        "hybrid_rrf": 0.74,
+        "mixed": 0.7
+      },
+      "coefficients": {
+        "score": 3.4,
+        "rank": 0.8,
+        "margin": 1.1,
+        "span": 0.55,
+        "lexicalEvidence": 2.2,
+        "roleMatch": 0.35,
+        "duplicatePenalty": -1.4,
+        "supportEvidence": 0.4
+      }
+    }
+  }
+}

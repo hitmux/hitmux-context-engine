@@ -28,8 +28,11 @@ import {
     SearchScoreReason,
     SearchTargetRole,
     SemanticSearchFilenameLikeQuery,
+    SearchCandidateManifest,
+    SearchCandidateManifestEntry,
     SemanticSearchOptions,
     SemanticSearchResult,
+    SemanticSearchPage,
     SymbolTraceOptions,
     SymbolTraceResult
 } from './types';
@@ -373,6 +376,7 @@ const SEARCH_CANDIDATE_LIMIT_MIN = 80;
 const SEARCH_CANDIDATE_LIMIT_MAX = 200;
 const AUTO_TOP_K_STRUCTURAL_MINIMUM = 4;
 const AUTO_TOP_K_STRUCTURAL_MINIMUM_WITH_RELATED_RESULTS = 5;
+const DEFAULT_AUTO_TOP_K_CANDIDATE_WINDOW = 100;
 
 const DEFAULT_SUPPORTED_EXTENSIONS = [
     // Programming languages
@@ -1345,6 +1349,68 @@ export class Context {
         );
     }
 
+    /**
+     * Search with pagination metadata. `semanticSearch` remains the compatibility
+     * wrapper returning only the first page.
+     */
+    async semanticSearchPage(
+        codebasePath: string,
+        query: string,
+        topK: number = 10,
+        threshold: number = 0.5,
+        filterExpr?: string,
+        options: SemanticSearchOptions = {},
+    ): Promise<SemanticSearchPage> {
+        let decision: SearchAutoTopKDecision | undefined;
+        let manifest: SearchCandidateManifest | undefined;
+        const autoTopK = options.autoTopK
+            ? {
+                ...options.autoTopK,
+                onDecision: (nextDecision: SearchAutoTopKDecision) => {
+                    decision = nextDecision;
+                    options.autoTopK?.onDecision?.(nextDecision);
+                },
+                onCandidateManifest: (nextManifest: SearchCandidateManifest) => {
+                    manifest = nextManifest;
+                    options.autoTopK?.onCandidateManifest?.(nextManifest);
+                },
+            }
+            : undefined;
+        const results = await this.semanticSearch(
+            codebasePath,
+            query,
+            topK,
+            threshold,
+            filterExpr,
+            { ...options, ...(autoTopK ? { autoTopK } : {}) },
+        );
+        const returnCap = manifest?.returnCap ?? (autoTopK?.returnCap ?? this.normalizeSearchOutputLimit(topK));
+        const candidates = manifest?.candidates ?? results
+            .map((result, index) => result.id ? {
+                id: result.id,
+                relativePath: result.relativePath,
+                startLine: result.startLine,
+                endLine: result.endLine,
+                contentFingerprint: crypto.createHash('sha1')
+                    .update(`${result.relativePath}\n${result.startLine}\n${result.endLine}\n${result.content}`)
+                    .digest('hex'),
+                rank: index + 1,
+                score: result.score,
+            } satisfies SearchCandidateManifestEntry : undefined)
+            .filter((candidate): candidate is SearchCandidateManifestEntry => candidate !== undefined);
+        const acceptedResults = manifest?.acceptedCount ?? results.length;
+        return {
+            results,
+            acceptedResults,
+            returnedResults: results.length,
+            candidateWindow: manifest?.candidateWindow ?? candidates.length,
+            returnCap,
+            truncated: manifest?.truncated ?? acceptedResults > returnCap,
+            candidates,
+            ...(decision ? { decision } : {}),
+        };
+    }
+
     async traceSymbol(
         codebasePath: string,
         symbol: string,
@@ -1393,7 +1459,7 @@ export class Context {
         }
 
         const rerankConfig = this.getExternalRerankConfig(codebasePath);
-        const baseCandidateLimit = this.getSearchCandidateLimit(outputLimit);
+        const baseCandidateLimit = this.getSearchCandidateLimit(outputLimit, searchOptions);
         const candidateLimit = rerankConfig.enabled && !rerankConfig.skipReason
             ? Math.max(baseCandidateLimit, rerankConfig.candidateLimit)
             : baseCandidateLimit;
@@ -1510,12 +1576,12 @@ export class Context {
             );
             const rerankedResults = await this.withSearchStageTimeout(
                 'external rerank',
-                this.externalRerankResults(query, this.deduplicateResults(rankedResults), rerankConfig),
+                this.externalRerankResults(query, rankedResults, rerankConfig),
                 codebasePath,
                 query,
                 deadlineMs
             );
-            const selectedLimit = this.resolveAutoTopKLimit(
+            const finalizedResults = this.finalizeSemanticSearchResults(
                 rerankedResults,
                 outputLimit,
                 searchOptions,
@@ -1523,13 +1589,12 @@ export class Context {
                 query,
                 filterExpr,
             );
-            const dedupedResults = this.applySearchResultGrouping(rerankedResults, searchOptions, query, filterExpr, selectedLimit);
-            console.log(`[Context] ✅ Found ${results.length} results, ${dedupedResults.length} after dedup`);
-            if (dedupedResults.length > 0) {
-                console.log(`[Context] 🔍 Top result score: ${dedupedResults[0].score}, path: ${dedupedResults[0].relativePath}`);
+            console.log(`[Context] ✅ Found ${results.length} results, ${finalizedResults.length} after dedup`);
+            if (finalizedResults.length > 0) {
+                console.log(`[Context] 🔍 Top result score: ${finalizedResults[0].score}, path: ${finalizedResults[0].relativePath}`);
             }
 
-            return dedupedResults;
+            return finalizedResults;
         } else {
             // Regular semantic search
             // 1. Generate query vector
@@ -1576,12 +1641,12 @@ export class Context {
             );
             const rerankedResults = await this.withSearchStageTimeout(
                 'external rerank',
-                this.externalRerankResults(query, this.deduplicateResults(rankedResults), rerankConfig),
+                this.externalRerankResults(query, rankedResults, rerankConfig),
                 codebasePath,
                 query,
                 deadlineMs
             );
-            const selectedLimit = this.resolveAutoTopKLimit(
+            const finalizedResults = this.finalizeSemanticSearchResults(
                 rerankedResults,
                 outputLimit,
                 searchOptions,
@@ -1589,14 +1654,83 @@ export class Context {
                 query,
                 filterExpr,
             );
-            const dedupedResults = this.applySearchResultGrouping(rerankedResults, searchOptions, query, filterExpr, selectedLimit);
-            console.log(`[Context] ✅ Found ${results.length} results, ${dedupedResults.length} after dedup`);
-            return dedupedResults;
+            console.log(`[Context] ✅ Found ${results.length} results, ${finalizedResults.length} after dedup`);
+            return finalizedResults;
         }
     }
 
     private normalizeSearchOutputLimit(topK: number): number {
         return Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 5;
+    }
+
+    private finalizeSemanticSearchResults(
+        results: SemanticSearchResult[],
+        outputLimit: number,
+        options: NormalizedSemanticSearchOptions,
+        isHybrid: boolean,
+        query: string,
+        filterExpr: string | undefined,
+    ): SemanticSearchResult[] {
+        if (!options.autoTopK) {
+            const dedupedResults = this.deduplicateResults(results);
+            return this.applySearchResultGrouping(dedupedResults, options, query, filterExpr, outputLimit);
+        }
+
+        let decision = selectAutoTopK(results, outputLimit, options.autoTopK, isHybrid);
+        const useLegacyStructure = options.autoTopK.strategy === 'legacy-gap' || (
+            !options.autoTopK.strategy
+            && options.autoTopK.candidateWindow === undefined
+            && options.autoTopK.returnCap === undefined
+        );
+        if (useLegacyStructure) {
+            decision = this.preserveAutoTopKResultStructure(decision, results, options, query, filterExpr);
+            const legacyResults = this.applySearchResultGrouping(
+                this.deduplicateResults(results),
+                options,
+                query,
+                filterExpr,
+                decision.selectedResults,
+            );
+            decision = {
+                ...decision,
+                selectedResults: legacyResults.length,
+                acceptedResults: legacyResults.length,
+                returnCap: decision.maxResults,
+                truncated: false,
+            };
+            this.notifyAutoTopKDecision(options.autoTopK.onDecision, decision);
+            return legacyResults;
+        }
+
+        const acceptedIndexes = decision.acceptedCandidateIndexes
+            ?? Array.from({ length: decision.acceptedResults }, (_, index) => index);
+        const acceptedResults = acceptedIndexes
+            .map(index => results[index])
+            .filter((result): result is SemanticSearchResult => result !== undefined);
+        const dedupedAcceptedResults = this.deduplicateResults(acceptedResults);
+        // Grouping and file diversification happen only after relevance gating.
+        const orderedAcceptedResults = this.applySearchResultGrouping(
+            dedupedAcceptedResults,
+            options,
+            query,
+            filterExpr,
+            dedupedAcceptedResults.length,
+        );
+        const visibleResults = orderedAcceptedResults.slice(0, decision.returnCap);
+        decision = {
+            ...decision,
+            acceptedResults: orderedAcceptedResults.length,
+            selectedResults: visibleResults.length,
+            returnCap: decision.returnCap,
+            maxResults: decision.returnCap,
+            truncated: orderedAcceptedResults.length > decision.returnCap,
+        };
+        this.notifyAutoTopKDecision(options.autoTopK.onDecision, decision);
+        this.notifyAutoTopKCandidateManifest(options.autoTopK.onCandidateManifest, orderedAcceptedResults, decision);
+        console.log(
+            `[Context] Auto TopK: ${decision.selectedResults}/${decision.returnCap}, accepted=${decision.acceptedResults}, candidateWindow=${decision.candidateWindow}, signal=${decision.signal}, reason=${decision.reason}`,
+        );
+        return visibleResults;
     }
 
     private resolveAutoTopKLimit(
@@ -1625,6 +1759,53 @@ export class Context {
         return decision.selectedResults;
     }
 
+    private notifyAutoTopKCandidateManifest(
+        onManifest: ((manifest: SearchCandidateManifest) => void) | undefined,
+        results: SemanticSearchResult[],
+        decision: SearchAutoTopKDecision,
+    ): void {
+        if (!onManifest) {
+            return;
+        }
+        const candidates: SearchCandidateManifestEntry[] = results
+            .map((result, index) => {
+                if (!result.id) {
+                    return undefined;
+                }
+                return {
+                    id: result.id,
+                    relativePath: result.relativePath,
+                    startLine: result.startLine,
+                    endLine: result.endLine,
+                    contentFingerprint: crypto.createHash('sha1')
+                        .update(`${result.relativePath}\n${result.startLine}\n${result.endLine}\n${result.content}`)
+                        .digest('hex'),
+                    rank: index + 1,
+                    score: result.score,
+                    ...(result.retrievalScore !== undefined ? { retrievalScore: result.retrievalScore } : {}),
+                    ...(result.rerankScore !== undefined ? { rerankScore: result.rerankScore } : {}),
+                    ...(result.scoreReasons ? { scoreReasons: result.scoreReasons } : {}),
+                    ...(result.fileRole ? { fileRole: result.fileRole } : {}),
+                    ...(result.chunkRole ? { chunkRole: result.chunkRole } : {}),
+                    ...(result.resultGroup ? { resultGroup: result.resultGroup } : {}),
+                    ...(result.isPrimary !== undefined ? { isPrimary: result.isPrimary } : {}),
+                } satisfies SearchCandidateManifestEntry;
+            })
+            .filter((entry): entry is SearchCandidateManifestEntry => entry !== undefined);
+        try {
+            onManifest({
+                candidates,
+                acceptedCount: results.length,
+                returnedCount: Math.min(results.length, decision.returnCap),
+                candidateWindow: decision.candidateWindow,
+                returnCap: decision.returnCap,
+                truncated: results.length > decision.returnCap,
+            });
+        } catch (error) {
+            console.warn(`[Context] Auto TopK candidate manifest callback failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
     private preserveAutoTopKResultStructure(
         decision: SearchAutoTopKDecision,
         results: SemanticSearchResult[],
@@ -1648,13 +1829,16 @@ export class Context {
             return decision;
         }
 
+        const selectedResults = Math.min(
+            structuralMinimum,
+            decision.maxResults,
+            decision.availableResults,
+        );
         return {
             ...decision,
-            selectedResults: Math.min(
-                structuralMinimum,
-                decision.maxResults,
-                decision.availableResults,
-            ),
+            selectedResults,
+            acceptedResults: selectedResults,
+            acceptedCandidateIndexes: Array.from({ length: selectedResults }, (_, index) => index),
         };
     }
 
@@ -1708,7 +1892,14 @@ export class Context {
         }
     }
 
-    private getSearchCandidateLimit(outputLimit: number): number {
+    private getSearchCandidateLimit(outputLimit: number, options: NormalizedSemanticSearchOptions): number {
+        if (options.autoTopK) {
+            const configuredWindow = options.autoTopK.candidateWindow;
+            if (Number.isFinite(configuredWindow) && configuredWindow! > 0) {
+                return Math.min(Math.max(Math.floor(configuredWindow!), 1), SEARCH_CANDIDATE_LIMIT_MAX);
+            }
+            return DEFAULT_AUTO_TOP_K_CANDIDATE_WINDOW;
+        }
         // Keep visible output small while giving rerank/dedupe enough recall;
         // the cap bounds Milvus dense/sparse request volume for large limits.
         return Math.min(
@@ -2976,6 +3167,7 @@ export class Context {
                 : classifyFileRole(document.relativePath, document.fileExtension);
 
         const result: InternalSemanticSearchResult = {
+            id: document.id,
             content: document.content,
             relativePath: document.relativePath,
             ...lineRange,
@@ -3087,6 +3279,7 @@ export class Context {
             content
         });
         const result: SemanticSearchResult = {
+            id: typeof row.id === 'string' ? row.id : undefined,
             content,
             relativePath: typeof row.relativePath === 'string' ? row.relativePath : '',
             ...lineRange,

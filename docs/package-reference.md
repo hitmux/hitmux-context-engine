@@ -128,7 +128,7 @@ Database note: Use Local Milvus with `address: "localhost:19530"`. For self-host
 - `semanticSearch(path, query, topK?, threshold?, filterExpr?, options?)`
 - `traceSymbol(path, symbol, options?)`
 
-`semanticSearch` keeps `topK` as the core API name for the returned result count. Internally, search uses a larger bounded candidate pool before dedupe/rerank, so the visible result count does not cap initial dense/sparse recall. Search results are annotated with `resultGroup`, `isPrimary`, `fileRole`, and `chunkRole`.
+`semanticSearch` keeps `topK` as the core API name for the returned result count. Internally, automatic search uses a bounded candidate window (default `100`, maximum `200`) before relevance gating, dedupe, and grouping. The automatic first page is capped at `12`; continuation metadata is available through `semanticSearchPage`. Explicit `topK` remains an exact visible count. Search results are annotated with `resultGroup`, `isPrimary`, `fileRole`, and `chunkRole`.
 - `hasIndex(path)`
 - `clearIndex(path, progressCallback?)`
 - `addCustomIgnorePatterns(patterns)`

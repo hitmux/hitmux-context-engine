@@ -120,15 +120,17 @@ rerankApiKey = your-cohere-api-key
 
 ## Automatic TopK
 
-Search selects `3-12` results from the score distribution of the current query when callers omit `limit`. Complete external rerank scores are preferred; dense vector scores or hybrid RRF scores are used when rerank is unavailable. Passing `limit` always forces that exact count.
+Search applies a calibrated relevance gate over a candidate window when callers omit `limit`. The first page is capped at `12`; a continuation token is available when more accepted candidates remain. Passing `limit` always forces that exact count.
 
 ```conf
 searchAutoTopK = true
+searchAutoTopKStrategy = calibrated
+searchAutoTopKCandidateWindow = 100
 searchAutoTopKMin = 3
 searchAutoTopKMax = 12
 ```
 
-`searchAutoTopKMax` is capped at `50` at runtime. Set `searchAutoTopK = false` to use the fixed `searchTopK` value instead.
+Automatic TopK uses a calibrated relevance gate over a candidate window of up to `200` results. The first page is capped at `12`; a continuation token is returned when more accepted candidates are available. `searchAutoTopKMin` is deprecated in calibrated mode. Set `searchAutoTopKStrategy = legacy-gap` only as a temporary rollback. Set `searchAutoTopK = false` to use the fixed `searchTopK` value instead.
 
 ## Vector Database
 
@@ -404,6 +406,8 @@ projectWatcherFallbackScanIntervalMs = 600000
 
 splitterType = ast
 searchAutoTopK = true
+searchAutoTopKStrategy = calibrated
+searchAutoTopKCandidateWindow = 100
 searchAutoTopKMin = 3
 searchAutoTopKMax = 12
 # searchTopK = 10

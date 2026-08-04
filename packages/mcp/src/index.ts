@@ -368,7 +368,7 @@ Index an absolute directory/context root for semantic search. Before first index
         });
 
         const search_description = `
-Search an indexed absolute path to map semantically related implementations, concepts, architecture/docs, tests, and likely call paths. Results are candidates, not proof of exact, complete, current, runtime, or correct facts. Do not use them to claim all occurrences/call sites/configs, exact file/line/character data, current generated content, or command/CI/service/database state. Read hits and use rg for exact scope before edits or exhaustive claims; run commands, tests, or endpoint checks to verify behavior. If the root is unindexed, the tool reports that indexing is required and recommends .hceignore; then use index_codebase before searching again. Indexed files follow .hceignore, .gitignore, and other discovered .*ignore files. It searches all context by default; use scope='docs' or scope='code' to filter.
+Search an indexed absolute path to map semantically related implementations, concepts, architecture/docs, tests, and likely call paths. Results are candidates, not proof of exact, complete, current, runtime, or correct facts. Do not use them to claim all occurrences/call sites/configs, exact file/line/character data, current generated content, or command/CI/service/database state. Read hits and use rg for exact scope before edits or exhaustive claims; run commands, tests, or endpoint checks to verify behavior. If the root is unindexed, the tool reports that indexing is required and recommends .hceignore; then use index_codebase before searching again. Indexed files follow .hceignore, .gitignore, and other discovered .*ignore files. It searches all context by default; use scope='docs' or scope='code' to filter. When pagination returns a continuationToken, reuse it with the same path, query, and scope to read the next accepted page.
 `;
 
         // Define available tools
@@ -442,6 +442,12 @@ Search an indexed absolute path to map semantically related implementations, con
                                 },
                             },
                             required: ["path", "query"],
+                            patternProperties: {
+                                "^continuationToken$": {
+                                    type: "string",
+                                    description: "Opaque token returned by a previous search_context call to fetch the next page.",
+                                },
+                            },
                             additionalProperties: false,
                         },
                     },
