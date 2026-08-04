@@ -989,6 +989,65 @@ test("search_code falls back to automatic 3/12 bounds when automatic configurati
     });
 });
 
+test("search_code ignores deprecated automatic TopK minimum in calibrated mode", async () => {
+    await withTempDir(async (tempRoot) => {
+        const project = path.join(tempRoot, "repo");
+        await mkdir(project, { recursive: true });
+        await writeProjectConfig(project, {
+            searchAutoTopKMin: 0,
+            searchAutoTopKMax: 5,
+        });
+
+        let requestedTopK: number | undefined;
+        let requestedAutoTopK: any;
+        const context = {
+            getVectorDatabase: () => ({
+                listCollections: async () => []
+            }),
+            getEmbedding: () => ({
+                getProvider: () => "test"
+            }),
+            semanticSearch: async (
+                _codebasePath: string,
+                _query: string,
+                topK: number,
+                _threshold: number,
+                _filter: unknown,
+                options: any,
+            ) => {
+                requestedTopK = topK;
+                requestedAutoTopK = options.autoTopK;
+                return [{
+                    content: "function runSearch() {}",
+                    relativePath: "src/search.ts",
+                    startLine: 1,
+                    endLine: 1,
+                    language: "typescript",
+                    score: 1,
+                }];
+            }
+        } as any;
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(project, {
+            indexedFiles: 4,
+            totalChunks: 37,
+            status: "completed"
+        });
+        snapshotManager.saveCodebaseSnapshot();
+        const handlers = new ToolHandlers(context, snapshotManager);
+
+        const result = await handlers.handleSearchCode({
+            path: project,
+            query: "runSearch"
+        });
+
+        assert.equal(result.isError, undefined);
+        assert.equal(requestedTopK, 5);
+        assert.equal(requestedAutoTopK.minResults, 3);
+        assert.equal(requestedAutoTopK.returnCap, 5);
+    });
+});
+
 test("search_code defaults to low-latency results while automatic sync is active", async () => {
     await withTempDir(async (tempRoot) => {
         const project = path.join(tempRoot, "repo");

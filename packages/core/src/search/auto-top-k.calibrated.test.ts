@@ -1,4 +1,5 @@
 import { selectAutoTopK } from './auto-top-k';
+import { calibrateSearchCandidate } from './calibration';
 import type { SemanticSearchResult } from '../types';
 
 function result(index: number, score: number | undefined, rerankScore?: number): SemanticSearchResult {
@@ -55,6 +56,16 @@ describe('calibrated automatic TopK', () => {
         );
 
         expect(selectAutoTopK(candidates, 12, options, false).signal).toBe('mixed');
+    });
+
+    it('normalizes mixed candidates according to the score source', () => {
+        const candidates = [
+            result(0, 0.02, 0.05),
+            result(1, 0.02),
+        ];
+
+        expect(calibrateSearchCandidate(candidates[0], 0, candidates, 'mixed').features.normalizedScore).toBeCloseTo(0.05);
+        expect(calibrateSearchCandidate(candidates[1], 1, candidates, 'mixed').features.normalizedScore).toBeCloseTo(0.9);
     });
 
     it('keeps strong lexical evidence when no finite retrieval score exists', () => {

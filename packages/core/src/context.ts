@@ -1576,7 +1576,7 @@ export class Context {
             );
             const rerankedResults = await this.withSearchStageTimeout(
                 'external rerank',
-                this.externalRerankResults(query, rankedResults, rerankConfig),
+                this.externalRerankResults(query, this.deduplicateResults(rankedResults), rerankConfig),
                 codebasePath,
                 query,
                 deadlineMs
@@ -1641,7 +1641,7 @@ export class Context {
             );
             const rerankedResults = await this.withSearchStageTimeout(
                 'external rerank',
-                this.externalRerankResults(query, rankedResults, rerankConfig),
+                this.externalRerankResults(query, this.deduplicateResults(rankedResults), rerankConfig),
                 codebasePath,
                 query,
                 deadlineMs
@@ -1676,7 +1676,8 @@ export class Context {
             return this.applySearchResultGrouping(dedupedResults, options, query, filterExpr, outputLimit);
         }
 
-        let decision = selectAutoTopK(results, outputLimit, options.autoTopK, isHybrid);
+        const calibrationCandidates = this.decorateSearchResultsForCalibration(results, options, query, filterExpr);
+        let decision = selectAutoTopK(calibrationCandidates, outputLimit, options.autoTopK, isHybrid);
         const useLegacyStructure = options.autoTopK.strategy === 'legacy-gap' || (
             !options.autoTopK.strategy
             && options.autoTopK.candidateWindow === undefined
@@ -2267,6 +2268,23 @@ export class Context {
         }
 
         return selected;
+    }
+
+    private decorateSearchResultsForCalibration(
+        results: SemanticSearchResult[],
+        options: NormalizedSemanticSearchOptions,
+        query: string,
+        filterExpr: string | undefined,
+    ): SemanticSearchResult[] {
+        const roleIntent = this.getSearchFileRoleIntent(query, filterExpr, options.targetRole);
+        return results.map(result => {
+            const fileRole = this.resolveResultFileRole(result);
+            return {
+                ...result,
+                fileRole,
+                isPrimary: this.isPrimarySearchResult(fileRole, options.targetRole, roleIntent, result.relativePath, query),
+            };
+        });
     }
 
     private resolveResultFileRole(result: SemanticSearchResult): FileRole {

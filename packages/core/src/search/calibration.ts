@@ -104,7 +104,7 @@ export function calibrateSearchCandidate(
         .map(candidate => getSignalScore(candidate, signal))
         .filter((score): score is number => Number.isFinite(score));
     const score = getSignalScore(result, signal);
-    const normalizedScore = normalizeScore(score, scores, signal);
+    const normalizedScore = normalizeScore(result, score, scores, signal);
     const previousScore = index > 0 ? getSignalScore(results[index - 1], signal) : undefined;
     const nextScore = index + 1 < results.length ? getSignalScore(results[index + 1], signal) : undefined;
     const margin = Number.isFinite(score) && Number.isFinite(nextScore)
@@ -174,7 +174,12 @@ function getLexicalEvidence(result: SemanticSearchResult): number {
     return 0;
 }
 
-function normalizeScore(score: number | undefined, _scores: readonly number[], signal: SearchAutoTopKSignal): number {
+function normalizeScore(
+    result: SemanticSearchResult,
+    score: number | undefined,
+    _scores: readonly number[],
+    signal: SearchAutoTopKSignal,
+): number {
     if (!Number.isFinite(score) || _scores.length === 0) {
         return 0;
     }
@@ -193,8 +198,11 @@ function normalizeScore(score: number | undefined, _scores: readonly number[], s
     }
     if (signal === 'mixed') {
         // Reranked candidates carry probability-like scores; candidates past
-        // the rerank limit retain their RRF retrieval score.
-        return value >= 0.1 ? normalizeProbabilityLikeScore(value) : clamp01(value * 45);
+        // the rerank limit retain their RRF retrieval score. The source is a
+        // property of the candidate, not a score magnitude.
+        return finite(result.rerankScore) !== undefined
+            ? normalizeProbabilityLikeScore(value)
+            : clamp01(value * 45);
     }
     return normalizeProbabilityLikeScore(value);
 }

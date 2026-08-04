@@ -585,6 +585,104 @@ describe('Context lexical search supplement', () => {
         expect(body.top_n).toBe(100);
     });
 
+    it('deduplicates candidates before applying the external rerank limit', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([
+            createVectorResult({
+                id: 'duplicate-first',
+                content: 'duplicate first candidate',
+                relativePath: 'src/duplicate.ts',
+                startLine: 1,
+                endLine: 20,
+                metadata: { language: 'typescript' },
+            }, 0.95),
+            createVectorResult({
+                id: 'duplicate-second',
+                content: 'duplicate second candidate',
+                relativePath: 'src/duplicate.ts',
+                startLine: 2,
+                endLine: 21,
+                metadata: { language: 'typescript' },
+            }, 0.9),
+            createVectorResult({
+                id: 'unique',
+                content: 'unique candidate',
+                relativePath: 'src/unique.ts',
+                startLine: 1,
+                endLine: 20,
+                metadata: { language: 'typescript' },
+            }, 0.85),
+        ]);
+        const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                results: [
+                    { index: 0, relevance_score: 0.95 },
+                    { index: 1, relevance_score: 0.9 },
+                ],
+            }),
+        } as unknown as Response);
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankApiKey: 'sk-test',
+            rerankBaseUrl: 'https://openrouter.ai/api/v1',
+            rerankCandidateLimit: 2,
+        });
+
+        await context.semanticSearch('/repo', 'candidate search', 2, 0.3, undefined, {
+            enableLexicalSupplement: false,
+        });
+
+        const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+        expect(body.documents).toHaveLength(2);
+        expect(body.documents[0]).toContain('duplicate first candidate');
+        expect(body.documents[1]).toContain('unique candidate');
+    });
+
+    it('applies target-role matches before calibrated automatic TopK', async () => {
+        const vectorDatabase = createVectorDatabase();
+        vectorDatabase.search.mockResolvedValue([
+            createVectorResult({
+                id: 'test-candidate',
+                content: 'it("returns the expected result", () => {});',
+                relativePath: 'src/search.test.ts',
+                metadata: { language: 'typescript', fileRole: 'test' },
+            }, 0.8),
+        ]);
+        const onDecision = jest.fn();
+        const context = new Context({
+            hybridMode: false,
+            embedding: new TestEmbedding(),
+            vectorDatabase,
+            rerankEnabled: false,
+        });
+
+        const results = await context.semanticSearch('/repo', 'search result', 1, 0.3, undefined, {
+            enableLexicalSupplement: false,
+            targetRole: 'test',
+            autoTopK: {
+                strategy: 'calibrated',
+                candidateWindow: 1,
+                returnCap: 1,
+                useVectorFallback: true,
+                onDecision,
+            },
+        });
+
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({
+            relativePath: 'src/search.test.ts',
+            isPrimary: true,
+        });
+        expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
+            acceptedResults: 1,
+            signal: 'vector',
+        }));
+    });
+
     it.each([
         ['429', { ok: false, status: 429, json: async () => ({}) }],
         ['5xx', { ok: false, status: 503, json: async () => ({}) }],

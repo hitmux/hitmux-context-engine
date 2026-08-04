@@ -1228,7 +1228,8 @@ export class ToolHandlers {
             console.warn("[SEARCH] config.searchAutoTopKMin is deprecated and ignored with calibrated automatic TopK.");
         }
         const hasInvalidBounds = (
-            rawMin !== undefined
+            strategy === "legacy-gap"
+            && rawMin !== undefined
             && !this.isPositiveInteger(configuredMin)
         ) || (
             rawMax !== undefined
@@ -1253,7 +1254,11 @@ export class ToolHandlers {
                 `[SEARCH] Clamping config.searchAutoTopKMax from ${requestedMax} to runtime limit ${MAX_SEARCH_AUTO_TOP_K}.`,
             );
         }
-        const requestedMin = configuredMin ?? DEFAULT_SEARCH_AUTO_TOP_K_MIN;
+        const requestedMin = strategy === "calibrated"
+            && configuredMin !== undefined
+            && !this.isPositiveInteger(configuredMin)
+            ? DEFAULT_SEARCH_AUTO_TOP_K_MIN
+            : configuredMin ?? DEFAULT_SEARCH_AUTO_TOP_K_MIN;
         if (requestedMin > maxResults) {
             console.warn(
                 `[SEARCH] config.searchAutoTopKMin (${requestedMin}) exceeds searchAutoTopKMax (${maxResults}); using ${maxResults} for both.`,
