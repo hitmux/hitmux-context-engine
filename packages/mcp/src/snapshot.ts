@@ -465,6 +465,7 @@ export class SnapshotManager {
         // Update file count and info
         this.codebaseFileCount.set(codebasePath, stats.indexedFiles);
 
+        const previousInfo = this.codebaseInfoMap.get(codebasePath);
         const resolvedIndexOptions = this.resolveIndexOptions(codebasePath, indexOptions);
         this.removedCodebases.delete(codebasePath);
         this.recentlyRemoved.delete(codebasePath);
@@ -475,10 +476,30 @@ export class SnapshotManager {
             totalChunks: stats.totalChunks,
             indexStatus: stats.status,
             ...(stats.statsSource ? { statsSource: stats.statsSource } : {}),
+            ...(previousInfo?.status === 'indexed' && previousInfo.lastFullScanAt
+                ? { lastFullScanAt: previousInfo.lastFullScanAt }
+                : {}),
             ...resolvedIndexOptions,
             lastUpdated: new Date().toISOString()
         };
         this.codebaseInfoMap.set(codebasePath, info);
+    }
+
+    public markCodebaseFullScanCompleted(
+        codebasePath: string,
+        completedAt: Date = new Date(),
+    ): void {
+        const info = this.codebaseInfoMap.get(codebasePath);
+        if (!info || info.status !== 'indexed') {
+            return;
+        }
+
+        const timestamp = completedAt.toISOString();
+        this.codebaseInfoMap.set(codebasePath, {
+            ...info,
+            lastFullScanAt: timestamp,
+            lastUpdated: timestamp,
+        });
     }
 
     /**

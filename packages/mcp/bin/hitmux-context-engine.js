@@ -13,6 +13,6 @@ process.emitWarning = (warning, ...args) => {
     }
 };
 
-const { runHitmuxContextEngineCli } = await import("@hitmux/hitmux-context-engine-mcp");
+const { runHitmuxContextEngineCli } = await import("../dist/index.js");
 
 runHitmuxContextEngineCli();

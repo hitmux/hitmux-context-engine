@@ -38,8 +38,8 @@ Las opciones del producto se configuran en `~/.hitmux-context-engine/config.conf
 | `hce config path` | Muestra rutas de config global y project. |
 | `hce doctor [--no-connectivity]` | Comprueba Node, config parsing y conectividad opcional de embedding/vector database. |
 | `hce test [embedding\|vectordb]` | Ejecuta connectivity checks. |
-| `hce status [path] [--refresh]` | Muestra indexing status para una ruta. |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | Busca en contexto indexado. `scope` es `all` por defecto; `docs` o `code` acotan resultados. |
+| `hce status [path] [--refresh] [--details]` | Muestra indexing status para una ruta. |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | Busca en contexto indexado. `scope` es `all` por defecto; `docs` o `code` acotan resultados. |
 | `hce clear <path>` | Borra index data de una ruta. |
 | `hce repair <path>` | Repara manifest remoto legacy o ausente. |
 | `hce list [collection-name\|repo-path]` | Lista collections o muestra detalle. |

@@ -38,8 +38,8 @@ product options는 `~/.hitmux-context-engine/config.conf` 또는 `./.hitmux-cont
 | `hce config path` | global 및 project config paths 표시. |
 | `hce doctor [--no-connectivity]` | Node, config parsing, 선택적 embedding/vector database connectivity 확인. |
 | `hce test [embedding\|vectordb]` | connectivity checks 실행. |
-| `hce status [path] [--refresh]` | path의 indexing status 표시. |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | indexed context 검색. `scope` 기본값은 `all`이며 `docs` 또는 `code`로 좁힐 수 있습니다. |
+| `hce status [path] [--refresh] [--details]` | path의 indexing status 표시. |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | indexed context 검색. `scope` 기본값은 `all`이며 `docs` 또는 `code`로 좁힐 수 있습니다. |
 | `hce clear <path>` | path의 index data 삭제. |
 | `hce repair <path>` | legacy 또는 missing remote index manifest 복구. |
 | `hce list [collection-name\|repo-path]` | collections list 또는 detail 표시. |

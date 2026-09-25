@@ -1,6 +1,6 @@
 {
     "name": "hce-mcp",
-    "version": "0.2.18",
+    "version": "0.2.19",
     "description": "Short package alias for the Hitmux Context Engine MCP server",
     "type": "module",
     "bin": {
@@ -14,7 +14,8 @@
         "@hitmux/hitmux-context-engine-mcp": "workspace:*"
     },
     "files": [
-        "bin"
+        "bin",
+        "skills"
     ],
     "repository": {
         "type": "git",

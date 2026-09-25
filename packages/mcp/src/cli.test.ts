@@ -231,6 +231,8 @@ test("status, clear, repair, and search map to ToolHandlers", async () => {
                 "3",
                 "--scope",
                 "docs",
+                "--continuation-token",
+                "next-page-token",
             ],
             options,
         ),
@@ -248,6 +250,7 @@ test("status, clear, repair, and search map to ToolHandlers", async () => {
                 path: "/tmp",
                 limit: 3,
                 scope: "docs",
+                continuationToken: "next-page-token",
             },
         },
     ]);
@@ -316,4 +319,161 @@ test("handler errors write stderr and return non-zero", async () => {
 
     assert.equal(exitCode, 1);
     assert.match(errors.join(""), /status failed/);
+});
+
+test("--json wraps handler output for Skills and scripts", async () => {
+    const output: string[] = [];
+    const exitCode = await runCliCommand(
+        ["--json", "status", "/tmp", "--details"],
+        {
+            stdout: (message) => output.push(message),
+            createRuntime: () => createFakeRuntime([]),
+        },
+    );
+
+    assert.equal(exitCode, 0);
+    assert.deepEqual(JSON.parse(output.join("")), {
+        ok: true,
+        command: "status",
+        exitCode: 0,
+        output: "status ok",
+    });
+});
+
+test("--json exposes handler structured content as data", async () => {
+    const output: string[] = [];
+    const exitCode = await runCliCommand(
+        ["--json", "search", "query", "/tmp"],
+        {
+            stdout: (message) => output.push(message),
+            createRuntime: () => ({
+                context: {},
+                snapshotManager: {},
+                syncManager: {},
+                toolHandlers: {
+                    handleSearchContext: async () => ({
+                        content: [{ type: "text", text: "search results" }],
+                        structuredContent: {
+                            pagination: {
+                                acceptedCount: 20,
+                                returnedCount: 12,
+                                truncated: true,
+                                continuationToken: "next-page-token",
+                            },
+                        },
+                    }),
+                },
+            }) as any,
+        },
+    );
+
+    assert.equal(exitCode, 0);
+    assert.deepEqual(JSON.parse(output.join("")), {
+        ok: true,
+        command: "search",
+        exitCode: 0,
+        output: "search results",
+        data: {
+            pagination: {
+                acceptedCount: 20,
+                returnedCount: 12,
+                truncated: true,
+                continuationToken: "next-page-token",
+            },
+        },
+    });
+});
+
+test("--json can follow a command and keeps usage errors machine-readable", async () => {
+    const output: string[] = [];
+    const exitCode = await runCliCommand(["search", "--unknown", "--json"], {
+        stdout: (message) => output.push(message),
+    });
+
+    assert.equal(exitCode, 2);
+    const payload = JSON.parse(output.join(""));
+    assert.equal(payload.ok, false);
+    assert.equal(payload.command, "search");
+    assert.equal(payload.exitCode, 2);
+    assert.match(payload.error, /Usage: hce search/);
+});
+
+test("--json wraps manage command stdout and stderr", async () => {
+    const output: string[] = [];
+    const exitCode = await runCliCommand(["list", "--json"], {
+        stdout: (message) => output.push(message),
+        runManageCommand: async (_args, options) => {
+            options.stdout?.("collection output\n");
+            options.stderr?.("diagnostic\n");
+            return 1;
+        },
+    });
+
+    assert.equal(exitCode, 1);
+    assert.deepEqual(JSON.parse(output.join("")), {
+        ok: false,
+        command: "list",
+        exitCode: 1,
+        output: "collection output",
+        error: "diagnostic",
+    });
+});
+
+test("--text overrides JSON-friendly command placement", async () => {
+    const output: string[] = [];
+    const errors: string[] = [];
+    const exitCode = await runCliCommand(["status", "--text"], {
+        stdout: (message) => output.push(message),
+        stderr: (message) => errors.push(message),
+        createRuntime: () => createFakeRuntime([]),
+    });
+
+    assert.equal(exitCode, 0);
+    assert.equal(output.join(""), "status ok\n");
+    assert.equal(errors.join(""), "");
+});
+
+test("--format json is an explicit alias for --json", async () => {
+    const output: string[] = [];
+    const exitCode = await runCliCommand(["status", "--format", "json"], {
+        stdout: (message) => output.push(message),
+        createRuntime: () => createFakeRuntime([]),
+    });
+
+    assert.equal(exitCode, 0);
+    assert.deepEqual(JSON.parse(output.join("")), {
+        ok: true,
+        command: "status",
+        exitCode: 0,
+        output: "status ok",
+    });
+});
+
+test("format parsing errors remain machine-readable when JSON was requested", async () => {
+    const output: string[] = [];
+    const exitCode = await runCliCommand(["--json", "--format", "text", "status"], {
+        stdout: (message) => output.push(message),
+    });
+
+    assert.equal(exitCode, 2);
+    assert.deepEqual(JSON.parse(output.join("")), {
+        ok: false,
+        command: "cli",
+        exitCode: 2,
+        error: "Conflicting output format options.",
+    });
+});
+
+test("JSON usage errors include an envelope even without a command", async () => {
+    const output: string[] = [];
+    const exitCode = await runCliCommand(["--json"], {
+        stdout: (message) => output.push(message),
+    });
+
+    assert.equal(exitCode, 2);
+    const payload = JSON.parse(output.join(""));
+    assert.equal(payload.ok, false);
+    assert.equal(payload.command, "cli");
+    assert.equal(payload.exitCode, 2);
+    assert.match(payload.error, /Usage: hce --json/);
 });

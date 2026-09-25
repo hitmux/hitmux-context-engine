@@ -46,8 +46,8 @@ indexing 後、repository root で `hce status .` を実行すると状態を確
 | `hce index [path]` | index を同期または作成。現在の repository では `hce index .` を使います。 |
 | `hce index --force [path]` | repository index を force rebuild。 |
 | `hce index --all --force` | known repository indexes をすべて force rebuild。`--force` なしの `hce index --all` は拒否されます。 |
-| `hce status [path] [--refresh]` | path の indexing status を表示。default は現在の directory。 |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | shell から index 済み context を検索。`scope` は default で `all`、`docs` または `code` で絞り込みます。 |
+| `hce status [path] [--refresh] [--details]` | path の indexing status を表示。default は現在の directory。 |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | shell から index 済み context を検索。`scope` は default で `all`、`docs` または `code` で絞り込みます。 |
 | `hce list [collection-name\|repo-path]` | collections を list、または collection/path の detail を表示。 |
 | `hce clear <path>` | path の index data を削除。 |
 | `hce repair <path>` | legacy または missing remote index manifest を repair。 |

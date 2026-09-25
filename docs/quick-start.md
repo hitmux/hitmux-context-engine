@@ -2,7 +2,7 @@
 
 Language: English | [中文](quick-start.zh-CN.md) | [Español](quick-start.es.md) | [Français](quick-start.fr.md) | [Deutsch](quick-start.de.md) | [日本語](quick-start.ja.md) | [한국어](quick-start.ko.md)
 
-This page shows how to start Hitmux Context Engine from MCP clients. Product configuration lives in `~/.hitmux-context-engine/config.conf` or `.hitmux-context-engine/config.conf` inside a project. MCP client configuration only starts the stdio server.
+This page shows how to start Hitmux Context Engine from MCP clients or an Agent Skill. Product configuration lives in `~/.hitmux-context-engine/config.conf` or `.hitmux-context-engine/config.conf` inside a project. MCP client configuration only starts the stdio server; Skills call the CLI directly.
 
 ## Product Config
 
@@ -31,6 +31,8 @@ For shell diagnostics after indexing, run `hce status .` from the repository roo
 
 Use `hce` without arguments only as the MCP stdio server command in client configuration. From a shell, pass a command:
 
+CLI output adapts to the environment: interactive TTYs receive readable text, while pipes and redirects receive one JSON object. Agent Skills must use `--json`, because a PTY can be interactive. JSON exposes stable `ok`, `command`, and `exitCode` fields, readable text in `output`, and handler machine data in `data`.
+
 | Command | Use |
 | --- | --- |
 | `hce --help` | Show command usage. |
@@ -42,12 +44,14 @@ Use `hce` without arguments only as the MCP stdio server command in client confi
 | `hce index [path]` | Sync or create an index. Use `hce index .` for the current repository. |
 | `hce index --force [path]` | Force rebuild one repository index. |
 | `hce index --all --force` | Force rebuild all known repository indexes. `hce index --all` without `--force` is rejected. |
-| `hce status [path] [--refresh]` | Show indexing status for a path, defaulting to the current directory. |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | Search indexed context from the shell. `scope` defaults to `all`; use `docs` or `code` to narrow results. |
+| `hce status [path] [--refresh] [--details]` | Show indexing status for a path, defaulting to the current directory. |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | Search indexed context from the shell. `scope` defaults to `all`; use `docs` or `code` to narrow results. Reuse a returned `data.pagination.continuationToken` with the unchanged query, path, and scope for the next page. |
 | `hce list [collection-name\|repo-path]` | List collections or show details for one collection/path. |
 | `hce clear <path>` | Clear index data for one path. |
 | `hce repair <path>` | Repair a legacy or missing remote index manifest. |
 | `hce rm <collection-name\|repo-path> [...]` | Delete one or more collections by collection name or repo path. |
+
+Published packages include the Agent Skill at `skills/hitmux-context-engine/SKILL.md`. With a global `@hitmux/hce` install, its default path is `$(npm root -g)/@hitmux/hce/skills/hitmux-context-engine/SKILL.md`.
 
 ## Claude Code
 

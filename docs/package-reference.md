@@ -32,6 +32,10 @@ Configure product options in `~/.hitmux-context-engine/config.conf` or `./.hitmu
 
 Plain `hce` with no arguments starts the MCP stdio server. Use arguments for shell commands:
 
+Shell output is automatic: text on an interactive TTY and one JSON object on non-TTY stdout. Agents and scripts should always pass `--json`, because a PTY can look interactive. `--json` returns one object with stable `ok`, `command`, and `exitCode` fields; `output` is readable text and handler-provided machine data is exposed as `data`. Use `--text` or `HCE_OUTPUT_FORMAT=json|text` to override the format.
+
+All three published packages include the same Agent Skill. After a global install, it is available below the installed package as `skills/hitmux-context-engine/SKILL.md`; for `@hitmux/hce`, the default global path is `$(npm root -g)/@hitmux/hce/skills/hitmux-context-engine/SKILL.md`.
+
 | Command | Purpose |
 | --- | --- |
 | `hce --help` | Show CLI usage. |
@@ -40,8 +44,8 @@ Plain `hce` with no arguments starts the MCP stdio server. Use arguments for she
 | `hce config path` | Show global and project config paths and whether they exist. |
 | `hce doctor [--no-connectivity]` | Check Node version, config parsing, key runtime settings, and optionally embedding/vector database connectivity. |
 | `hce test [embedding\|vectordb]` | Run connectivity checks. |
-| `hce status [path] [--refresh]` | Print indexing status for a path, defaulting to the current directory. |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | Search indexed context from the shell. `scope` defaults to `all`; use `docs` or `code` to narrow results. |
+| `hce status [path] [--refresh] [--details]` | Print indexing status for a path, defaulting to the current directory. `--details` includes detailed status information. |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | Search indexed context from the shell. `scope` defaults to `all`; use `docs` or `code` to narrow results. When `data.pagination.continuationToken` is present in JSON output, pass it back with the unchanged query, path, and scope to read the next page. |
 | `hce clear <path>` | Clear index data for one path. |
 | `hce repair <path>` | Repair a legacy or missing remote index manifest. |
 | `hce list [collection-name\|repo-path]` | List collections or show details for one collection/path. |

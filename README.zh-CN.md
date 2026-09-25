@@ -2,9 +2,9 @@
 
 Language: [English](README.md) | 中文 | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
 
-面向 MCP 客户端的语义代码搜索。
+面向 MCP 客户端和 Agent Skills 的语义代码搜索。
 
-Hitmux Context Engine 会把代码仓库索引到 Milvus 兼容的向量存储中，然后为 Claude Code、OpenAI Codex CLI、OpenCode、Cursor、Windsurf 和其他 MCP 客户端提供聚焦的代码查找工具，可按行为、symbol、workflow 或文件职责搜索代码。
+Hitmux Context Engine 会把代码仓库索引到 Milvus 兼容的向量存储中，然后通过 `hce` CLI 或 MCP 为 Claude Code、OpenAI Codex CLI、OpenCode、Cursor、Windsurf 和其他 agent 提供聚焦的代码查找工具，可按行为、symbol、workflow 或文件职责搜索代码。
 
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
 [![npm - core](https://img.shields.io/npm/v/@hitmux/hitmux-context-engine-core?label=%40hitmux%2Fhitmux-context-engine-core&logo=npm)](https://www.npmjs.com/package/@hitmux/hitmux-context-engine-core)
@@ -82,6 +82,7 @@ hce status .
 | 任务 | 命令 |
 | --- | --- |
 | 显示帮助或版本 | `hce --help`, `hce --version` |
+| 为 Skill 或脚本输出 JSON | 非 TTY 默认 JSON；也可用 `hce --json status .` 或 `--format json` |
 | 创建或补全全局配置 | `hce init` |
 | 显示 global 和 project config paths | `hce config path` |
 | 检查配置和连通性 | `hce doctor`, `hce doctor --no-connectivity` |
@@ -91,6 +92,10 @@ hce status .
 | 管理 indexes 和 collections | `hce list`, `hce list <name-or-path>`, `hce clear <path>`, `hce repair <path>`, `hce rm <name-or-path>`, `hce index --force <path>` |
 
 更多客户端示例，包括 Cursor、Windsurf、Claude Desktop、Gemini CLI、Qwen Code、VS Code MCP、Cline 和 Roo Code，见 [docs/quick-start.zh-CN.md](docs/quick-start.zh-CN.md)。
+
+## Agent Skill
+
+仓库内的 [Hitmux Context Engine Skill](.agents/skills/hitmux-context-engine/SKILL.md) 面向支持 Agent Skills 的 coding agent，说明如何通过 CLI 建立索引、检查状态和执行语义搜索。CLI 会在非 TTY 中默认输出稳定的机器可读 JSON envelope，不需要每条命令重复添加 `--json`；需要时也可用 `--text` 或 `HCE_OUTPUT_FORMAT=text`。将该目录复制到 agent 的 skills 目录后即可使用；Codex 通常使用 `~/.agents/skills/`，Claude Code 使用 `~/.claude/skills/`。
 
 本地源码 checkout 可运行 `./scripts/install-local-global.sh`，它会构建 workspace，并从当前 checkout 安装用户级 `hitmux-context-engine-mcp` 命令。使用 `sudo` 运行该脚本会全局安装命令。已发布 package 的 Claude Code 和 Codex CLI 设置使用上面展示的全局 `hce` 命令。
 

@@ -82,6 +82,7 @@ hce status .
 | Task | Command |
 | --- | --- |
 | Show help or version | `hce --help`, `hce --version` |
+| Agent or script output | Non-TTY defaults to JSON; use `hce --json <command>` or `hce --text <command>` to override. |
 | Create or complete global config | `hce init` |
 | Show global and project config paths | `hce config path` |
 | Check config and connectivity | `hce doctor`, `hce doctor --no-connectivity` |

@@ -143,6 +143,7 @@ class FakeContext {
 class FakeSnapshotManager {
     removed: string[] = [];
     saved = 0;
+    fullScanCompleted: string[] = [];
     codebaseInfo: ReturnType<SnapshotManager["getCodebaseInfo"]>;
     indexed: Array<{
         codebasePath: string;
@@ -176,6 +177,10 @@ class FakeSnapshotManager {
         indexOptions?: unknown,
     ): void {
         this.indexed.push({ codebasePath, stats, indexOptions });
+    }
+
+    markCodebaseFullScanCompleted(codebasePath: string): void {
+        this.fullScanCompleted.push(codebasePath);
     }
 
     removeCodebaseCompletely(codebasePath: string): void {
@@ -463,6 +468,7 @@ test("runCliManageCommand index sync refreshes snapshot from remote manifest", a
             },
         ]);
         assert.equal(snapshotManager.saved, 1);
+        assert.deepEqual(snapshotManager.fullScanCompleted, [tempDir]);
         assert.equal(metadataQueryCalls, 0);
     } finally {
         rmSync(tempDir, { recursive: true, force: true });

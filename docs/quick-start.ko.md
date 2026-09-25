@@ -46,8 +46,8 @@ indexing 후 repository root에서 `hce status .`로 상태를 확인할 수 있
 | `hce index [path]` | index를 sync 또는 생성합니다. 현재 repository는 `hce index .`를 사용합니다. |
 | `hce index --force [path]` | repository index를 force rebuild합니다. |
 | `hce index --all --force` | 알려진 모든 repository indexes를 force rebuild합니다. `--force` 없는 `hce index --all`은 거부됩니다. |
-| `hce status [path] [--refresh]` | path의 indexing status를 표시합니다. 기본값은 현재 directory입니다. |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | shell에서 index된 context를 검색합니다. `scope` 기본값은 `all`이며 `docs` 또는 `code`로 좁힐 수 있습니다. |
+| `hce status [path] [--refresh] [--details]` | path의 indexing status를 표시합니다. 기본값은 현재 directory입니다. |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | shell에서 index된 context를 검색합니다. `scope` 기본값은 `all`이며 `docs` 또는 `code`로 좁힐 수 있습니다. |
 | `hce list [collection-name\|repo-path]` | collections를 list하거나 collection/path detail을 표시합니다. |
 | `hce clear <path>` | path의 index data를 삭제합니다. |
 | `hce repair <path>` | legacy 또는 missing remote index manifest를 repair합니다. |

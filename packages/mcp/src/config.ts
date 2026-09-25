@@ -99,6 +99,7 @@ export interface CodebaseInfoIndexed extends CodebaseInfoBase {
     totalChunks: number; // Total number of chunks generated
     indexStatus: "completed" | "limit_reached"; // Status from indexing result
     statsSource?: CodebaseStatsSource; // Missing means a normal full index from older snapshots
+    lastFullScanAt?: string; // Persisted across CLI processes to avoid redundant reconciliation scans
     syncWarning?: string; // Warning from automatic incremental sync while preserving the existing index
     syncWarningDetails?: IncrementalIndexFileChange[]; // Affected files from an oversized automatic incremental sync
 }

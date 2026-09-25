@@ -413,6 +413,7 @@ async function syncOrCreatePath(
             ...indexOptions,
             requestSplitter: splitterType,
         });
+        runtime.snapshotManager.markCodebaseFullScanCompleted(codebasePath);
         await runtime.snapshotManager.saveCodebaseSnapshotAsync();
         return `Resumed '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
     }
@@ -444,6 +445,7 @@ async function syncOrCreatePath(
                 status: remoteManifest.status,
                 statsSource: "remote_manifest",
             }, indexOptions);
+            runtime.snapshotManager.markCodebaseFullScanCompleted(codebasePath);
             await runtime.snapshotManager.saveCodebaseSnapshotAsync();
         } else {
             writeStderr(
@@ -471,6 +473,7 @@ async function syncOrCreatePath(
         ...indexOptions,
         requestSplitter: splitterType,
     });
+    runtime.snapshotManager.markCodebaseFullScanCompleted(codebasePath);
     await runtime.snapshotManager.saveCodebaseSnapshotAsync();
     return `Indexed '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
 }
@@ -500,6 +503,7 @@ async function forceRebuildPath(
         ...indexOptions,
         requestSplitter: splitterType,
     });
+    runtime.snapshotManager.markCodebaseFullScanCompleted(codebasePath);
     await runtime.snapshotManager.saveCodebaseSnapshotAsync();
     return `Rebuilt '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
 }

@@ -923,7 +923,17 @@ export class SyncManager {
         forceFullScan: boolean,
     ): Promise<CodebaseSyncStats> {
         const fallbackIntervalMs = getProjectWatcherFallbackScanIntervalMs();
-        const lastFullScanMs = this.lastFullScanMs.get(codebasePath);
+        const codebaseInfo = this.snapshotManager.getCodebaseInfo(codebasePath);
+        const persistedLastFullScanAt = codebaseInfo?.status === "indexed"
+            ? codebaseInfo.lastFullScanAt
+            : undefined;
+        const persistedLastFullScanMs = persistedLastFullScanAt
+            ? Date.parse(persistedLastFullScanAt)
+            : Number.NaN;
+        const lastFullScanMs = this.lastFullScanMs.get(codebasePath)
+            ?? (Number.isFinite(persistedLastFullScanMs)
+                ? persistedLastFullScanMs
+                : undefined);
         const fullScanDue =
             state === null ||
             lastFullScanMs === undefined ||
@@ -947,7 +957,10 @@ export class SyncManager {
                 requestMaxDepth,
             );
             const elapsedMs = Date.now() - startedAt;
-            this.lastFullScanMs.set(codebasePath, Date.now());
+            const completedAt = new Date();
+            this.lastFullScanMs.set(codebasePath, completedAt.getTime());
+            this.snapshotManager.markCodebaseFullScanCompleted(codebasePath, completedAt);
+            await this.snapshotManager.saveCodebaseSnapshotAsync();
             this.projectChangeTracker?.markClean(codebasePath, state?.version);
             console.log(
                 `[SYNC-DEBUG] Background full-scan reconciliation completed for '${codebasePath}' in ${elapsedMs}ms. Added: ${stats.added}, Removed: ${stats.removed}, Modified: ${stats.modified}`,
@@ -1058,7 +1071,10 @@ export class SyncManager {
             requestMaxDepth,
         );
         const elapsedMs = Date.now() - startedAt;
-        this.lastFullScanMs.set(codebasePath, Date.now());
+        const completedAt = new Date();
+        this.lastFullScanMs.set(codebasePath, completedAt.getTime());
+        this.snapshotManager.markCodebaseFullScanCompleted(codebasePath, completedAt);
+        await this.snapshotManager.saveCodebaseSnapshotAsync();
         this.projectChangeTracker?.markClean(codebasePath, state?.version);
         console.log(
             `[SYNC-DEBUG] Full change scan completed for '${codebasePath}' in ${elapsedMs}ms. Added: ${stats.added}, Removed: ${stats.removed}, Modified: ${stats.modified}`,

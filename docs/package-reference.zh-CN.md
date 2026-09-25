@@ -32,16 +32,22 @@ hce
 
 不带参数的 `hce` 会启动 MCP stdio server。shell commands 使用参数：
 
+自动输出模式会在 TTY 使用文本、非 TTY stdout 使用单个 JSON object。Agent 和脚本必须始终传入 `--json`，因为 PTY 可能被识别为交互终端。`--json` 返回稳定的 `ok`、`command`、`exitCode` 字段；`output` 是可读文本，handler 提供的机器可读数据位于 `data`。可用 `--text` 或 `HCE_OUTPUT_FORMAT=json|text` 覆盖格式。
+
+三个已发布 package 都携带相同的 Agent Skill。全局安装后，Skill 位于安装 package 内的 `skills/hitmux-context-engine/SKILL.md`；使用 `@hitmux/hce` 时默认全局路径为 `$(npm root -g)/@hitmux/hce/skills/hitmux-context-engine/SKILL.md`。
+
 | Command | Purpose |
 | --- | --- |
 | `hce --help` | 显示 CLI usage。 |
 | `hce --version` | 打印 MCP package version。 |
+| `hce <command>` | 自动适配输出：TTY 使用文本，非 TTY 使用单个 JSON object。Agent 和脚本使用 `hce --json <command>`，不要依赖 PTY 自动识别。 |
+| `hce --json <command>` / `hce --text <command>` | 显式选择 JSON 或文本；`--json` 和 `--text` 也可以放在 command 末尾。 |
 | `hce init` | 创建或补全 `~/.hitmux-context-engine/config.conf`，不会覆盖已有值。 |
 | `hce config path` | 显示 global 和 project config paths，以及它们是否存在。 |
 | `hce doctor [--no-connectivity]` | 检查 Node version、config parsing、关键 runtime settings，并可选检查 embedding/vector database 连通性。 |
 | `hce test [embedding\|vectordb]` | 运行连通性检查。 |
-| `hce status [path] [--refresh]` | 打印某个 path 的 indexing status，默认当前目录。 |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | 从 shell 搜索已索引 context。`scope` 默认 `all`；用 `docs` 或 `code` 缩小范围。 |
+| `hce status [path] [--refresh] [--details]` | 打印某个 path 的 indexing status，默认当前目录。`--details` 输出详细状态。 |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | 从 shell 搜索已索引 context。`scope` 默认 `all`；用 `docs` 或 `code` 缩小范围。JSON 中存在 `data.pagination.continuationToken` 时，使用原 query、path、scope 并通过该参数读取下一页。 |
 | `hce clear <path>` | 清理某个 path 的 index data。 |
 | `hce repair <path>` | 修复 legacy 或缺失的 remote index manifest。 |
 | `hce list [collection-name\|repo-path]` | 列出 collections 或显示某个 collection/path 的详情。 |

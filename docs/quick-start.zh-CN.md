@@ -2,7 +2,7 @@
 
 Language: [English](quick-start.md) | 中文 | [Español](quick-start.es.md) | [Français](quick-start.fr.md) | [Deutsch](quick-start.de.md) | [日本語](quick-start.ja.md) | [한국어](quick-start.ko.md)
 
-本页说明如何从 MCP clients 启动 Hitmux Context Engine。产品配置位于 `~/.hitmux-context-engine/config.conf`，或项目内的 `.hitmux-context-engine/config.conf`。MCP client 配置只负责启动 stdio server。
+本页说明如何从 MCP clients 或 Agent Skills 使用 Hitmux Context Engine。产品配置位于 `~/.hitmux-context-engine/config.conf`，或项目内的 `.hitmux-context-engine/config.conf`。MCP client 配置只负责启动 stdio server；Skill 场景直接调用 CLI。
 
 ## Product Config
 
@@ -42,12 +42,16 @@ hce
 | `hce index [path]` | 同步或创建 index。当前仓库使用 `hce index .`。 |
 | `hce index --force [path]` | Force rebuild 一个 repository index。 |
 | `hce index --all --force` | Force rebuild all known repository indexes。没有 `--force` 的 `hce index --all` 会被拒绝。 |
-| `hce status [path] [--refresh]` | 显示某个 path 的 indexing status，默认当前目录。 |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | 从 shell 搜索已索引 context。`scope` 默认 `all`；用 `docs` 或 `code` 缩小范围。 |
+| `hce status [path] [--refresh] [--details]` | 显示某个 path 的 indexing status，默认当前目录。 |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | 从 shell 搜索已索引 context。`scope` 默认 `all`；用 `docs` 或 `code` 缩小范围。 |
 | `hce list [collection-name\|repo-path]` | 列出 collections，或显示某个 collection/path 的详情。 |
 | `hce clear <path>` | 清理某个 path 的 index data。 |
 | `hce repair <path>` | 修复 legacy 或缺失的 remote index manifest。 |
 | `hce rm <collection-name\|repo-path> [...]` | 按 collection name 或 repo path 删除一个或多个 collections。 |
+
+支持 Agent Skills 的 coding agent 直接调用 CLI。Skill 和脚本必须显式使用 `--json`，因为 PTY 可能被识别为交互终端。JSON 返回稳定的 `ok`、`command`、`exitCode` 字段，`output` 为可读文本，handler 提供的机器可读数据位于 `data`。可使用 `hce --json search "authentication flow" "$PWD" --scope code`；存在 `data.pagination.continuationToken` 时，以相同 query、path、scope 并传入 `--continuation-token` 获取下一页。需要文本时使用 `--text`。
+
+已发布 package 携带 Agent Skill，路径为 package 内的 `skills/hitmux-context-engine/SKILL.md`。全局安装 `@hitmux/hce` 时默认路径是 `$(npm root -g)/@hitmux/hce/skills/hitmux-context-engine/SKILL.md`；仓库开发时可读取 [Hitmux Context Engine Skill](../.agents/skills/hitmux-context-engine/SKILL.md)。
 
 ## Claude Code
 

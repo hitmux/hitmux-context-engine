@@ -38,8 +38,8 @@ product options は `~/.hitmux-context-engine/config.conf` または `./.hitmux-
 | `hce config path` | global と project の config paths を表示。 |
 | `hce doctor [--no-connectivity]` | Node、config parsing、必要に応じて embedding/vector database connectivity を確認。 |
 | `hce test [embedding\|vectordb]` | connectivity checks を実行。 |
-| `hce status [path] [--refresh]` | path の indexing status を表示。 |
-| `hce search <query> [path] [--limit n] [--scope all\|docs\|code]` | index 済み context を検索。`scope` は default で `all`、`docs` または `code` で絞り込みます。 |
+| `hce status [path] [--refresh] [--details]` | path の indexing status を表示。 |
+| `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | index 済み context を検索。`scope` は default で `all`、`docs` または `code` で絞り込みます。 |
 | `hce clear <path>` | path の index data を削除。 |
 | `hce repair <path>` | legacy または missing remote index manifest を repair。 |
 | `hce list [collection-name\|repo-path]` | collections を list、または detail を表示。 |

@@ -28,6 +28,7 @@ import { runCollectionReaperCommand } from "./collection-reaper.js";
 const MCP_PACKAGE_VERSION_FALLBACK = "0.0.0";
 
 type CliSearchScope = "all" | "docs" | "code";
+export type CliOutputFormat = "auto" | "json" | "text";
 
 interface CliRuntime {
     context: Context;
@@ -53,6 +54,12 @@ export interface CliDispatcherOptions {
     runManageCommand?: typeof runCliManageCommand;
     installCollectionReaperService?: () => InstallCollectionReaperServiceResult;
     runCollectionReaper?: typeof runCollectionReaperCommand;
+    /** Emit one JSON object on stdout for agent and script integrations. */
+    json?: boolean;
+    /** Select CLI output format. Defaults to auto-detection. */
+    format?: CliOutputFormat;
+    /** Internal callback used to add handler structured content to JSON output. */
+    setStructuredData?: (data: unknown) => void;
 }
 
 export function readCurrentPackageVersion(): string {
@@ -82,6 +89,10 @@ export function getCliHelpText(): string {
         " hce                         Start the MCP stdio server",
         " hce --help|-h               Show this help",
         " hce --version|-v            Show package version",
+        " hce <command>               Auto-select text for TTY, JSON otherwise",
+        " hce --json <command>        Emit one machine-readable JSON object",
+        " hce --text <command>        Force human-readable text output",
+        " hce --format json|text ...  Select output format explicitly",
         "",
         "Setup and diagnostics:",
         " hce init                    Create or complete global config.conf",
@@ -91,7 +102,7 @@ export function getCliHelpText(): string {
         "",
         "Index and collection management:",
         " hce status [path] [--refresh] [--details]",
-        " hce search <query> [path] [--limit n] [--scope all|docs|code]",
+        " hce search <query> [path] [--limit n] [--scope all|docs|code] [--continuation-token token]",
         " hce clear <path>",
         " hce repair <path>",
         " hce test [embedding|vectordb]",
@@ -105,6 +116,7 @@ export function getCliHelpText(): string {
         " Run plain hce only from MCP clients; it stays in stdio server mode.",
         " Config is read from ~/.hitmux-context-engine/config.conf and ./.hitmux-context-engine/config.conf.",
         " Omit --limit to use automatic TopK (default range: 3-12); pass --limit to force an exact count.",
+        " Output format can also be fixed with HCE_OUTPUT_FORMAT=json|text.",
         "",
     ].join("\n");
 }
@@ -116,6 +128,54 @@ export function shouldStartMcpServer(args: string[]): boolean {
 export async function runCliCommand(
     args: string[],
     options: CliDispatcherOptions = {},
+): Promise<number> {
+    const parsed = parseGlobalCliOptions(args);
+    const command = parsed.args[0] ?? "cli";
+    if (parsed.error) {
+        if (shouldUseJsonOutput(parsed.format, options)) {
+            writeJsonPayload(options, {
+                ok: false,
+                command,
+                exitCode: 2,
+                error: parsed.error,
+            });
+        } else {
+            writeStderr(options, `${parsed.error}\n`);
+        }
+        return 2;
+    }
+
+    if (parsed.args.length === 0) {
+        const usage = "Usage: hce <command>\nRun 'hce --help' to see available commands.";
+        if (shouldUseJsonOutput(parsed.format, options)) {
+            writeJsonPayload(options, {
+                ok: false,
+                command: "cli",
+                exitCode: 2,
+                error: usage,
+            });
+        } else {
+            writeStderr(options, `${usage}\n`);
+        }
+        return 2;
+    }
+
+    if (shouldUseJsonOutput(parsed.format, options)) {
+        return captureJsonCliOutput(options, command, (capturedOutput) =>
+            runCliCommandInternal(parsed.args, {
+                ...options,
+                ...capturedOutput,
+                json: false,
+            }),
+        );
+    }
+
+    return runCliCommandInternal(parsed.args, options);
+}
+
+async function runCliCommandInternal(
+    args: string[],
+    options: CliDispatcherOptions,
 ): Promise<number> {
     if (args.length === 0) {
         return 2;
@@ -200,6 +260,175 @@ export async function runCliCommand(
         `Unknown command: ${command}\n\n${getCliHelpText()}`,
     );
     return 2;
+}
+
+interface ParsedGlobalCliOptions {
+    args: string[];
+    format?: CliOutputFormat;
+    error?: string;
+}
+
+function parseGlobalCliOptions(args: string[]): ParsedGlobalCliOptions {
+    let format: CliOutputFormat | undefined;
+    const commandArgs: string[] = [];
+    for (let index = 0; index < args.length; index++) {
+        const arg = args[index];
+        if (arg === "--json") {
+            if (format === "text") {
+                return { args: commandArgs, format: "json", error: "Cannot combine --json and --text." };
+            }
+            format = "json";
+            continue;
+        }
+        if (arg === "--text") {
+            if (format === "json") {
+                return { args: commandArgs, format: "text", error: "Cannot combine --json and --text." };
+            }
+            format = "text";
+            continue;
+        }
+        if (arg === "--format") {
+            const rawFormat = args[++index];
+            if (rawFormat !== "json" && rawFormat !== "text") {
+                return {
+                    args: commandArgs,
+                    format,
+                    error: "--format must be one of: json, text",
+                };
+            }
+            if (format && format !== rawFormat) {
+                return { args: commandArgs, format, error: "Conflicting output format options." };
+            }
+            format = rawFormat;
+            continue;
+        }
+        commandArgs.push(arg);
+    }
+
+    if (format === "json" && commandArgs.length === 0) {
+        return {
+            args: commandArgs,
+            format,
+            error: "Usage: hce --json <command>\nRun 'hce --help' to see available commands.",
+        };
+    }
+
+    return { args: commandArgs, format };
+}
+
+function shouldUseJsonOutput(
+    parsedFormat: CliOutputFormat | undefined,
+    options: CliDispatcherOptions,
+): boolean {
+    if (parsedFormat !== undefined) {
+        return parsedFormat === "json";
+    }
+    if (options.format !== undefined && options.format !== "auto") {
+        return options.format === "json";
+    }
+    if (options.json === true) {
+        return true;
+    }
+
+    const configuredFormat = process.env.HCE_OUTPUT_FORMAT?.trim().toLowerCase();
+    if (configuredFormat === "json") {
+        return true;
+    }
+    if (configuredFormat === "text") {
+        return false;
+    }
+
+    // Tests and embedders that provide callbacks own the output channel.
+    // Direct CLI invocations use JSON whenever stdout is not an interactive TTY.
+    if (options.stdout || options.stderr) {
+        return false;
+    }
+    return process.stdout.isTTY !== true;
+}
+
+async function captureJsonCliOutput(
+    options: CliDispatcherOptions,
+    command: string,
+    callback: (output: {
+        stdout: (message: string) => void;
+        stderr: (message: string) => void;
+        setStructuredData: (data: unknown) => void;
+    }) => Promise<number>,
+): Promise<number> {
+    let stdout = "";
+    let stderr = "";
+    let data: unknown;
+    const outputCallbacks = {
+        stdout: (message: string) => {
+            stdout += message;
+        },
+        stderr: (message: string) => {
+            stderr += message;
+        },
+        setStructuredData: (structuredData: unknown) => {
+            data = structuredData;
+        },
+    };
+    let exitCode = 1;
+    try {
+        exitCode = await callbackWithCapturedOutput(
+            () => callback(outputCallbacks),
+            outputCallbacks,
+        );
+    } catch (error) {
+        stderr += `${formatErrorMessage(error)}\n`;
+    }
+
+    const payload: Record<string, unknown> = {
+        ok: exitCode === 0,
+        command,
+        exitCode,
+    };
+    if (stdout.length > 0) {
+        payload.output = stdout.trim();
+    }
+    if (data !== undefined) {
+        payload.data = data;
+    }
+    if (stderr.length > 0) {
+        payload.error = stderr.trim();
+    }
+    writeJsonPayload(options, payload);
+    return exitCode;
+}
+
+function writeJsonPayload(
+    options: CliDispatcherOptions,
+    payload: Record<string, unknown>,
+): void {
+    writeStdout(options, `${JSON.stringify(payload)}\n`);
+}
+
+async function callbackWithCapturedOutput(
+    callback: () => Promise<number>,
+    output: {
+        stdout: (message: string) => void;
+        stderr: (message: string) => void;
+    },
+): Promise<number> {
+    // The dispatcher passes output callbacks through its options object. Keep
+    // this helper small so command implementations remain unaware of JSON mode.
+    const originalStdout = process.stdout.write;
+    const originalStderr = process.stderr.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+        output.stdout(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+        return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+        output.stderr(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+        return true;
+    }) as typeof process.stderr.write;
+    try {
+        return await callback();
+    } finally {
+        process.stdout.write = originalStdout;
+        process.stderr.write = originalStderr;
+    }
 }
 
 async function runInitCommand(
@@ -429,19 +658,22 @@ function parsePathOnlyCommand(
 function parseSearchCommand(args: string[]): HandlerCommand {
     if (args.length === 0) {
         throw new CliUsageError(
-            "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code]",
+            "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code] [--continuation-token token]",
         );
     }
 
     const positional: string[] = [];
     let limit: number | undefined;
     let scope: CliSearchScope | undefined;
+    let continuationToken: string | undefined;
     for (let index = 0; index < args.length; index++) {
         const arg = args[index];
         if (arg === "--limit") {
             const rawLimit = args[++index];
             if (!rawLimit) {
-                throw new CliUsageError("Usage: hce search <query> [path] [--limit n] [--scope all|docs|code]");
+                throw new CliUsageError(
+                    "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code] [--continuation-token token]",
+                );
             }
             limit = Number(rawLimit);
             if (!Number.isFinite(limit) || limit <= 0 || !Number.isInteger(limit)) {
@@ -462,15 +694,25 @@ function parseSearchCommand(args: string[]): HandlerCommand {
             const mappedScope = mapLegacyTargetRoleToScope(rawRole);
             if (!mappedScope) {
                 throw new CliUsageError(
-                    "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code]",
+                    "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code] [--continuation-token token]",
                 );
             }
             scope = mappedScope;
             continue;
         }
+        if (arg === "--continuation-token") {
+            const token = args[++index];
+            if (!token) {
+                throw new CliUsageError(
+                    "--continuation-token must be a non-empty string",
+                );
+            }
+            continuationToken = token;
+            continue;
+        }
         if (arg.startsWith("--")) {
             throw new CliUsageError(
-                "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code]",
+                "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code] [--continuation-token token]",
             );
         }
         positional.push(arg);
@@ -478,7 +720,7 @@ function parseSearchCommand(args: string[]): HandlerCommand {
 
     if (positional.length < 1 || positional.length > 2) {
         throw new CliUsageError(
-            "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code]",
+            "Usage: hce search <query> [path] [--limit n] [--scope all|docs|code] [--continuation-token token]",
         );
     }
 
@@ -489,6 +731,7 @@ function parseSearchCommand(args: string[]): HandlerCommand {
             path: resolveCliPath(positional[1] ?? process.cwd()),
             ...(limit !== undefined ? { limit } : {}),
             ...(scope ? { scope } : {}),
+            ...(continuationToken ? { continuationToken } : {}),
         },
     };
 }
@@ -584,6 +827,9 @@ function writeHandlerResult(
     options: CliDispatcherOptions,
 ): number {
     const text = extractResultText(result);
+    if (result?.structuredContent !== undefined) {
+        options.setStructuredData?.(result.structuredContent);
+    }
     if (result?.isError) {
         writeStderr(options, `${text}\n`);
         return 1;
@@ -597,7 +843,7 @@ function extractResultText(result: any): string {
     const textParts = content
         .filter((item: any) => item?.type === "text" && typeof item.text === "string")
         .map((item: any) => item.text);
-    return textParts.length > 0 ? textParts.join("\n") : String(result ?? "");
+    return textParts.length > 0 ? textParts.join("\n").trim() : String(result ?? "");
 }
 
 function resolveCliPath(input: string): string {

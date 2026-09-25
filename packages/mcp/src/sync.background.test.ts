@@ -704,6 +704,47 @@ test("low-latency search sync queues due full scan for clean watcher state", asy
     });
 });
 
+test("low-latency search reuses a persisted recent full scan across CLI processes", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const initialSnapshot = new SnapshotManager();
+        initialSnapshot.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed",
+        });
+        initialSnapshot.markCodebaseFullScanCompleted(codebasePath);
+        initialSnapshot.saveCodebaseSnapshot();
+
+        const reloadedSnapshot = new SnapshotManager();
+        reloadedSnapshot.loadCodebaseSnapshot();
+        let reindexCalls = 0;
+        const context = {
+            reindexByChange: async () => {
+                reindexCalls += 1;
+                return { added: 0, removed: 0, modified: 0 };
+            },
+        } as any;
+        const syncManager = new SyncManager(context, reloadedSnapshot);
+        (syncManager as any).projectChangeTracker = {
+            watch: () => undefined,
+            getState: () => ({ kind: "clean" }),
+            markClean: () => undefined,
+            close: async () => undefined,
+        };
+
+        const stats = await syncManager.syncCodebaseForSearch(codebasePath, {
+            consistencyMode: "low_latency",
+        });
+
+        assert.equal(reindexCalls, 0);
+        assert.equal(stats.warning, undefined);
+        syncManager.stopBackgroundSync();
+    });
+});
+
 test("dirty project watcher state syncs targeted paths without metadata statistics scan", async () => {
     await withTempHome(async (tempRoot) => {
         const codebasePath = path.join(tempRoot, "repo");

@@ -118,6 +118,8 @@ test("continuation fetches accepted chunks by id without starting another semant
         const first = await handlers.handleSearchContext({ path: project, query: "candidate" });
         const token = first.structuredContent?.pagination?.continuationToken;
         assert.equal(typeof token, "string");
+        assert.doesNotMatch(first.content[0].text, /continuationToken=/);
+        assert.match(first.content[0].text, /More results are available/);
         assert.equal(semanticSearchCalls, 1);
 
         const mismatch = await handlers.handleSearchContext({
@@ -141,5 +143,6 @@ test("continuation fetches accepted chunks by id without starting another semant
         assert.equal(second.structuredContent?.pagination?.returnedCount, 3);
         assert.match(second.content[0].text, /candidate12/);
         assert.match(second.content[0].text, /candidate14/);
+        assert.doesNotMatch(second.content[0].text, /continuationToken=/);
     });
 });

@@ -3059,6 +3059,7 @@ export class ToolHandlers {
         } else {
             this.snapshotManager.clearCodebaseSyncWarning(absolutePath);
         }
+        this.snapshotManager.markCodebaseFullScanCompleted(absolutePath);
         await this.snapshotManager.saveCodebaseSnapshotAsync();
         this.trackIndexedCodebase(absolutePath);
 
@@ -3246,6 +3247,7 @@ export class ToolHandlers {
                 stats,
                 indexOptions,
             );
+            this.snapshotManager.markCodebaseFullScanCompleted(absolutePath);
             this.indexingStats = {
                 indexedFiles: stats.indexedFiles,
                 totalChunks: stats.totalChunks,
@@ -3377,6 +3379,7 @@ export class ToolHandlers {
                 stats,
                 indexOptions,
             );
+            this.snapshotManager.markCodebaseFullScanCompleted(absolutePath);
             this.indexingStats = {
                 indexedFiles: stats.indexedFiles,
                 totalChunks: stats.totalChunks,
@@ -3937,7 +3940,7 @@ export class ToolHandlers {
             if (pagination) {
                 resultMessage += `\n\nPagination: accepted=${pagination.acceptedCount}, returned=${pagination.returnedCount}, truncated=${pagination.truncated}`;
                 if (pagination.continuationToken) {
-                    resultMessage += `, continuationToken=${pagination.continuationToken}`;
+                    resultMessage += ". More results are available; use JSON output to retrieve the continuation token";
                 }
             }
 
@@ -4135,7 +4138,7 @@ export class ToolHandlers {
         return {
             content: [{
                 type: "text",
-                text: `${resultMessage}\n\nPagination: accepted=${pagination.acceptedCount}, returned=${pagination.returnedCount}, truncated=${pagination.truncated}${nextToken ? `, continuationToken=${nextToken}` : ""}`,
+                text: `${resultMessage}\n\nPagination: accepted=${pagination.acceptedCount}, returned=${pagination.returnedCount}, truncated=${pagination.truncated}${nextToken ? ". More results are available; use JSON output to retrieve the continuation token" : ""}`,
             }],
             structuredContent: { pagination },
         };
