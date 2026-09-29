@@ -546,9 +546,9 @@ Index management commands:
  hce list                 List collections in the configured database
  hce list <name|path>     Show details for one collection or repo path
  hce rm <name|path>       Delete one collection by collection name or repo path
- hce index                Sync or create the index for the current directory
+ hce index [--details]    Sync or create the index for the current directory
  hce index <name|path>    Sync or create by collection name or repo path
- hce index --all --force  Force rebuild all known repo indexes
+ hce index --all --force [--details]  Force rebuild all known repo indexes
 
 Configuration:
  Runtime configuration is read from both files, with project config overriding

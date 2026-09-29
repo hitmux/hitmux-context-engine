@@ -73,7 +73,7 @@ hitmux-context-engine --json search "handler that validates MCP tool arguments" 
 hitmux-context-engine status [path] [--refresh] [--details]
 hitmux-context-engine search <query> [path] [--limit n] [--scope all|docs|code] [--continuation-token token]
 hitmux-context-engine list [collection-name|repo-path]
-hitmux-context-engine index [path]
+hitmux-context-engine index [--details] [path]
 hitmux-context-engine doctor [--no-connectivity]
 ```
 
@@ -85,4 +85,5 @@ hitmux-context-engine doctor [--no-connectivity]
 - 不要为了普通搜索使用 `clear`、`rm` 或 `index --force`。这些命令会删除数据或重建索引，只有用户明确要求时才执行。
 - `hitmux-context-engine init` 会创建全局配置，并安装或更新 collection lease reaper user service；执行前确认这是期望的安装行为。
 - `status`、`search` 和 `index` 省略路径时默认当前工作目录；`clear` 和 `repair` 仍要求显式路径。Skill 应优先传入仓库根目录的绝对路径，避免在不同工作目录下命中错误的 collection。
+- `index` 默认只输出简略完成结果；需要索引阶段进度和统计时显式传入 `--details`。
 - 退出码 `0` 表示成功，`1` 表示运行或配置失败，`2` 表示参数错误。

@@ -39,9 +39,9 @@ hce
 | `hce config path` | 显示 global 和 project config paths，以及它们是否存在。 |
 | `hce doctor [--no-connectivity]` | 检查 Node、config parsing、runtime settings，并可选检查 embedding/vector database 连通性。 |
 | `hce test [embedding\|vectordb]` | 运行连通性检查。 |
-| `hce index [path]` | 同步或创建 index。当前仓库使用 `hce index .`。 |
-| `hce index --force [path]` | Force rebuild 一个 repository index。 |
-| `hce index --all --force` | Force rebuild all known repository indexes。没有 `--force` 的 `hce index --all` 会被拒绝。 |
+| `hce index [--details] [path]` | 同步或创建 index。默认输出简略完成结果；需要进度和统计时使用 `--details`。当前仓库使用 `hce index .`。 |
+| `hce index --force [--details] [path]` | Force rebuild 一个 repository index。 |
+| `hce index --all --force [--details]` | Force rebuild all known repository indexes。没有 `--force` 的 `hce index --all` 会被拒绝。 |
 | `hce status [path] [--refresh] [--details]` | 显示某个 path 的 indexing status，默认当前目录。 |
 | `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | 从 shell 搜索已索引 context。`scope` 默认 `all`；用 `docs` 或 `code` 缩小范围。 |
 | `hce list [collection-name\|repo-path]` | 列出 collections，或显示某个 collection/path 的详情。 |

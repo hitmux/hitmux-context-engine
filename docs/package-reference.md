@@ -50,9 +50,9 @@ All three published packages include the same Agent Skill. After a global instal
 | `hce repair <path>` | Repair a legacy or missing remote index manifest. |
 | `hce list [collection-name\|repo-path]` | List collections or show details for one collection/path. |
 | `hce rm <collection-name\|repo-path> [...]` | Delete one or more collections by collection name or repo path. |
-| `hce index [collection-name\|repo-path]` | Sync or create an index for the current directory, a path, or a matching collection. Recommended first command for a new repository. |
-| `hce index --force [collection-name\|repo-path ...]` | Force rebuild the current directory, one target, or multiple target repo indexes. |
-| `hce index --all --force` | Force rebuild all known repo indexes. `hce index --all` is rejected intentionally. |
+| `hce index [--details] [collection-name\|repo-path]` | Sync or create an index for the current directory, a path, or a matching collection. Default output is brief; `--details` includes indexing progress and statistics. |
+| `hce index --force [--details] [collection-name\|repo-path ...]` | Force rebuild the current directory, one target, or multiple target repo indexes. |
+| `hce index --all --force [--details]` | Force rebuild all known repo indexes. `hce index --all` is rejected intentionally. |
 
 ### MCP Tools
 

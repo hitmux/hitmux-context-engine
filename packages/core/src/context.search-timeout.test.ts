@@ -93,7 +93,7 @@ describe('Context semanticSearch timeout', () => {
                     },
                     score: 0.9,
                 }]);
-            }, 30);
+            }, 150);
         }));
         vectorDatabase.query.mockImplementation(async () => {
             lexicalQueryCount += 1;
@@ -102,14 +102,14 @@ describe('Context semanticSearch timeout', () => {
         const context = new Context({
             embedding: new TestEmbedding(),
             vectorDatabase,
-            searchTimeoutMs: 10,
+            searchTimeoutMs: 100,
             hybridMode: false,
         });
 
         await expect(context.semanticSearch('/repo', 'SomeSymbol'))
             .rejects
             .toThrow(/while running vector search/);
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, 180));
 
         expect(lexicalQueryCount).toBe(0);
     });

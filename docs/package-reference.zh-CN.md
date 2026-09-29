@@ -52,9 +52,9 @@ hce
 | `hce repair <path>` | 修复 legacy 或缺失的 remote index manifest。 |
 | `hce list [collection-name\|repo-path]` | 列出 collections 或显示某个 collection/path 的详情。 |
 | `hce rm <collection-name\|repo-path> [...]` | 按 collection name 或 repo path 删除一个或多个 collections。 |
-| `hce index [collection-name\|repo-path]` | 为当前目录、某个 path 或匹配 collection 同步或创建 index。新仓库推荐先运行这个命令。 |
-| `hce index --force [collection-name\|repo-path ...]` | 对当前目录、一个 target 或多个 target repo indexes 执行 force rebuild。 |
-| `hce index --all --force` | Force rebuild all known repo indexes。`hce index --all` 会被有意拒绝。 |
+| `hce index [--details] [collection-name\|repo-path]` | 为当前目录、某个 path 或匹配 collection 同步或创建 index。默认输出简略完成结果；`--details` 输出索引进度和统计。 |
+| `hce index --force [--details] [collection-name\|repo-path ...]` | 对当前目录、一个 target 或多个 target repo indexes 执行 force rebuild。 |
+| `hce index --all --force [--details]` | Force rebuild all known repo indexes。`hce index --all` 会被有意拒绝。 |
 
 ### MCP Tools
 

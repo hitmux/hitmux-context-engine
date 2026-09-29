@@ -62,6 +62,7 @@ interface CliManageCommand {
     targets?: string[];
     all?: boolean;
     force?: boolean;
+    details?: boolean;
 }
 
 export interface CliManageOptions {
@@ -102,20 +103,27 @@ export function parseCliManageCommand(args: string[]): CliManageCommand {
 
     const all = rest.includes("--all");
     const force = rest.includes("--force");
+    const details = rest.includes("--details");
     const unknownFlag = rest.find(
-        (arg) => arg.startsWith("--") && arg !== "--all" && arg !== "--force",
+        (arg) =>
+            arg.startsWith("--") &&
+            arg !== "--all" &&
+            arg !== "--force" &&
+            arg !== "--details",
     );
     if (unknownFlag) {
         throw new Error(getCliManageUsage());
     }
 
-    const targets = rest.filter((arg) => arg !== "--all" && arg !== "--force");
+    const targets = rest.filter(
+        (arg) => arg !== "--all" && arg !== "--force" && arg !== "--details",
+    );
     if (all && targets.length > 0) {
         throw new Error(getCliManageUsage());
     }
     if (all && !force) {
         throw new Error(
-            "Refusing to force rebuild all known repo indexes without explicit confirmation.\nUsage: hce index --all --force",
+            "Refusing to force rebuild all known repo indexes without explicit confirmation.\nUsage: hce index --all --force [--details]",
         );
     }
     if (!force && targets.length > 1) {
@@ -128,6 +136,7 @@ export function parseCliManageCommand(args: string[]): CliManageCommand {
         force,
         target: targets[0],
         targets: targets.length > 0 ? targets : undefined,
+        ...(details ? { details: true } : {}),
     };
 }
 
@@ -183,9 +192,9 @@ export function getCliManageUsage(): string {
         "Usage:",
         " hce list [collection-name|repo-path]",
         " hce rm <collection-name|repo-path> [...]",
-        " hce index [collection-name|repo-path]",
-        " hce index --force [collection-name|repo-path ...]",
-        " hce index --all --force",
+        " hce index [--details] [collection-name|repo-path]",
+        " hce index --force [--details] [collection-name|repo-path ...]",
+        " hce index --all --force [--details]",
     ].join("\n");
 }
 
@@ -360,8 +369,8 @@ async function indexCollections(
         const results: string[] = [];
         for (const targetPath of targets) {
             const result = command.all || command.force
-                ? await forceRebuildPath(targetPath, runtime, options)
-                : await syncOrCreatePath(targetPath, runtime, options);
+                ? await forceRebuildPath(targetPath, runtime, options, command.details === true)
+                : await syncOrCreatePath(targetPath, runtime, options, command.details === true);
             results.push(result);
         }
 
@@ -388,6 +397,7 @@ async function syncOrCreatePath(
     codebasePath: string,
     runtime: ReturnType<typeof createCliRuntime>,
     options: CliManageOptions,
+    details: boolean,
 ): Promise<string> {
     assertDirectory(codebasePath);
     const indexOptions = getCliIndexOptions(runtime.snapshotManager, codebasePath);
@@ -398,7 +408,7 @@ async function syncOrCreatePath(
     if (hasResumableFullIndex) {
         const stats = await runtime.context.indexCodebase(
             codebasePath,
-            (progress) => writeProgress(options, codebasePath, progress),
+            details ? (progress) => writeProgress(options, codebasePath, progress) : undefined,
             false,
             indexOptions.requestIgnorePatterns ?? [],
             indexOptions.requestCustomExtensions ?? [],
@@ -415,7 +425,11 @@ async function syncOrCreatePath(
         });
         runtime.snapshotManager.markCodebaseFullScanCompleted(codebasePath);
         await runtime.snapshotManager.saveCodebaseSnapshotAsync();
-        return `Resumed '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
+        return formatIndexResult(
+            "Resumed",
+            codebasePath,
+            details ? `Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.` : undefined,
+        );
     }
 
     const hasIndex = await runtime.context.hasIndex(codebasePath);
@@ -423,7 +437,7 @@ async function syncOrCreatePath(
     if (hasIndex) {
         const stats = await runtime.context.reindexByChange(
             codebasePath,
-            (progress) => writeProgress(options, codebasePath, progress),
+            details ? (progress) => writeProgress(options, codebasePath, progress) : undefined,
             indexOptions.requestIgnorePatterns ?? [],
             indexOptions.requestCustomExtensions ?? [],
             splitter,
@@ -453,12 +467,18 @@ async function syncOrCreatePath(
                 `Remote manifest missing for '${codebasePath}'. Snapshot counts were not refreshed; run repair_index_manifest for legacy collections.\n`,
             );
         }
-        return `Synced '${codebasePath}'. Changes: added=${stats.added}, removed=${stats.removed}, modified=${stats.modified}.`;
+        return formatIndexResult(
+            "Synced",
+            codebasePath,
+            details
+                ? `Changes: added=${stats.added}, removed=${stats.removed}, modified=${stats.modified}.`
+                : undefined,
+        );
     }
 
     const stats = await runtime.context.indexCodebase(
         codebasePath,
-        (progress) => writeProgress(options, codebasePath, progress),
+        details ? (progress) => writeProgress(options, codebasePath, progress) : undefined,
         false,
         indexOptions.requestIgnorePatterns ?? [],
         indexOptions.requestCustomExtensions ?? [],
@@ -475,20 +495,25 @@ async function syncOrCreatePath(
     });
     runtime.snapshotManager.markCodebaseFullScanCompleted(codebasePath);
     await runtime.snapshotManager.saveCodebaseSnapshotAsync();
-    return `Indexed '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
+    return formatIndexResult(
+        "Indexed",
+        codebasePath,
+        details ? `Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.` : undefined,
+    );
 }
 
 async function forceRebuildPath(
     codebasePath: string,
     runtime: ReturnType<typeof createCliRuntime>,
     options: CliManageOptions,
+    details: boolean,
 ): Promise<string> {
     assertDirectory(codebasePath);
     const indexOptions = getCliIndexOptions(runtime.snapshotManager, codebasePath);
     const splitterType = getCliSplitterType(codebasePath, indexOptions);
     const stats = await runtime.context.indexCodebase(
         codebasePath,
-        (progress) => writeProgress(options, codebasePath, progress),
+        details ? (progress) => writeProgress(options, codebasePath, progress) : undefined,
         true,
         indexOptions.requestIgnorePatterns ?? [],
         indexOptions.requestCustomExtensions ?? [],
@@ -505,7 +530,20 @@ async function forceRebuildPath(
     });
     runtime.snapshotManager.markCodebaseFullScanCompleted(codebasePath);
     await runtime.snapshotManager.saveCodebaseSnapshotAsync();
-    return `Rebuilt '${codebasePath}'. Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.`;
+    return formatIndexResult(
+        "Rebuilt",
+        codebasePath,
+        details ? `Chunks: ${stats.totalChunks}, files: ${stats.indexedFiles}.` : undefined,
+    );
+}
+
+function formatIndexResult(
+    action: "Indexed" | "Resumed" | "Synced" | "Rebuilt",
+    codebasePath: string,
+    details?: string,
+): string {
+    const result = `${action} '${codebasePath}'.`;
+    return details ? `${result} ${details}` : result;
 }
 
 function getCliIndexOptions(

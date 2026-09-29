@@ -129,6 +129,14 @@ class FakeContext {
         ...args: unknown[]
     ): Promise<{ indexedFiles: number; totalChunks: number; status: "completed" | "limit_reached" }> {
         this.indexCalls.push(args);
+        if (typeof args[1] === "function") {
+            (args[1] as (progress: { phase: string; current: number; total: number; percentage: number }) => void)({
+                phase: "Scanning files...",
+                current: 1,
+                total: 2,
+                percentage: 50,
+            });
+        }
         return { indexedFiles: 1, totalChunks: 1, status: "completed" };
     }
 
@@ -136,6 +144,14 @@ class FakeContext {
         ...args: unknown[]
     ): Promise<{ added: number; removed: number; modified: number }> {
         this.reindexCalls.push(args);
+        if (typeof args[1] === "function") {
+            (args[1] as (progress: { phase: string; current: number; total: number; percentage: number }) => void)({
+                phase: "Checking for file changes...",
+                current: 1,
+                total: 2,
+                percentage: 50,
+            });
+        }
         return { added: 1, removed: 2, modified: 3 };
     }
 }
@@ -560,6 +576,50 @@ test("runCliManageCommand index forwards abort signal to full indexing", async (
         assert.equal(exitCode, 0);
         assert.equal(context.indexCalls.length, 1);
         assert.equal(context.indexCalls[0][6], controller.signal);
+    } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+    }
+});
+
+test("runCliManageCommand index is brief by default and supports detailed progress", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "hce-cli-details-"));
+    const vectorDatabase = createFakeVectorDatabase({});
+    const context = new FakeContext(vectorDatabase, "hybrid_code_chunks_app", false);
+    const briefOutput: string[] = [];
+    const briefErrors: string[] = [];
+    const detailedOutput: string[] = [];
+    const detailedErrors: string[] = [];
+
+    try {
+        const briefExitCode = await runCliManageCommand(["index", tempDir], {
+            createConfig: () => fakeConfig,
+            createEmbedding: () => new FakeEmbedding(),
+            createVectorDatabase: () => vectorDatabase,
+            createContext: () => context as unknown as Context,
+            createSnapshotManager: () => new FakeSnapshotManager() as unknown as SnapshotManager,
+            acquireWriterLock: () => createFakeLock(),
+            stdout: (message) => briefOutput.push(message),
+            stderr: (message) => briefErrors.push(message),
+        });
+
+        const detailedExitCode = await runCliManageCommand(["index", "--details", tempDir], {
+            createConfig: () => fakeConfig,
+            createEmbedding: () => new FakeEmbedding(),
+            createVectorDatabase: () => vectorDatabase,
+            createContext: () => context as unknown as Context,
+            createSnapshotManager: () => new FakeSnapshotManager() as unknown as SnapshotManager,
+            acquireWriterLock: () => createFakeLock(),
+            stdout: (message) => detailedOutput.push(message),
+            stderr: (message) => detailedErrors.push(message),
+        });
+
+        assert.equal(briefExitCode, 0);
+        assert.equal(detailedExitCode, 0);
+        assert.match(briefOutput.join(""), new RegExp(`Indexed '${tempDir}'\\.`));
+        assert.doesNotMatch(briefOutput.join(""), /Chunks:|files:/);
+        assert.equal(briefErrors.join(""), "");
+        assert.match(detailedOutput.join(""), /Chunks: 1, files: 1\./);
+        assert.match(detailedErrors.join(""), /\[INDEX\].*Scanning files.*50\.0%/);
     } finally {
         rmSync(tempDir, { recursive: true, force: true });
     }

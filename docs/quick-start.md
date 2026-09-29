@@ -41,9 +41,9 @@ CLI output adapts to the environment: interactive TTYs receive readable text, wh
 | `hce config path` | Show global and project config paths and whether they exist. |
 | `hce doctor [--no-connectivity]` | Check Node, config parsing, runtime settings, and optionally embedding/vector database connectivity. |
 | `hce test [embedding\|vectordb]` | Run connectivity checks. |
-| `hce index [path]` | Sync or create an index. Use `hce index .` for the current repository. |
-| `hce index --force [path]` | Force rebuild one repository index. |
-| `hce index --all --force` | Force rebuild all known repository indexes. `hce index --all` without `--force` is rejected. |
+| `hce index [--details] [path]` | Sync or create an index. Output is brief by default; use `--details` for indexing progress and statistics. Use `hce index .` for the current repository. |
+| `hce index --force [--details] [path]` | Force rebuild one repository index. |
+| `hce index --all --force [--details]` | Force rebuild all known repository indexes. `hce index --all` without `--force` is rejected. |
 | `hce status [path] [--refresh] [--details]` | Show indexing status for a path, defaulting to the current directory. |
 | `hce search <query> [path] [--limit n] [--scope all\|docs\|code] [--continuation-token token]` | Search indexed context from the shell. `scope` defaults to `all`; use `docs` or `code` to narrow results. Reuse a returned `data.pagination.continuationToken` with the unchanged query, path, and scope for the next page. |
 | `hce list [collection-name\|repo-path]` | List collections or show details for one collection/path. |
