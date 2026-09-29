@@ -1342,11 +1342,7 @@ export class Context {
         options: SemanticSearchOptions = {}
     ): Promise<SemanticSearchResult[]> {
         const deadlineMs = Date.now() + this.searchTimeoutMs;
-        return this.withSearchTimeout(
-            this.performSemanticSearch(codebasePath, query, topK, threshold, filterExpr, options, deadlineMs),
-            codebasePath,
-            query
-        );
+        return this.performSemanticSearch(codebasePath, query, topK, threshold, filterExpr, options, deadlineMs);
     }
 
     /**
