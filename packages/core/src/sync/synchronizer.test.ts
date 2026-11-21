@@ -114,8 +114,8 @@ describe('FileSynchronizer snapshot safety', () => {
         const fileHashes = await (synchronizer as any).generateFileHashes(project) as Map<string, string>;
 
         expect(fileHashes.has('root.ts')).toBe(true);
-        expect(fileHashes.has(path.join('src', 'child.ts'))).toBe(true);
-        expect(fileHashes.has(path.join('src', 'nested', 'deep.ts'))).toBe(false);
+        expect(fileHashes.has('src/child.ts')).toBe(true);
+        expect(fileHashes.has('src/nested/deep.ts')).toBe(false);
     });
 
     it.each(['readdir', 'stat', 'readFile'] as const)('does not treat %s failures as removed files', async (operation) => {

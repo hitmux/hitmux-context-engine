@@ -33,11 +33,10 @@ export interface FileSynchronizerOptions {
 
 export interface CheckForChangesOptions {
     deferSnapshotUpdate?: boolean;
+    recoverPendingIndexChanges?: boolean;
 }
 
-export interface CheckChangedPathsOptions {
-    deferSnapshotUpdate?: boolean;
-}
+export type CheckChangedPathsOptions = CheckForChangesOptions;
 
 export interface InitializeOptions {
     createSnapshotIfMissing?: boolean;
@@ -158,18 +157,21 @@ export class FileSynchronizer {
         this.currentScanMetrics!.directoriesRead += 1;
 
         for (const entry of entries) {
+            if (!entry.isFile() && !entry.isDirectory()) {
+                continue;
+            }
             const fullPath = path.join(dir, entry.name);
-            const relativePath = path.relative(this.rootDir, fullPath);
+            const relativePath = path.relative(this.rootDir, fullPath).split(path.sep).join('/');
 
             // Check if this path should be ignored BEFORE any file system operations
             if (this.shouldIgnore(relativePath, entry.isDirectory())) {
                 continue; // Skip completely - no access at all
             }
 
-            // Double-check with fs.stat to be absolutely sure about file type
+            // Recheck the entry without following links if its type changed.
             let stat;
             try {
-                stat = await fs.stat(fullPath);
+                stat = await fs.lstat(fullPath);
             } catch (error: any) {
                 this.currentScanMetrics!.statErrors += 1;
                 throw new Error(`Cannot stat ${fullPath}: ${error.message}`);
@@ -214,7 +216,6 @@ export class FileSynchronizer {
                     }
                 }
             }
-            // Skip other types (symlinks, etc.)
         }
         return fileHashes;
     }
@@ -300,6 +301,7 @@ export class FileSynchronizer {
     public async checkForChanges(options: CheckForChangesOptions = {}): Promise<{ added: string[], removed: string[], modified: string[] }> {
         console.log('[Synchronizer] Checking for file changes...');
 
+        const pendingIndexPaths = await this.readPendingIndexPaths(options);
         const scanStartMs = Date.now();
         const newFileHashes = await this.generateFileHashes(this.rootDir);
         const scanElapsedMs = Date.now() - scanStartMs;
@@ -322,10 +324,9 @@ export class FileSynchronizer {
         const compareElapsedMs = Date.now() - compareStartMs;
         console.log(`[Synchronizer] Full scan comparison completed in ${compareElapsedMs}ms.`);
 
-        // If there are any changes in the DAG, do a file-level comparison
-        if (changes.added.length > 0 || changes.removed.length > 0) {
-            console.log('[Synchronizer] Merkle DAG has changed. Comparing file states...');
-            const fileChanges = this.compareStates(this.fileHashes, newFileHashes);
+        // Pending writes require a file-level comparison even when the DAG matches.
+        if (changes.added.length > 0 || changes.removed.length > 0 || pendingIndexPaths.size > 0) {
+            const fileChanges = this.compareStates(this.fileHashes, newFileHashes, pendingIndexPaths);
 
             if (options.deferSnapshotUpdate) {
                 this.pendingSnapshotUpdate = {
@@ -357,8 +358,9 @@ export class FileSynchronizer {
     }
 
     public async checkChangedPaths(relativePaths: string[], options: CheckChangedPathsOptions = {}): Promise<{ added: string[], removed: string[], modified: string[] }> {
-        const normalizedPaths = this.normalizeChangedPaths(relativePaths);
-        console.log(`[Synchronizer] Checking ${normalizedPaths.length} targeted path changes...`);
+        const pendingIndexPaths = await this.readPendingIndexPaths(options);
+        const normalizedPaths = new Set([...this.normalizeChangedPaths(relativePaths), ...pendingIndexPaths]);
+        console.log(`[Synchronizer] Checking ${normalizedPaths.size} targeted path changes...`);
 
         const nextFileHashes = new Map(this.fileHashes);
         const nextFileStates = new Map(this.fileStates);
@@ -371,7 +373,7 @@ export class FileSynchronizer {
             const nextState = await this.readCurrentPathState(relativePath);
 
             if (!nextState) {
-                if (oldHash !== undefined) {
+                if (oldHash !== undefined || pendingIndexPaths.has(relativePath)) {
                     nextFileHashes.delete(relativePath);
                     nextFileStates.delete(relativePath);
                     removed.push(relativePath);
@@ -384,7 +386,7 @@ export class FileSynchronizer {
 
             if (oldHash === undefined) {
                 added.push(relativePath);
-            } else if (oldHash !== nextState.hash) {
+            } else if (oldHash !== nextState.hash || pendingIndexPaths.has(relativePath)) {
                 modified.push(relativePath);
             } else {
                 const oldState = this.fileStates.get(relativePath);
@@ -436,6 +438,33 @@ export class FileSynchronizer {
 
     public discardPendingChanges(): void {
         this.pendingSnapshotUpdate = null;
+    }
+
+    public async recordPendingIndexPaths(relativePaths: string[]): Promise<void> {
+        await this.writeAtomically(`${this.snapshotPath}.pending-index`, JSON.stringify(relativePaths));
+    }
+
+    public async clearPendingIndexPaths(): Promise<void> {
+        await fs.rm(`${this.snapshotPath}.pending-index`, { force: true });
+    }
+
+    private async readPendingIndexPaths(options: CheckForChangesOptions): Promise<Set<string>> {
+        if (!options.recoverPendingIndexChanges) {
+            return new Set();
+        }
+        try {
+            const data = await fs.readFile(`${this.snapshotPath}.pending-index`, 'utf-8');
+            const paths: unknown = JSON.parse(data);
+            if (!Array.isArray(paths) || !paths.every(file => typeof file === 'string')) {
+                throw new Error('Invalid pending incremental index paths');
+            }
+            return new Set(paths);
+        } catch (error: any) {
+            if (error.code === 'ENOENT') {
+                return new Set();
+            }
+            throw error;
+        }
     }
 
     public getPendingEffectiveLineIncrease(added: string[], modified: string[]): PendingEffectiveLineIncrease {
@@ -498,7 +527,7 @@ export class FileSynchronizer {
         return true;
     }
 
-    private compareStates(oldHashes: Map<string, string>, newHashes: Map<string, string>): { added: string[], removed: string[], modified: string[] } {
+    private compareStates(oldHashes: Map<string, string>, newHashes: Map<string, string>, pendingIndexPaths: ReadonlySet<string>): { added: string[], removed: string[], modified: string[] } {
         const added: string[] = [];
         const removed: string[] = [];
         const modified: string[] = [];
@@ -508,7 +537,7 @@ export class FileSynchronizer {
             const [file, hash] = newEntries[i];
             if (!oldHashes.has(file)) {
                 added.push(file);
-            } else if (oldHashes.get(file) !== hash) {
+            } else if (oldHashes.get(file) !== hash || pendingIndexPaths.has(file)) {
                 modified.push(file);
             }
         }
@@ -517,6 +546,12 @@ export class FileSynchronizer {
         for (let i = 0; i < oldKeys.length; i++) {
             const file = oldKeys[i];
             if (!newHashes.has(file)) {
+                removed.push(file);
+            }
+        }
+
+        for (const file of pendingIndexPaths) {
+            if (!oldHashes.has(file) && !newHashes.has(file)) {
                 removed.push(file);
             }
         }
@@ -566,7 +601,7 @@ export class FileSynchronizer {
 
         let stat;
         try {
-            stat = await fs.stat(fullPath);
+            stat = await fs.lstat(fullPath);
         } catch (error: any) {
             if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
                 return null;
@@ -607,7 +642,7 @@ export class FileSynchronizer {
     }
 
     public getFileHash(filePath: string): string | undefined {
-        return this.fileHashes.get(filePath);
+        return this.fileHashes.get(filePath.split(path.sep).join('/'));
     }
 
     public getTrackedFileCount(): number {
@@ -619,9 +654,6 @@ export class FileSynchronizer {
         fileStates: this.fileStates,
         merkleDAG: this.merkleDAG
     }): Promise<void> {
-        const merkleDir = path.dirname(this.snapshotPath);
-        await fs.mkdir(merkleDir, { recursive: true });
-
         // Convert Map to array without using iterator
         const fileHashesArray: [string, string][] = [];
         const keys = Array.from(snapshot.fileHashes.keys());
@@ -637,15 +669,20 @@ export class FileSynchronizer {
             fileStates: fileStatesArray,
             merkleDAG: snapshot.merkleDAG.serialize()
         });
-        const tempPath = `${this.snapshotPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+        await this.writeAtomically(this.snapshotPath, data);
+        console.log(`Saved snapshot to ${this.snapshotPath}`);
+    }
+
+    private async writeAtomically(destination: string, data: string): Promise<void> {
+        await fs.mkdir(path.dirname(destination), { recursive: true });
+        const tempPath = `${destination}.tmp-${process.pid}-${crypto.randomUUID()}`;
         try {
             await fs.writeFile(tempPath, data, 'utf-8');
-            await fs.rename(tempPath, this.snapshotPath);
+            await fs.rename(tempPath, destination);
         } catch (error) {
             await fs.rm(tempPath, { force: true }).catch(() => undefined);
             throw error;
         }
-        console.log(`Saved snapshot to ${this.snapshotPath}`);
     }
 
     private assertSnapshotSizeWithinLimit(fileHashesArray: [string, string][], merkleDAG = this.merkleDAG): void {
@@ -710,15 +747,15 @@ export class FileSynchronizer {
             // Reconstruct Map without using constructor with iterator
             this.fileHashes = new Map();
             for (const [key, value] of obj.fileHashes) {
-                this.fileHashes.set(key, value);
+                this.fileHashes.set(key.split(path.sep).join('/'), value);
             }
             this.fileStates = new Map();
             if (Array.isArray(obj.fileStates)) {
                 for (const [key, value] of obj.fileStates) {
-                    this.fileStates.set(key, value);
+                    this.fileStates.set(key.split(path.sep).join('/'), value);
                 }
             } else {
-                for (const [key, value] of obj.fileHashes) {
+                for (const [key, value] of this.fileHashes) {
                     this.fileStates.set(key, { hash: value });
                 }
             }
@@ -758,6 +795,7 @@ export class FileSynchronizer {
         const hash = crypto.createHash('md5').update(normalizedPath).digest('hex');
         const snapshotPath = path.join(merkleDir, `${hash}.json`);
 
+        await fs.rm(`${snapshotPath}.pending-index`, { force: true });
         try {
             await fs.unlink(snapshotPath);
             console.log(`Deleted snapshot file: ${snapshotPath}`);

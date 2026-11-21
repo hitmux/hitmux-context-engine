@@ -232,6 +232,42 @@ describe('Context indexing consistency', () => {
             .toEqual(['export const finalAttempt = true;']);
     });
 
+    it.each(['targeted', 'full scan'])('recovers files restored to the snapshot after a partial write (%s)', async (retryMode) => {
+        const { context, project, documents, finalize } = await createFixture();
+        const original = 'export const value = 1;';
+        const added = 'src/added.ts';
+        await fs.mkdir(path.join(project, 'src'));
+        await fs.writeFile(path.join(project, added), 'export const extra = true;');
+        await fs.writeFile(path.join(project, 'index.ts'), 'export const changed = true;');
+        finalize.mockRejectedValueOnce(new Error('failed after writing vectors'));
+
+        await expect(context.reindexChangedPaths(project, [added, 'index.ts'])).rejects.toThrow('failed after writing vectors');
+        expect(documents.size).toBe(3);
+        await fs.rm(path.join(project, added));
+        await fs.writeFile(path.join(project, 'index.ts'), original);
+
+        const retry = retryMode === 'targeted'
+            ? () => context.reindexChangedPaths(project, [])
+            : () => context.reindexByChange(project);
+        await expect(retry()).resolves.toEqual({ added: 0, removed: 1, modified: 1 });
+        expect([...documents.values()].map(document => document.content)).toEqual([original]);
+        await expect(retry()).resolves.toEqual({ added: 0, removed: 0, modified: 0 });
+    });
+
+    const symlinkTest = process.platform === 'win32' ? it.skip : it;
+    symlinkTest('indexes regular sources alongside dangling and valid symlinks', async () => {
+        const { context, project, documents } = await createFixture({ index: false });
+        await fs.symlink('absent-target', path.join(project, 'dangling.ts'));
+        await fs.symlink('index.ts', path.join(project, 'alias.ts'));
+
+        await expect(context.indexCodebase(project)).resolves.toMatchObject({ indexedFiles: 1, status: 'completed' });
+        await expect(context.reindexByChange(project)).resolves.toEqual({ added: 0, removed: 0, modified: 0 });
+        await expect(context.reindexChangedPaths(project, ['dangling.ts', 'alias.ts'])).resolves.toEqual({
+            added: 0, removed: 0, modified: 0,
+        });
+        expect([...documents.values()].map(document => document.relativePath)).toEqual(['index.ts']);
+    });
+
     it('leaves the snapshot pending when stale-chunk deletion fails and converges on retry', async () => {
         const { context, project, documents, vectorDatabase } = await createFixture();
         await fs.writeFile(path.join(project, 'index.ts'), 'export const value = 2;');

@@ -1078,6 +1078,7 @@ export class Context {
 
     private async commitFullIndexBaseline(codebasePath: string, synchronizer: FileSynchronizer): Promise<void> {
         await synchronizer.commitPendingChanges();
+        await synchronizer.clearPendingIndexPaths();
         this.synchronizers.set(this.getCollectionName(codebasePath), synchronizer);
     }
 
@@ -1105,12 +1106,15 @@ export class Context {
 
 
         progressCallback?.({ phase: 'Checking for file changes...', current: 0, total: 100, percentage: 0 });
-        const { added, removed, modified } = await currentSynchronizer.checkForChanges({ deferSnapshotUpdate: true });
+        const changes = await currentSynchronizer.checkForChanges({
+            deferSnapshotUpdate: true,
+            recoverPendingIndexChanges: true
+        });
         return this.applyIncrementalChanges(
             codebasePath,
             collectionName,
             currentSynchronizer,
-            { added, removed, modified },
+            changes,
             splitter,
             progressCallback,
             options
@@ -1139,7 +1143,10 @@ export class Context {
         this.synchronizers.set(collectionName, currentSynchronizer);
 
         progressCallback?.({ phase: 'Checking targeted file changes...', current: 0, total: 100, percentage: 0 });
-        const changes = await currentSynchronizer.checkChangedPaths(relativePaths, { deferSnapshotUpdate: true });
+        const changes = await currentSynchronizer.checkChangedPaths(relativePaths, {
+            deferSnapshotUpdate: true,
+            recoverPendingIndexChanges: true
+        });
         return this.applyIncrementalChanges(
             codebasePath,
             collectionName,
@@ -1231,6 +1238,9 @@ export class Context {
             emitProgress(phase, completedWorkWeight);
         };
 
+        const changedPaths = [...removed, ...added, ...modified];
+        // Keep these paths recoverable even if the working tree returns to the saved snapshot.
+        await currentSynchronizer.recordPendingIndexPaths(changedPaths);
         const retainedChunkIds = new Set<string>();
         if (filesToIndex.length > 0) {
             const result = await this.processFileList(
@@ -1265,7 +1275,7 @@ export class Context {
         }
 
         // New writes are finalized before removing old chunks, including leftovers from failed attempts.
-        for (const file of [...removed, ...added, ...modified]) {
+        for (const file of changedPaths) {
             this.throwIfIndexAborted(options.abortSignal);
             await this.deleteFileChunks(collectionName, file, retainedChunkIds);
             completeDeletionWork(`Removed stale chunks for ${file}`);
@@ -1275,6 +1285,7 @@ export class Context {
         await this.finalizeVectorCollectionWrites(codebasePath);
         this.throwIfIndexAborted(options.abortSignal);
         await currentSynchronizer.commitPendingChanges();
+        await currentSynchronizer.clearPendingIndexPaths();
         await this.refreshRemoteIndexManifestFromSynchronizer(
             codebasePath,
             collectionName,
